@@ -38,7 +38,16 @@ cat > "$MOCK_BIN/lsof" <<'EOF'
 #!/bin/sh
 case " $* " in
     *" -t "*) exit 1 ;;
-    *) exit 0 ;;
+    *)
+        if [ "${HERDR_TEST_LSOF_FAIL_ONCE:-0}" = "1" ]; then
+            marker="${HERDR_TEST_CALLS}.lsof-retried"
+            if [ ! -e "$marker" ]; then
+                : > "$marker"
+                exit 1
+            fi
+        fi
+        exit 0
+        ;;
 esac
 EOF
 
@@ -59,6 +68,8 @@ EOF
 cat > "$MOCK_BIN/curl" <<'EOF'
 #!/bin/sh
 url=""
+config="$(cat)"
+url="$(printf '%s\n' "$config" | sed -n 's/^url = "\(.*\)"$/\1/p' | head -1)"
 for arg in "$@"; do
     case "$arg" in
         https://api.telegram.org/*) url="$arg" ;;
@@ -69,7 +80,9 @@ case "$url" in
         printf '%s\n' '{"ok":true,"result":{"id":42,"username":"installer_test_bot"}}'
         ;;
     */getUpdates)
-        printf '%s\n' '{"ok":true,"result":[{"update_id":1,"message":{"chat":{"id":123456,"type":"private","first_name":"Installer"}}}]}'
+        pairing_code="${HERDR_TG_PAIRING_CODE:-}"
+        [ "${HERDR_TEST_WRONG_PAIRING:-0}" = "1" ] && pairing_code="wrong-code"
+        printf '%s\n' "{\"ok\":true,\"result\":[{\"update_id\":1,\"message\":{\"from\":{\"id\":123456,\"first_name\":\"Installer\"},\"chat\":{\"id\":123456,\"type\":\"private\",\"first_name\":\"Installer\"},\"text\":\"/start $pairing_code\"}}]}"
         ;;
     */sendMessage)
         printf '%s\n' '{"ok":true,"result":{"message_id":1}}'
@@ -100,6 +113,23 @@ run_install() {
         bash "$ROOT/relay/install-service.sh"
 }
 
+run_telegram_only_install() {
+    local os="$1"
+    local home="$2"
+    local input="$3"
+    mkdir -p "$home"
+    printf '%s' "$input" | env \
+        HOME="$home" \
+        PATH="$MOCK_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
+        HERDR_TEST_CALLS="$CALLS" \
+        HERDR_INSTALL_OS="$os" \
+        HERDR_INSTALL_SKIP_WEBSOCKET_SMOKE=1 \
+        HERDR_INSTALL_SETTLE_SECONDS=0 \
+        HERDR_INSTALL_SERVICE_DELAY=0 \
+        HERDR_TEST_PGREP="${HERDR_TEST_PGREP:-0}" \
+        bash "$ROOT/relay/install-service.sh" --telegram-only
+}
+
 run_uninstall() {
     local os="$1"
     local home="$2"
@@ -125,7 +155,7 @@ assert_not_contains() {
 }
 
 MAC_HOME="$TMP/mac-home"
-run_install macos "$MAC_HOME" $'yy123456:ABC_def\n\nyn' > "$TMP/mac-new.log" || {
+run_install macos "$MAC_HOME" $'y123456:ABC_def\n\nyn' > "$TMP/mac-new.log" || {
     cat "$TMP/mac-new.log"
     exit 1
 }
@@ -137,6 +167,12 @@ assert_contains "$MAC_HOME/Library/LaunchAgents/com.herdr-remote.relay.plist" 's
 assert_not_contains "$MAC_HOME/Library/LaunchAgents/com.herdr-remote.telegram.plist" '123456:ABC_def'
 python3 -c 'import os, stat, sys; mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode); raise SystemExit(0 if mode == 0o600 else 1)' "$MAC_HOME/.config/herdr-remote/secrets.env"
 assert_contains "$TMP/mac-new.log" 'Telegram bot verified as @installer_test_bot'
+assert_contains "$MAC_HOME/.config/herdr-remote/secrets.env" 'HERDR_TG_USER_ID=123456'
+assert_contains "$MAC_HOME/.config/herdr-remote/config.env" 'HERDR_RELAY_HOST=127.0.0.1'
+assert_contains "$MAC_HOME/.config/herdr-remote/config.env" 'HERDR_ALLOW_REMOTE_BIND=0'
+assert_contains "$MAC_HOME/.config/herdr-remote/config.env" "HERDR_WORKSPACE_ROOTS=$MAC_HOME/Workspace"
+assert_contains "$MAC_HOME/.config/herdr-remote/config.env" 'HERDR_TG_READ_LINES=60'
+assert_contains "$MAC_HOME/.config/herdr-remote/config.env" 'HERDR_TG_OUTPUT_MAX_CHARS=12000'
 
 run_install macos "$MAC_HOME" 'yyyyn' > "$TMP/mac-retain.log" || {
     cat "$TMP/mac-retain.log"
@@ -165,14 +201,14 @@ run_install macos "$MAC_HOME" 'nn' > "$TMP/mac-still-disabled.log" || {
 }
 
 SKIP_HOME="$TMP/skip-home"
-run_install macos "$SKIP_HOME" 'ynn' > "$TMP/skip.log"
+run_install macos "$SKIP_HOME" 'nn' > "$TMP/skip.log"
 [ ! -f "$SKIP_HOME/Library/LaunchAgents/com.herdr-remote.telegram.plist" ] || {
     echo "Telegram LaunchAgent created for skipped setup" >&2
     exit 1
 }
 
 LINUX_HOME="$TMP/linux-home"
-run_install linux "$LINUX_HOME" $'yy123456:ABC_def\n\nyn' > "$TMP/linux.log"
+run_install linux "$LINUX_HOME" $'y123456:ABC_def\n\nyn' > "$TMP/linux.log"
 assert_file "$LINUX_HOME/.config/systemd/user/herdr-relay.service"
 assert_file "$LINUX_HOME/.config/systemd/user/herdr-telegram.service"
 assert_contains "$LINUX_HOME/.config/systemd/user/herdr-relay.service" 'EnvironmentFile='
@@ -192,14 +228,14 @@ assert_file "$LINUX_HOME/.config/herdr-remote/secrets.env"
 assert_contains "$TMP/linux-uninstall.log" 'Configuration and secrets preserved'
 
 CONFLICT_HOME="$TMP/conflict-home"
-if HERDR_TEST_PGREP=1 run_install macos "$CONFLICT_HOME" $'yy123456:ABC_def\n\nyn' > "$TMP/conflict.log" 2>&1; then
+if HERDR_TEST_PGREP=1 run_install macos "$CONFLICT_HOME" $'y123456:ABC_def\n\nyn' > "$TMP/conflict.log" 2>&1; then
     echo "duplicate Telegram poller unexpectedly succeeded" >&2
     exit 1
 fi
 assert_contains "$TMP/conflict.log" 'Another Telegram bot process is already running'
 
 INVALID_HOME="$TMP/invalid-home"
-if run_install linux "$INVALID_HOME" $'yybad-token\n' > "$TMP/invalid.log" 2>&1; then
+if run_install linux "$INVALID_HOME" $'ybad-token\n' > "$TMP/invalid.log" 2>&1; then
     echo "invalid Telegram token unexpectedly succeeded" >&2
     exit 1
 fi
@@ -208,6 +244,27 @@ assert_contains "$TMP/invalid.log" 'Invalid BotFather token format'
     echo "invalid credentials were persisted" >&2
     exit 1
 }
+
+TELEGRAM_ONLY_HOME="$TMP/telegram-only-home"
+run_telegram_only_install linux "$TELEGRAM_ONLY_HOME" $'123456:ABC_def\n\ny' > "$TMP/telegram-only.log"
+assert_file "$TELEGRAM_ONLY_HOME/.config/systemd/user/herdr-telegram.service"
+assert_contains "$TMP/telegram-only.log" 'Disabled in telegram-only mode'
+assert_contains "$TMP/telegram-only.log" 'Telegram service is required in telegram-only mode'
+
+RETRY_HOME="$TMP/retry-home"
+HERDR_TEST_LSOF_FAIL_ONCE=1 \
+HERDR_INSTALL_SMOKE_TIMEOUT_SECONDS=2 \
+run_telegram_only_install linux "$RETRY_HOME" $'123456:ABC_def\n\ny' > "$TMP/retry.log"
+assert_contains "$TMP/retry.log" 'Relay became ready after 1 additional second(s)'
+assert_not_contains "$TMP/telegram-only.log" 'Install cloudflared?'
+assert_contains "$TELEGRAM_ONLY_HOME/.config/herdr-remote/secrets.env" 'HERDR_TG_USER_ID=123456'
+
+WRONG_PAIRING_HOME="$TMP/wrong-pairing-home"
+if HERDR_TEST_WRONG_PAIRING=1 run_telegram_only_install linux "$WRONG_PAIRING_HOME" $'123456:ABC_def\n\n' > "$TMP/wrong-pairing.log" 2>&1; then
+    echo "telegram-only installer accepted an incorrect pairing code" >&2
+    exit 1
+fi
+assert_contains "$TMP/wrong-pairing.log" 'No private chat sent the current one-time pairing code'
 
 assert_contains "$MAC_HOME/.config/herdr-remote/secrets.env" 'HERDR_RELAY_TOKEN='
 assert_contains "$TMP/calls.log" 'launchctl bootstrap'

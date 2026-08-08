@@ -35,6 +35,31 @@ def make_agents(count, *, status="idle", project="project"):
     ]
 
 
+def make_directory_listing(path="/home/wbr/Workspace/others", *, can_start_agent=False):
+    return {
+        "type": "directory_listing",
+        "path": path,
+        "display_path": path.replace("/home/wbr", "~"),
+        "parent": "/home/wbr/Workspace" if path else None,
+        "entries": [
+            {
+                "name": "herdr-remote",
+                "path": f"{path}/herdr-remote",
+                "display_path": "~/Workspace/others/herdr-remote",
+                "is_repo": True,
+            },
+            {
+                "name": "notes",
+                "path": f"{path}/notes",
+                "display_path": "~/Workspace/others/notes",
+                "is_repo": False,
+            },
+        ],
+        "can_start_agent": can_start_agent,
+        "truncated": False,
+    }
+
+
 class FakeMessage:
     def __init__(self, chat_id=42, chat_type="private", message_id=10):
         self.replies = []
@@ -101,12 +126,13 @@ class FakeRelayConnection:
         return empty_messages()
 
 
-def make_update(chat_id=42, chat_type="private", callback=None, message=None):
+def make_update(chat_id=42, chat_type="private", user_id=42, callback=None, message=None):
     if callback is not None:
         callback.message.chat_id = chat_id
         callback.message.chat = SimpleNamespace(id=chat_id, type=chat_type)
     return SimpleNamespace(
         effective_chat=SimpleNamespace(id=chat_id, type=chat_type),
+        effective_user=SimpleNamespace(id=user_id),
         message=message or FakeMessage(chat_id, chat_type),
         callback_query=callback,
     )
@@ -122,19 +148,34 @@ def make_active_approval_keyboard(pane_id, options):
 class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.old_chat_id = tg.CHAT_ID
+        self.old_user_id = tg.USER_ID
+        self.old_require_private_chat = tg.REQUIRE_PRIVATE_CHAT
+        self.old_allow_persistent_trust = tg.ALLOW_PERSISTENT_TRUST
         tg.CHAT_ID = "42"
+        tg.USER_ID = "42"
+        tg.REQUIRE_PRIVATE_CHAT = True
+        tg.ALLOW_PERSISTENT_TRUST = True
         tg.agents = []
         tg.relay_connected = False
         tg.pending.clear()
+        tg.selected_workspace_dirs.clear()
+        tg.directory_path_tokens.clear()
         tg.approval_tokens.clear()
+        tg.approval_trust_keys.clear()
         tg.prev_statuses.clear()
         tg.daily_stats.clear()
 
     def tearDown(self):
         tg.CHAT_ID = self.old_chat_id
+        tg.USER_ID = self.old_user_id
+        tg.REQUIRE_PRIVATE_CHAT = self.old_require_private_chat
+        tg.ALLOW_PERSISTENT_TRUST = self.old_allow_persistent_trust
         tg.agents = []
         tg.relay_connected = False
+        tg.selected_workspace_dirs.clear()
+        tg.directory_path_tokens.clear()
         tg.approval_tokens.clear()
+        tg.approval_trust_keys.clear()
         tg.prev_statuses.clear()
         tg.daily_stats.clear()
 
@@ -145,24 +186,125 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(update.message.replies, [])
 
-    async def test_start_preserves_chat_discovery_mode(self):
+    async def test_start_fails_closed_without_authorized_identity(self):
         tg.CHAT_ID = ""
         update = make_update(chat_id=-123)
 
         await tg.cmd_start(update, SimpleNamespace(args=[]))
 
-        self.assertIn("Chat ID: -123", update.message.replies[0][0])
+        self.assertEqual(update.message.replies, [])
+
+    async def test_start_rejects_unauthorized_user_in_authorized_chat(self):
+        update = make_update(user_id=7)
+
+        await tg.cmd_start(update, SimpleNamespace(args=[]))
+
+        self.assertEqual(update.message.replies, [])
+
+    def test_runtime_configuration_requires_two_level_auth_and_relay_token(self):
+        with (
+            patch.object(tg, "CHAT_ID", "42"),
+            patch.object(tg, "USER_ID", "42"),
+            patch.object(tg, "_RELAY_TOKEN", "a" * 32),
+        ):
+            tg.validate_runtime_config()
+
+        with patch.object(tg, "USER_ID", ""):
+            with self.assertRaisesRegex(RuntimeError, "HERDR_TG_USER_ID"):
+                tg.validate_runtime_config()
+
+        with patch.object(tg, "_RELAY_TOKEN", ""):
+            with self.assertRaisesRegex(RuntimeError, "token in HERDR_RELAY"):
+                tg.validate_runtime_config()
+
+        with (
+            patch.object(tg, "_RELAY_TOKEN", "a" * 32),
+            patch.object(tg, "_relay_parts", tg.urllib.parse.urlsplit("ws://example.com:8375?token=abc")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "loopback HERDR_RELAY"):
+                tg.validate_runtime_config()
+
+    def test_codex_output_keeps_timing_and_removes_trailing_tui_chrome(self):
+        content = (
+            "\x1b[32mImplemented <feature> & tests.\x1b[0m\n\n"
+            "─ Worked for 10m 35s ─────────────────────────\n\n"
+            "› Explain this codebase\n\n"
+            "  gpt-5.6-sol max · ~/Workspace/others/herdr-remote\n"
+        )
+
+        cleaned = tg.clean_pane_output(content)
+
+        self.assertEqual(cleaned, "Implemented <feature> & tests.\n\nWorked for 10m 35s")
+        self.assertNotIn("Explain this codebase", cleaned)
+        self.assertNotIn("gpt-5.6-sol", cleaned)
+
+    def test_long_terminal_dividers_become_a_single_blank_line(self):
+        content = (
+            "First section\n"
+            "────────────────────────────────────────────────────────────────\n"
+            "\n"
+            "Second section"
+        )
+
+        cleaned = tg.clean_pane_output(content)
+
+        self.assertEqual(cleaned, "First section\n\nSecond section")
+        self.assertNotIn("────────", cleaned)
+
+    async def test_read_pane_requests_more_context_by_default(self):
+        connection = FakeRelayConnection([{"type": "pane_content", "content": "recent output"}])
+
+        with patch("websockets.connect", return_value=connection):
+            content = await tg.read_pane("w0:p1")
+
+        self.assertEqual(content, "recent output")
+        self.assertEqual(connection.sent[0]["lines"], 60)
+
+    async def test_long_reply_output_is_split_and_safely_formatted_as_html(self):
+        agent = make_agents(1)[0]
+        message = FakeMessage()
+        chat = SimpleNamespace(id=42, type="private")
+        content = "<unsafe>&\n" + ("long output line\n" * 12)
+
+        with patch.object(tg, "PANE_CHUNK_ESCAPED_CHARS", 80):
+            final_message = await tg.send_reply_prompt(message, chat, agent, content)
+
+        self.assertGreater(len(message.replies), 1)
+        self.assertIn("&lt;unsafe&gt;&amp;", message.replies[0][0])
+        self.assertTrue(all(kwargs["parse_mode"] == "HTML" for _, kwargs, _ in message.replies))
+        self.assertTrue(all(len(text) < 4096 for text, _, _ in message.replies))
+        self.assertNotIn("reply_markup", message.replies[0][1])
+        self.assertIsInstance(message.replies[-1][1]["reply_markup"], tg.ForceReply)
+        self.assertEqual(
+            sum("Reply to this message" in text for text, _, _ in message.replies),
+            1,
+        )
+        self.assertIs(final_message, message.replies[-1][2])
+        self.assertTrue(all(
+            tg.pending_pane(42, sent.message_id) == "w0:p1"
+            for _, _, sent in message.replies
+        ))
 
     async def test_start_reports_disconnected_and_empty_states(self):
         disconnected = make_update()
         await tg.cmd_start(disconnected, SimpleNamespace(args=[]))
         self.assertIn("disconnected", disconnected.message.replies[0][0].lower())
-        self.assertNotIn("reply_markup", disconnected.message.replies[0][1])
+        disconnected_markup = disconnected.message.replies[0][1]["reply_markup"]
+        disconnected_actions = {
+            tg.parse_callback_data(button.callback_data)["action"]
+            for row in disconnected_markup.inline_keyboard
+            for button in row
+        }
+        self.assertEqual(
+            disconnected_actions,
+            {"picker", "dashboard", "help", "browse", "new_codex"},
+        )
 
         tg.relay_connected = True
         empty = make_update()
         await tg.cmd_start(empty, SimpleNamespace(args=[]))
         self.assertIn("no agents", empty.message.replies[0][0].lower())
+        self.assertEqual(len(empty.message.replies[0][1]["reply_markup"].inline_keyboard), 3)
 
     async def test_start_lists_current_sixteen_agent_herd(self):
         tg.relay_connected = True
@@ -172,9 +314,154 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         await tg.cmd_start(update, SimpleNamespace(args=[]))
 
         markup = update.message.replies[0][1]["reply_markup"]
-        agent_buttons = [row[0] for row in markup.inline_keyboard if row[0].text not in ("Previous", "Next")]
+        agent_buttons = [
+            button
+            for row in markup.inline_keyboard
+            for button in row
+            if tg.parse_callback_data(button.callback_data).get("action") == "select_reply"
+        ]
         self.assertEqual(len(agent_buttons), 16)
         self.assertTrue(all(tg.parse_callback_data(button.callback_data)["action"] == "select_reply" for button in agent_buttons))
+
+    async def test_dashboard_shortcuts_open_send_and_interrupt_pickers(self):
+        tg.relay_connected = True
+        tg.agents = make_agents(2, status="working")
+
+        for menu, expected_action in (("select_send", "select_send"), ("interrupt", "interrupt")):
+            callback = FakeCallback(tg.simple_callback_data("picker", menu=menu))
+            await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
+
+            markup = callback.message.replies[0][1]["reply_markup"]
+            actions = [
+                tg.parse_callback_data(row[0].callback_data)["action"]
+                for row in markup.inline_keyboard
+            ]
+            self.assertEqual(actions, [expected_action, expected_action])
+
+    async def test_help_command_and_button_return_command_guidance(self):
+        command_update = make_update()
+        await tg.cmd_help(command_update, SimpleNamespace(args=[]))
+
+        command_text, command_kwargs, _ = command_update.message.replies[0]
+        self.assertIn("/start", command_text)
+        self.assertIn("命令补全", command_text)
+        self.assertEqual(command_kwargs["parse_mode"], "HTML")
+
+        callback = FakeCallback(tg.simple_callback_data("help"))
+        await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
+        self.assertIn("/interrupt", callback.message.replies[0][0])
+
+    async def test_command_completion_is_scoped_to_authorized_chat(self):
+        bot = SimpleNamespace(
+            set_my_commands=AsyncMock(),
+            set_chat_menu_button=AsyncMock(),
+        )
+
+        with patch.object(tg, "ALLOW_PERSISTENT_TRUST", False):
+            await tg.configure_bot_ui(SimpleNamespace(bot=bot))
+
+        commands = bot.set_my_commands.await_args.args[0]
+        scope = bot.set_my_commands.await_args.kwargs["scope"]
+        self.assertEqual(scope.chat_id, 42)
+        self.assertEqual(
+            [command.command for command in commands],
+            [
+                "start", "agents", "status", "read", "reply", "send", "interrupt", "digest",
+                "browse", "cd", "cwd", "codex", "help",
+            ],
+        )
+        self.assertNotIn("trust", [command.command for command in commands])
+        self.assertEqual(bot.set_chat_menu_button.await_args.kwargs["chat_id"], 42)
+        self.assertIsInstance(
+            bot.set_chat_menu_button.await_args.kwargs["menu_button"],
+            tg.MenuButtonCommands,
+        )
+
+    async def test_browse_command_builds_opaque_directory_buttons(self):
+        listing = make_directory_listing()
+        update = make_update()
+
+        with patch.object(tg, "list_directories_from_relay", AsyncMock(return_value=listing)) as browse:
+            await tg.cmd_browse(update, SimpleNamespace(args=["~/Workspace/others"]))
+
+        browse.assert_awaited_once_with("~/Workspace/others")
+        text, kwargs, _ = update.message.replies[0]
+        self.assertIn("Repository browser", text)
+        self.assertEqual(kwargs["parse_mode"], "HTML")
+        first_button = kwargs["reply_markup"].inline_keyboard[0][0]
+        callback = json.loads(first_button.callback_data)
+        self.assertEqual(callback["action"], "dir")
+        self.assertNotIn("/home/wbr", first_button.callback_data)
+        self.assertEqual(
+            tg.resolve_directory_token(callback["d"]),
+            "/home/wbr/Workspace/others/herdr-remote",
+        )
+
+    async def test_cd_resolves_relative_to_selected_directory(self):
+        tg.selected_workspace_dirs[42] = "/home/wbr/Workspace/others"
+        listing = make_directory_listing(
+            "/home/wbr/Workspace/others/herdr-remote",
+            can_start_agent=True,
+        )
+        update = make_update()
+
+        with patch.object(tg, "list_directories_from_relay", AsyncMock(return_value=listing)) as browse:
+            await tg.cmd_cd(update, SimpleNamespace(args=["herdr-remote"]))
+
+        browse.assert_awaited_once_with("/home/wbr/Workspace/others/herdr-remote")
+        self.assertEqual(tg.selected_workspace_dirs[42], listing["path"])
+        self.assertIn("Selected workspace", update.message.replies[0][0])
+        buttons = update.message.replies[0][1]["reply_markup"].inline_keyboard[0]
+        self.assertEqual([button.text for button in buttons], ["🚀 Start Codex", "📂 Browse"])
+
+    async def test_codex_starts_in_selected_repository_and_prompts_for_first_task(self):
+        selected = "/home/wbr/Workspace/others/herdr-remote"
+        tg.selected_workspace_dirs[42] = selected
+        update = make_update()
+        started = {
+            "pane_id": "w9:p1",
+            "workspace_id": "w9",
+            "cwd": selected,
+            "display_path": "~/Workspace/others/herdr-remote",
+            "project": "herdr-remote",
+            "status": "idle",
+            "prompted": False,
+            "warning": "",
+        }
+
+        with patch.object(tg, "start_codex_from_relay", AsyncMock(return_value=started)) as start:
+            await tg.cmd_codex(update, SimpleNamespace(args=[]))
+
+        start.assert_awaited_once_with(selected, "")
+        self.assertIn("Starting Codex", update.message.replies[0][0])
+        self.assertIn("Codex started", update.message.replies[1][0])
+        final_text, final_kwargs, final_message = update.message.replies[-1]
+        self.assertIn("Reply to this message", final_text)
+        self.assertIsInstance(final_kwargs["reply_markup"], tg.ForceReply)
+        self.assertEqual(tg.pending_pane(42, final_message.message_id), "w9:p1")
+        self.assertEqual(tg.find_agent("w9:p1")["cwd"], selected)
+
+    async def test_codex_command_submits_optional_initial_prompt(self):
+        selected = "/home/wbr/Workspace/others/herdr-remote"
+        tg.selected_workspace_dirs[42] = selected
+        update = make_update()
+        started = {
+            "pane_id": "w9:p1",
+            "workspace_id": "w9",
+            "cwd": selected,
+            "display_path": "~/Workspace/others/herdr-remote",
+            "project": "herdr-remote",
+            "status": "working",
+            "prompted": True,
+            "warning": "",
+        }
+
+        with patch.object(tg, "start_codex_from_relay", AsyncMock(return_value=started)) as start:
+            await tg.cmd_codex(update, SimpleNamespace(args=["Explain", "this", "repository"]))
+
+        start.assert_awaited_once_with(selected, "Explain this repository")
+        self.assertIn("Initial prompt submitted", update.message.replies[-1][0])
+        self.assertEqual(tg.pending_pane(42, update.message.replies[-1][2].message_id), "w9:p1")
 
     def test_labels_sort_status_and_disambiguate_duplicate_agents(self):
         agent_list = [
@@ -242,6 +529,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
             for action in ("read", "interrupt", "select_send", "select_reply", "trust")
         ]
         markups.extend([tg.make_keyboard(pane_id, None), tg.interaction_keyboard(pane_id)])
+        markups.append(tg.directory_browser_keyboard(make_directory_listing()))
 
         callbacks = [
             button.callback_data
@@ -270,7 +558,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(tg, "read_pane", AsyncMock(side_effect=["read output", "reply output"])),
-            patch.object(tg, "send_text_to_relay", AsyncMock()) as send_text,
+            patch.object(tg, "send_agent_prompt_to_relay", AsyncMock()) as send_text,
         ):
             await tg.cmd_read(read_update, SimpleNamespace(args=["project"]))
             await tg.cmd_send(send_update, SimpleNamespace(args=["project", "hello"]))
@@ -283,6 +571,16 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("reply output", reply_text)
         self.assertIsInstance(reply_kwargs["reply_markup"], tg.ForceReply)
         self.assertEqual(tg.pending_pane(42, reply_message.message_id), "w0:p1")
+
+    async def test_interrupt_uses_canonical_key_and_waits_for_relay_ack(self):
+        tg.agents = make_agents(1, status="working")
+        update = make_update()
+
+        with patch.object(tg, "send_keys_to_relay", AsyncMock()) as send_keys:
+            await tg.cmd_interrupt(update, SimpleNamespace(args=["project"]))
+
+        send_keys.assert_awaited_once_with("w0:p1", ["C-c"])
+        self.assertIn("Sent Ctrl+C", update.message.replies[0][0])
 
     async def test_send_and_reply_pickers_target_the_expected_actions(self):
         tg.agents = make_agents(1)
@@ -415,6 +713,40 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Sent: yes", callback.message.replies[0][0])
         self.assertNotIn("w0:p1", tg.approval_tokens)
 
+    async def test_persistent_trust_is_hidden_and_command_disabled_by_default(self):
+        tg.ALLOW_PERSISTENT_TRUST = False
+        options = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
+        markup = tg.make_keyboard("w0:p1", options)
+        labels = [row[0].text for row in markup.inline_keyboard]
+        self.assertNotIn("Trust (always)", labels)
+
+        tg.agents = make_agents(1, status="blocked")
+        update = make_update()
+        await tg.cmd_trust(update, SimpleNamespace(args=[]))
+        self.assertIn("disabled", update.message.replies[0][0].lower())
+
+    async def test_persistent_trust_requires_a_second_confirmation(self):
+        tg.relay_connected = True
+        tg.agents = make_agents(1, status="blocked")
+        options = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
+        markup = make_active_approval_keyboard("w0:p1", options)
+        trust_button = markup.inline_keyboard[1][0]
+        self.assertEqual(tg.parse_callback_data(trust_button.callback_data)["action"], "review_trust")
+        review = FakeCallback(trust_button.callback_data)
+        review.message.reply_markup = markup
+
+        with patch.object(tg, "send_keys_to_relay", AsyncMock()) as send_keys:
+            await tg.handle_callback(make_update(callback=review), SimpleNamespace())
+        send_keys.assert_not_awaited()
+
+        confirmation_markup = review.message.replies[0][1]["reply_markup"]
+        confirm_button = confirmation_markup.inline_keyboard[0][0]
+        confirm = FakeCallback(confirm_button.callback_data)
+        confirm.message.reply_markup = confirmation_markup
+        with patch.object(tg, "send_keys_to_relay", AsyncMock()) as send_keys:
+            await tg.handle_callback(make_update(callback=confirm), SimpleNamespace())
+        send_keys.assert_awaited_once_with("w0:p1", ["2"])
+
     async def test_approval_from_previous_blocked_prompt_is_rejected(self):
         tg.relay_connected = True
         tg.agents = make_agents(1, status="blocked")
@@ -456,6 +788,24 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         with patch("websockets.connect", return_value=rejected):
             with self.assertRaisesRegex(RuntimeError, "disallowed"):
                 await tg.send_keys_to_relay("w0:p1", ["1"])
+
+    async def test_agent_prompt_uses_semantic_relay_command_and_requires_ack(self):
+        accepted = FakeRelayConnection([
+            {"type": "agents", "agents": []},
+            {"type": "command_result", "command": "agent_prompt", "ok": True},
+        ])
+        with patch("websockets.connect", return_value=accepted):
+            await tg.send_agent_prompt_to_relay("w0:p1", "run the tests")
+        self.assertEqual(accepted.sent, [{
+            "type": "agent_prompt",
+            "pane_id": "w0:p1",
+            "text": "run the tests",
+        }])
+
+        rejected = FakeRelayConnection([{"type": "error", "message": "agent_prompt command failed"}])
+        with patch("websockets.connect", return_value=rejected):
+            with self.assertRaisesRegex(RuntimeError, "agent_prompt"):
+                await tg.send_agent_prompt_to_relay("w0:p1", "run the tests")
 
     def test_relay_allows_numeric_approval_keys_and_acknowledges_them(self):
         relay_path = ROOT / "relay" / "herdr_relay.py"
@@ -540,6 +890,23 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(callback.answers, ["Unauthorized"])
         self.assertEqual(callback.message.replies, [])
 
+    async def test_callback_rejects_unauthorized_user(self):
+        tg.relay_connected = True
+        tg.agents = make_agents(1)
+        callback = FakeCallback({"action": "select_reply", "pane_id": "w0:p1"})
+
+        await tg.handle_callback(make_update(user_id=7, callback=callback), SimpleNamespace())
+
+        self.assertEqual(callback.answers, ["Unauthorized"])
+        self.assertEqual(callback.message.replies, [])
+
+    async def test_private_chat_requirement_rejects_groups_by_default(self):
+        update = make_update(chat_type="group")
+
+        await tg.cmd_agents(update, SimpleNamespace(args=[]))
+
+        self.assertEqual(update.message.replies, [])
+
     def test_pending_registry_is_chat_scoped_and_bounded(self):
         tg.register_pending(42, 10, "local:pane")
         tg.register_pending(43, 10, "other:pane")
@@ -567,9 +934,11 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([json.loads(row[0].callback_data)["k"] for row in rows[:3]], ["1", "2", "3"])
         self.assertEqual(rows[-1][0].text, "Open output & reply")
         self.assertIn("reply to this notification", text)
+        self.assertNotIn("parse_mode", kwargs)
         self.assertEqual(tg.pending_pane(chat_id, sent.message_id), "w0:p1")
 
     async def test_group_prompts_keep_independent_pane_mappings(self):
+        tg.REQUIRE_PRIVATE_CHAT = False
         tg.relay_connected = True
         tg.agents = make_agents(2)
         first = FakeCallback({"action": "select_reply", "pane_id": "w0:p1"}, chat_type="group", message_id=10)
@@ -593,7 +962,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         second_reply = FakeMessage(chat_type="group")
         second_reply.reply_to_message = SimpleNamespace(message_id=second_sent.message_id)
         second_reply.text = "second response"
-        with patch.object(tg, "send_text_to_relay", AsyncMock()) as send_text:
+        with patch.object(tg, "send_agent_prompt_to_relay", AsyncMock()) as send_text:
             await tg.handle_text(make_update(chat_type="group", message=first_reply), SimpleNamespace())
             await tg.handle_text(make_update(chat_type="group", message=second_reply), SimpleNamespace())
         self.assertEqual(
@@ -609,7 +978,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         message.reply_to_message = SimpleNamespace(message_id=77)
         message.text = "follow up"
 
-        with patch.object(tg, "send_text_to_relay", AsyncMock()) as send_text:
+        with patch.object(tg, "send_agent_prompt_to_relay", AsyncMock()) as send_text:
             await tg.handle_text(make_update(message=message), SimpleNamespace())
 
         send_text.assert_awaited_once_with("w0:p1", "follow up")
@@ -621,14 +990,14 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         message.reply_to_message = SimpleNamespace(message_id=77)
         message.text = "follow up"
 
-        with patch.object(tg, "send_text_to_relay", AsyncMock()) as send_text:
+        with patch.object(tg, "send_agent_prompt_to_relay", AsyncMock()) as send_text:
             await tg.handle_text(make_update(message=message), SimpleNamespace())
             send_text.assert_not_awaited()
         self.assertIn("disconnected", message.replies[0][0].lower())
 
         tg.relay_connected = True
         message.replies.clear()
-        with patch.object(tg, "send_text_to_relay", AsyncMock()) as send_text:
+        with patch.object(tg, "send_agent_prompt_to_relay", AsyncMock()) as send_text:
             await tg.handle_text(make_update(message=message), SimpleNamespace())
             send_text.assert_not_awaited()
         self.assertIn("no longer available", message.replies[0][0].lower())
@@ -641,7 +1010,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         message.reply_to_message = SimpleNamespace(message_id=77)
         message.text = "not allowed"
 
-        with patch.object(tg, "send_text_to_relay", AsyncMock()) as send_text:
+        with patch.object(tg, "send_agent_prompt_to_relay", AsyncMock()) as send_text:
             await tg.handle_text(make_update(chat_id=7, message=message), SimpleNamespace())
 
         send_text.assert_not_awaited()

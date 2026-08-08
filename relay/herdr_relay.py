@@ -4,7 +4,8 @@
 # dependencies = ["websockets>=14.0", "zeroconf>=0.80.0", "pywebpush>=2.0.0", "py-vapid>=1.9.0"]
 # ///
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
-import asyncio, json, logging, os, re, shutil, signal, socket, subprocess, time
+import asyncio, hashlib, hmac, ipaddress, json, logging, os, re, shlex, shutil, signal, socket, subprocess, time
+from pathlib import Path
 
 from agent_state import complete_agent_update_message
 
@@ -16,6 +17,8 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from logging.handlers import RotatingFileHandler
 import sys
+
+os.umask(0o077)
 
 def _get_log_dir():
     if sys.platform == "darwin":
@@ -41,10 +44,21 @@ log.addHandler(_file_handler)
 log.addHandler(_console_handler)
 logging.getLogger("websockets").setLevel(logging.WARNING)
 
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 HERDR = os.environ.get("HERDR_BIN") or shutil.which("herdr") or "/opt/homebrew/bin/herdr"
+RELAY_HOST = os.environ.get("HERDR_RELAY_HOST", "127.0.0.1").strip() or "127.0.0.1"
 WS_PORT = int(os.environ.get("HERDR_RELAY_PORT", "8375"))
 POLL_INTERVAL = 2
-AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")  # Optional: shared secret for relay auth
+AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")
+ALLOW_INSECURE_NO_AUTH = env_flag("HERDR_ALLOW_INSECURE_NO_AUTH")
+ALLOW_REMOTE_BIND = env_flag("HERDR_ALLOW_REMOTE_BIND")
+MDNS_ENABLED = env_flag("HERDR_MDNS_ENABLED")
 
 # VAPID Web Push
 VAPID_PUBLIC_KEY = os.environ.get("HERDR_VAPID_PUBLIC", "")
@@ -55,6 +69,26 @@ PUSH_SUBS_FILE = os.path.join(LOG_DIR, "push_subs.json")
 
 # Remote hosts: comma-separated SSH targets
 REMOTES = [r.strip() for r in os.environ.get("HERDR_REMOTES", "").split(",") if r.strip()]
+
+
+def configured_workspace_roots() -> list[Path]:
+    configured = os.environ.get("HERDR_WORKSPACE_ROOTS", os.path.expanduser("~/Workspace"))
+    roots = []
+    for value in configured.split(os.pathsep):
+        value = value.strip()
+        if not value:
+            continue
+        try:
+            root = Path(os.path.expanduser(value)).resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if root.is_dir() and root not in roots:
+            roots.append(root)
+    return roots
+
+
+WORKSPACE_ROOTS = configured_workspace_roots()
+WORKSPACE_ENTRY_LIMIT = 200
 
 TOOL_OPTIONS = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
 SUBAGENT_OPTIONS = ["approve all pending", "configure individually", "exit (cancel subagents)"]
@@ -72,6 +106,7 @@ event_queue = asyncio.Queue()
 pane_remote_map = {}
 known_panes = set()
 agent_cache = {}
+agent_start_in_progress = False
 
 SAFE_RESPONSES = {"y", "n", "a", "yes", "no", "trust", "yes, single permission", "trust, always allow", "no (tab to edit)", "approve all pending", "configure individually", "exit (cancel subagents)"}
 SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"} | {
@@ -100,6 +135,12 @@ def audit(action: str, ip: str, device: str, pane_id: str, detail: str = ""):
     if detail:
         entry["detail"] = detail[:120]  # truncate like collie
     audit_log.info(json.dumps(entry, separators=(",", ":")))
+
+
+def sensitive_detail(text: str) -> str:
+    """Describe user text without writing its contents to logs."""
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"chars={len(text)} sha256={digest}"
 
 
 # --- Web Push helpers ---
@@ -158,12 +199,15 @@ async def send_web_push(title: str, body: str, url: str = "/", clear: bool = Fal
 _load_push_subs()
 
 
-def run_herdr_result(*args, remote=None):
+def run_herdr_result(*args, remote=None, timeout=15):
     if remote:
-        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote, HERDR, *args]
+        # OpenSSH sends its trailing arguments through the remote login shell.
+        # Quote the complete command so prompt text cannot become shell syntax.
+        remote_command = shlex.join([HERDR, *args])
+        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote, remote_command]
     else:
         cmd = [HERDR, *args]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 def run_herdr(*args, remote=None):
@@ -171,6 +215,196 @@ def run_herdr(*args, remote=None):
         return run_herdr_result(*args, remote=remote).stdout.strip()
     except Exception:
         return ""
+
+
+def path_within_workspace_roots(path: Path) -> bool:
+    return any(path == root or root in path.parents for root in WORKSPACE_ROOTS)
+
+
+def resolve_workspace_path(value: str) -> Path:
+    if not WORKSPACE_ROOTS:
+        raise ValueError("No workspace roots are configured")
+    if not isinstance(value, str) or not value.strip() or len(value) > 4096:
+        raise ValueError("A workspace directory is required")
+    if any(ord(character) < 32 for character in value):
+        raise ValueError("Workspace path contains control characters")
+
+    candidate = Path(os.path.expanduser(value.strip()))
+    if not candidate.is_absolute():
+        candidate = WORKSPACE_ROOTS[0] / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as e:
+        raise ValueError("Workspace directory does not exist") from e
+    if not resolved.is_dir():
+        raise ValueError("Workspace path is not a directory")
+    if not path_within_workspace_roots(resolved):
+        raise ValueError("Workspace path is outside the configured roots")
+    return resolved
+
+
+def display_workspace_path(path: Path) -> str:
+    home = Path.home()
+    try:
+        return "~/" + str(path.relative_to(home))
+    except ValueError:
+        return str(path)
+
+
+def git_root_for(path: Path) -> Path | None:
+    for candidate in (path, *path.parents):
+        if not path_within_workspace_roots(candidate):
+            break
+        git_marker = candidate / ".git"
+        if git_marker.is_dir() or git_marker.is_file():
+            return candidate
+    return None
+
+
+def workspace_directory_listing(value: str | None = None) -> dict:
+    if not WORKSPACE_ROOTS:
+        raise ValueError("No workspace roots are configured")
+
+    if not value:
+        entries = [
+            {
+                "name": root.name or str(root),
+                "path": str(root),
+                "display_path": display_workspace_path(root),
+                "is_repo": git_root_for(root) == root,
+            }
+            for root in WORKSPACE_ROOTS
+        ]
+        return {
+            "path": "",
+            "display_path": "Configured workspace roots",
+            "parent": None,
+            "entries": entries,
+            "can_start_agent": False,
+            "truncated": False,
+        }
+
+    directory = resolve_workspace_path(value)
+    entries = []
+    try:
+        children = list(os.scandir(directory))
+    except OSError as e:
+        raise ValueError("Workspace directory cannot be read") from e
+    for entry in children:
+        if entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            child = Path(entry.path).resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not path_within_workspace_roots(child):
+            continue
+        entries.append({
+            "name": entry.name,
+            "path": str(child),
+            "display_path": display_workspace_path(child),
+            "is_repo": git_root_for(child) == child,
+        })
+
+    entries.sort(key=lambda item: (not item["is_repo"], item["name"].lower()))
+    truncated = len(entries) > WORKSPACE_ENTRY_LIMIT
+    entries = entries[:WORKSPACE_ENTRY_LIMIT]
+
+    parent = directory.parent if path_within_workspace_roots(directory.parent) else None
+    return {
+        "path": str(directory),
+        "display_path": display_workspace_path(directory),
+        "parent": str(parent) if parent else None,
+        "entries": entries,
+        "can_start_agent": git_root_for(directory) is not None,
+        "git_root": str(git_root_for(directory) or ""),
+        "truncated": truncated,
+    }
+
+
+def parse_herdr_result(result: subprocess.CompletedProcess) -> dict:
+    if result.returncode != 0:
+        raise RuntimeError("Herdr command failed")
+    try:
+        return json.loads(result.stdout).get("result", {})
+    except (json.JSONDecodeError, AttributeError) as e:
+        raise RuntimeError("Herdr returned an invalid response") from e
+
+
+def start_local_codex(cwd: str, prompt: str = "") -> dict:
+    directory = resolve_workspace_path(cwd)
+    git_root = git_root_for(directory)
+    if git_root is None:
+        raise ValueError("Select a directory inside a Git repository before starting Codex")
+    if not isinstance(prompt, str) or len(prompt) > 1000:
+        raise ValueError("Prompt must contain at most 1000 characters")
+
+    label = directory.name[:80] or "codex"
+    workspace_id = ""
+    try:
+        created = run_herdr_result(
+            "workspace", "create",
+            "--cwd", str(directory),
+            "--label", label,
+            "--no-focus",
+            timeout=20,
+        )
+        created_result = parse_herdr_result(created)
+        workspace = created_result.get("workspace") or {}
+        root_pane = created_result.get("root_pane") or {}
+        workspace_id = workspace.get("workspace_id", "")
+        pane_id = root_pane.get("pane_id", "")
+        if not workspace_id or not pane_id:
+            raise RuntimeError("Herdr did not return the new workspace and pane IDs")
+
+        started = run_herdr_result(
+            "agent", "start", "codex",
+            "--kind", "codex",
+            "--pane", pane_id,
+            "--timeout", "60000",
+            timeout=75,
+        )
+        started_result = parse_herdr_result(started)
+        agent = started_result.get("agent") or {}
+        if agent.get("pane_id") != pane_id:
+            raise RuntimeError("Herdr returned an unexpected agent pane")
+
+        prompted = False
+        prompt_warning = ""
+        if prompt:
+            try:
+                prompt_result = run_herdr_result(
+                    "agent", "prompt", pane_id, prompt,
+                    timeout=15,
+                )
+            except Exception:
+                prompt_warning = "Codex started, but the initial prompt was not accepted"
+            else:
+                if prompt_result.returncode == 0:
+                    prompted = True
+                else:
+                    prompt_warning = "Codex started, but the initial prompt was not accepted"
+
+        return {
+            "pane_id": pane_id,
+            "workspace_id": workspace_id,
+            "cwd": str(directory),
+            "display_path": display_workspace_path(directory),
+            "project": directory.name,
+            "agent": "codex",
+            "status": agent.get("agent_status", "idle"),
+            "prompted": prompted,
+            "warning": prompt_warning,
+        }
+    except Exception:
+        if workspace_id:
+            try:
+                run_herdr_result("workspace", "close", workspace_id, timeout=15)
+            except Exception:
+                pass
+        raise
 
 
 def get_agents_from_host(remote=None):
@@ -334,15 +568,15 @@ async def process_request(connection, request):
     if AUTH_TOKEN:
         token = None
         for key, value in request.headers.raw_items():
-            if key.lower() == "authorization":
-                token = value.replace("Bearer ", "")
+            if key.lower() == "authorization" and value.startswith("Bearer "):
+                token = value[len("Bearer "):]
         # Also check query param ?token=
         if not token and "token=" in (request.path or ""):
             import urllib.parse
             _, qs = request.path.split("?", 1) if "?" in request.path else (request.path, "")
             params = urllib.parse.parse_qs(qs)
             token = params.get("token", [None])[0]
-        if token != AUTH_TOKEN:
+        if token is None or not hmac.compare_digest(token, AUTH_TOKEN):
             headers = Headers([("Content-Type", "text/plain")])
             return Response(401, "Unauthorized", headers, b"Invalid token\n")
 
@@ -435,6 +669,7 @@ async def process_request(connection, request):
 
 
 async def handle_client(ws):
+    global agent_start_in_progress
     remote_addr = ws.remote_address
     ip = remote_addr[0] if remote_addr else "unknown"
     ua = ws.request.headers.get("User-Agent", "unknown") if ws.request else "unknown"
@@ -482,12 +717,76 @@ async def handle_client(ws):
                 run_herdr("pane", "send-text", pane_id, text + "\n", remote=remote)
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)
+            elif msg_type == "list_directories":
+                try:
+                    listing = workspace_directory_listing(msg.get("path"))
+                except ValueError as e:
+                    await ws.send(json.dumps({"type": "error", "message": str(e)}))
+                    continue
+                await ws.send(json.dumps({"type": "directory_listing", **listing}))
+            elif msg_type == "start_agent":
+                if msg.get("kind", "codex") != "codex":
+                    await ws.send(json.dumps({"type": "error", "message": "Only Codex can be started remotely"}))
+                    continue
+                if agent_start_in_progress:
+                    await ws.send(json.dumps({"type": "error", "message": "Another agent is currently starting"}))
+                    continue
+                cwd = msg.get("cwd", "")
+                prompt = msg.get("prompt", "")
+                if not isinstance(prompt, str) or len(prompt) > 1000:
+                    await ws.send(json.dumps({"type": "error", "message": "Prompt must contain at most 1000 characters"}))
+                    continue
+                try:
+                    directory = resolve_workspace_path(cwd)
+                except ValueError as e:
+                    await ws.send(json.dumps({"type": "error", "message": str(e)}))
+                    continue
+                log.info(
+                    "Start Codex from %s (%s): cwd=%s prompt_chars=%d",
+                    ip, device, display_workspace_path(directory), len(prompt),
+                )
+                audit(
+                    "start_agent", ip, device, "",
+                    f"kind=codex cwd={display_workspace_path(directory)} {sensitive_detail(prompt)}",
+                )
+                agent_start_in_progress = True
+                try:
+                    started_agent = await asyncio.to_thread(start_local_codex, str(directory), prompt)
+                except ValueError as e:
+                    await ws.send(json.dumps({"type": "error", "message": str(e)}))
+                    continue
+                except Exception as e:
+                    log.warning("Codex start failed (%s)", type(e).__name__)
+                    await ws.send(json.dumps({"type": "error", "message": "Could not start Codex"}))
+                    continue
+                finally:
+                    agent_start_in_progress = False
+
+                pane_id = started_agent["pane_id"]
+                agent_update = {
+                    "pane_id": pane_id,
+                    "agent": "codex",
+                    "status": started_agent.get("status", "idle"),
+                    "cwd": started_agent["cwd"],
+                    "project": started_agent["project"],
+                    "host": "local",
+                    "workspace_id": started_agent["workspace_id"],
+                }
+                known_panes.add(pane_id)
+                pane_remote_map[pane_id] = None
+                agent_cache[pane_id] = agent_update
+                await ws.send(json.dumps({"type": "agent_started", "ok": True, "agent": started_agent}))
+                await broadcast({"type": "agent_update", "agent": agent_update})
             elif msg_type == "read_pane":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
-                lines = msg.get("lines", "30")
+                try:
+                    lines = max(1, min(int(msg.get("lines", 30)), 200))
+                except (TypeError, ValueError):
+                    await ws.send(json.dumps({"type": "error", "message": "lines must be an integer"}))
+                    continue
                 remote = pane_remote_map.get(pane_id)
                 content = run_herdr("pane", "read", pane_id, "--lines", str(lines), "--source", "recent", remote=remote)
                 await ws.send(json.dumps({"type": "pane_content", "pane_id": pane_id, "content": content}))
@@ -497,7 +796,7 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
                 keys = msg.get("keys", [])
-                if not all(k in SAFE_KEYS for k in keys):
+                if not isinstance(keys, list) or not keys or len(keys) > 16 or not all(k in SAFE_KEYS for k in keys):
                     await ws.send(json.dumps({"type": "error", "message": "keys contain disallowed values"}))
                     continue
                 remote = pane_remote_map.get(pane_id)
@@ -514,18 +813,42 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "send_keys command failed"}))
                     continue
                 await ws.send(json.dumps({"type": "command_result", "command": "send_keys", "ok": True}))
+            elif msg_type == "agent_prompt":
+                pane_id = msg["pane_id"]
+                if pane_id not in known_panes:
+                    await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
+                    continue
+                text = msg.get("text", "")
+                if not isinstance(text, str) or not text or len(text) > 1000:
+                    await ws.send(json.dumps({"type": "error", "message": "text empty or too long"}))
+                    continue
+                remote = pane_remote_map.get(pane_id)
+                log.info("Agent prompt from %s (%s): pane=%s chars=%d", ip, device, pane_id, len(text))
+                audit("agent_prompt", ip, device, pane_id, sensitive_detail(text))
+                try:
+                    result = run_herdr_result("agent", "prompt", pane_id, text, remote=remote)
+                except Exception as e:
+                    # Exception strings from subprocess may embed the full prompt command.
+                    log.warning("agent_prompt command failed for pane %s (%s)", pane_id, type(e).__name__)
+                    await ws.send(json.dumps({"type": "error", "message": "agent_prompt command failed"}))
+                    continue
+                if result.returncode != 0:
+                    log.warning("agent_prompt command failed for pane %s with exit %s", pane_id, result.returncode)
+                    await ws.send(json.dumps({"type": "error", "message": "agent_prompt command failed"}))
+                    continue
+                await ws.send(json.dumps({"type": "command_result", "command": "agent_prompt", "ok": True}))
             elif msg_type == "send_text":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
                 text = msg.get("text", "")
-                if not text or len(text) > 1000:
+                if not isinstance(text, str) or not text or len(text) > 1000:
                     await ws.send(json.dumps({"type": "error", "message": "text empty or too long"}))
                     continue
                 remote = pane_remote_map.get(pane_id)
-                log.info("Text from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
-                audit("send_text", ip, device, pane_id, f"text={text!r}")
+                log.info("Text from %s (%s): pane=%s chars=%d", ip, device, pane_id, len(text))
+                audit("send_text", ip, device, pane_id, sensitive_detail(text))
                 run_herdr("pane", "send-text", pane_id, text, remote=remote)
             elif msg_type == "create_tab":
                 workspace_id = msg.get("workspace_id", "")
@@ -565,7 +888,31 @@ class UDPPlugin(asyncio.DatagramProtocol):
             pass
 
 
+def is_loopback_host(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_runtime_config():
+    if not AUTH_TOKEN and not ALLOW_INSECURE_NO_AUTH:
+        raise RuntimeError(
+            "HERDR_RELAY_TOKEN is required. Set HERDR_ALLOW_INSECURE_NO_AUTH=1 only for isolated development."
+        )
+    if AUTH_TOKEN and len(AUTH_TOKEN) < 16:
+        raise RuntimeError("HERDR_RELAY_TOKEN must contain at least 16 characters.")
+    if not is_loopback_host(RELAY_HOST) and not ALLOW_REMOTE_BIND:
+        raise RuntimeError(
+            "Remote relay binding is disabled. Set HERDR_ALLOW_REMOTE_BIND=1 only behind a trusted access layer."
+        )
+
+
 def start_mdns():
+    if not MDNS_ENABLED:
+        return None, None
     try:
         from zeroconf import Zeroconf, ServiceInfo
         import socket as sock_mod
@@ -585,6 +932,7 @@ def start_mdns():
 
 
 async def main():
+    validate_runtime_config()
     zc, info = start_mdns()
     loop = asyncio.get_running_loop()
     try:
@@ -593,9 +941,16 @@ async def main():
         log.warning("UDP 8376 in use, plugin push disabled")
     asyncio.create_task(poll_loop())
     asyncio.create_task(event_push())
-    server = await serve(handle_client, "0.0.0.0", WS_PORT, process_request=process_request)
+    server = await serve(
+        handle_client,
+        RELAY_HOST,
+        WS_PORT,
+        process_request=process_request,
+        max_size=64 * 1024,
+        max_queue=32,
+    )
     hosts = ["local"] + REMOTES
-    log.info("herdr-remote relay on :%d (WebSocket + HTTP POST)", WS_PORT)
+    log.info("herdr-remote relay on %s:%d (WebSocket + HTTP POST)", RELAY_HOST, WS_PORT)
     log.info("Polling: %s", ", ".join(hosts))
     stop = loop.create_future()
     for sig in (signal.SIGINT, signal.SIGTERM):

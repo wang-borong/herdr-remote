@@ -46,16 +46,16 @@ Open [herdr-demo.pages.dev](https://herdr-demo.pages.dev) on your phone, paste t
 
 ## Telegram Bot
 
-For an automatically restarting relay and Telegram bot:
+For the hardened Telegram-only setup (recommended for personal remote control):
 
 ```bash
 cd relay
-./install-service.sh
+./install-telegram-only.sh
 ```
 
-Choose Telegram setup when prompted. Create the bot with `@BotFather` using `/newbot`, send `/start` to the bot (or `/start@your_bot` in a private group), and select the discovered chat. Telegram connects to the relay over localhost, so this setup does **not** require Cloudflare Tunnel; the Mac only needs outbound internet access to Telegram.
+Create the bot with `@BotFather` using `/newbot`, then send the exact one-time pairing command shown by the installer in a **private chat**. Telegram connects to the relay over authenticated localhost WebSocket, so this setup does **not** require Cloudflare Tunnel or an inbound port. See the full [Telegram-only secure setup](TELEGRAM_ONLY.md).
 
-The installer creates user services on macOS or Linux, enables relay authentication for new installs, and stores credentials in `~/.config/herdr-remote/secrets.env` with mode `0600`. On macOS:
+The installer creates user services on macOS or Linux, binds the relay to `127.0.0.1`, requires relay authentication, authorizes both the Telegram chat and user IDs, and stores credentials in `~/.config/herdr-remote/secrets.env` with mode `0600`. On macOS:
 
 ```bash
 launchctl print "gui/$(id -u)/com.herdr-remote.relay"
@@ -67,6 +67,9 @@ Manual foreground setup remains available:
 ```bash
 export HERDR_TG_TOKEN="your-token"
 export HERDR_TG_CHAT_ID="your-chat-id"
+export HERDR_TG_USER_ID="your-user-id"
+export HERDR_RELAY_TOKEN="$(openssl rand -hex 32)"
+export HERDR_RELAY="ws://127.0.0.1:8375?token=$HERDR_RELAY_TOKEN"
 uv run relay/herdr_telegram.py
 ```
 
@@ -77,11 +80,11 @@ uv run relay/herdr_telegram.py
 | `/read` | Read agent output |
 | `/reply` | Read + respond in one flow |
 | `/send` | Send text to an agent |
-| `/trust` | Trust all tools for blocked agent |
+| `/trust` | Persistent trust; disabled by default and requires confirmation when enabled |
 | `/interrupt` | Send Ctrl+C |
 | `/digest` | Today's activity summary |
 
-The `/start`, `/read`, `/reply`, `/send`, `/interrupt`, and `/trust` pickers keep every eligible agent reachable. Normal herds appear in one list; larger herds include Previous and Next buttons. Selecting an agent opens a reply prompt containing its recent output; reply to that prompt to send text safely to the pane.
+The `/start`, `/read`, `/reply`, `/send`, and `/interrupt` pickers keep every eligible agent reachable. Normal herds appear in one list; larger herds include Previous and Next buttons. Selecting an agent opens a reply prompt containing its recent output; replying submits text through `herdr agent prompt` rather than emulated terminal input.
 
 Finished and blocked notifications include **Open output & reply**. You can also reply directly to the notification to send a follow-up without returning to the agent list. Blocked notifications retain their one-tap approval controls.
 
@@ -121,19 +124,21 @@ uv run relay/herdr_tui.py
 
 ## Token Auth
 
-`install-service.sh` generates and persists a relay token for new managed installs. For foreground use:
+Relay authentication is required by default. `install-service.sh` generates and persists a token for managed installs. For foreground use:
 
 ```bash
 export HERDR_RELAY_TOKEN="$(openssl rand -hex 32)"
 uv run relay/herdr_relay.py
 ```
 
+The relay listens on `127.0.0.1` by default. Remote binding requires the explicit `HERDR_ALLOW_REMOTE_BIND=1` opt-in and should only be used behind a trusted access layer.
+
 ## Requirements
 
 - macOS 14+ (menu bar app)
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/) (relay/TUI/bot)
 - `cloudflared` (for remote access)
-- herdr 0.7+
+- herdr 0.8+ for semantic Telegram prompt submission
 - Zero-dep plugin: [`herdr-push`](https://github.com/dcolinmorgan/herdr-push)
 
 ## Changelog
@@ -153,4 +158,4 @@ uv run relay/herdr_relay.py
 
 ### v0.5.0
 
-Telegram bot (`/agents /read /send /reply /trust /interrupt`), demo bot, linux setup script.
+Telegram bot (`/start /agents /status /read /send /reply /interrupt /digest /browse /cd /cwd /codex /help`) with scoped command completion, repository browsing, safe Codex startup, and shortcut buttons; demo bot and Linux setup script.

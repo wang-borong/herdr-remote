@@ -64,10 +64,16 @@ cd herdi-ios && xcodegen generate
 | Variable | Purpose |
 |----------|---------|
 | `HERDR_RELAY_PORT` | Relay WebSocket port (default: 8375) |
-| `HERDR_RELAY_TOKEN` | Optional shared secret for auth |
+| `HERDR_RELAY_HOST` | Relay bind address (secure default: `127.0.0.1`) |
+| `HERDR_RELAY_TOKEN` | Required shared secret for relay auth |
+| `HERDR_ALLOW_REMOTE_BIND` | Explicit opt-in for non-loopback relay binding |
 | `HERDR_REMOTES` | Comma-separated SSH targets to poll |
 | `HERDR_BIN` | Path to herdr binary (default: `/opt/homebrew/bin/herdr`) |
 | `HERDR_RELAY` | Relay URL used by clients (default: `ws://127.0.0.1:8375`) |
+| `HERDR_TG_USER_ID` | Telegram controller user allowlist |
+| `HERDR_TG_REQUIRE_PRIVATE_CHAT` | Reject non-private Telegram chats (default: true) |
+| `HERDR_TG_REQUIRE_LOCAL_RELAY` | Reject non-loopback relay URLs (default: true) |
+| `HERDR_TG_ALLOW_PERSISTENT_TRUST` | Show persistent trust controls (default: false) |
 
 ## Web App
 
@@ -79,7 +85,7 @@ Messages are JSON with a `type` field:
 
 **Server → Client:** `agents` (complete state snapshot), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read)
 
-**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline)
+**Client → Server:** `respond` (allowlisted approval response), `agent_prompt` (semantic `herdr agent prompt` submission), `read_pane` (request terminal content), `send_keys` (allowlisted key sequences), `send_text` (raw text without newline)
 
 ## Deployment
 
