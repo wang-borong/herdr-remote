@@ -1,890 +1,355 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="manifest" href="data:application/json,{&quot;name&quot;:&quot;herdr-remote&quot;,&quot;short_name&quot;:&quot;herdr&quot;,&quot;display&quot;:&quot;standalone&quot;,&quot;background_color&quot;:&quot;%23e1e2e7&quot;,&quot;theme_color&quot;:&quot;%23e1e2e7&quot;}">
-<title>herdr-remote</title>
-<script type="module">
-import { play, bind } from 'https://esm.sh/cuelume@0.1.2';
-window.cue = play;
-document.addEventListener('DOMContentLoaded', () => bind());
-</script>
-<style>
-:root {
-  --bg: #e1e2e7; --surface: #d8d9e0; --border: #b6bbd1; --text: #1f2f66; --muted: #68709a;
-  --green: #587539; --red: #f52a65; --blue: #2e7de9; --orange: #8c6c3e;
-  --term-bg: #1a1b26; --term-text: #c0caf5;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1a1b26; --surface: #202331; --border: #2f3549; --text: #c0caf5; --muted: #565f89;
-    --green: #9ece6a; --red: #f7768e; --blue: #7aa2f7; --orange: #e0af68;
-    --term-bg: #1a1b26; --term-text: #c0caf5;
-  }
-}
-
-* { margin: 0; padding: 0; box-sizing: border-box; }
-*:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
-body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; background: var(--bg); color: var(--text); min-height: 100dvh; min-height: -webkit-fill-available; display: flex; flex-direction: column; width: 100%; overflow-x: hidden; }
-
-.header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); }
-.header h1 { font-size: 1rem; font-weight: 700; letter-spacing: -0.02em; }
-.header button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 8px; min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 8px; transition: color 0.15s, background 0.15s; }
-.header button:hover { color: var(--text); background: var(--border); }
-.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.dot.pulse { animation: pulse 2s infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
-
-.view { flex: 1; overflow-y: auto; }
-
-/* Settings */
-.settings { display: none; padding: 16px; }
-.settings.active { display: block; }
-.settings h2 { font-size: 0.9rem; margin-bottom: 12px; }
-.setting-group { background: var(--surface); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
-.setting-group label { font-size: 0.75rem; color: var(--muted); display: block; margin-bottom: 6px; }
-.setting-group input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
-.setting-group select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
-.setting-group .hint { font-size: 0.65rem; color: var(--muted); margin-top: 4px; }
-.setting-group button { margin-top: 8px; padding: 8px 16px; border-radius: 6px; border: none; background: var(--green); color: #000; font-weight: 600; font-size: 13px; cursor: pointer; }
-
-
-/* Agent list */
-.agents { padding: 12px; }
-.section-header { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin: 16px 0 8px; display: flex; align-items: center; gap: 5px; }
-.agent { background: var(--surface); border-radius: 12px; padding: 14px 16px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; cursor: pointer; border: 1px solid var(--border); transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease; }
-.agent:hover { border-color: color-mix(in srgb, var(--text) 20%, transparent); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-.agent:active { transform: scale(0.99); box-shadow: none; }
-.agent .dot { width: 10px; height: 10px; }
-.agent.blocked { border-color: var(--red); background: color-mix(in srgb, var(--red) 5%, var(--surface)); }
-.workspace-card { border-color: color-mix(in srgb, var(--text) 10%, transparent); }
-.count-pill { display: inline-block; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--text) 8%, transparent); font-size: 0.65rem; }
-.chip-strip { display: flex; align-items: center; gap: 8px; overflow-x: auto; padding: 8px 12px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-.chip-strip::-webkit-scrollbar { display: none; }
-.chip-label { font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); white-space: nowrap; }
-.chip { padding: 6px 14px; border-radius: 9999px; border: none; font-size: 0.8rem; font-weight: 500; white-space: nowrap; cursor: pointer; position: relative; transition: all 0.15s; background: var(--border); color: var(--muted); }
-.chip.active { background: var(--blue); color: #fff; }
-.chip.alert::after { content: ''; position: absolute; top: -2px; right: -2px; width: 8px; height: 8px; border-radius: 50%; background: var(--red); border: 2px solid var(--bg); }
-.chip:active { transform: scale(0.95); }
-.chip-add { border: 2px dashed var(--border); background: transparent; color: var(--muted); font-size: 1rem; padding: 4px 12px; }
-.chip-add:hover { border-color: var(--blue); color: var(--blue); }
-.agent .info { flex: 1; }
-.agent .project { font-size: 0.9rem; font-weight: 500; }
-.agent .meta { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
-
-/* Terminal view */
-.terminal-view { display: none; flex-direction: column; position: fixed; inset: 0; top: 49px; background: var(--bg); z-index: 50; }
-.terminal-view.active { display: flex; }
-.term-header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.term-header .back { background: none; border: none; color: var(--blue); font-size: 1.4rem; cursor: pointer; padding: 4px 8px; }
-.term-header .title { flex: 1; font-size: 0.8rem; font-weight: 500; }
-.term-header .refresh-btn { background: none; border: none; color: var(--muted); font-size: 1.1rem; cursor: pointer; }
-.term-content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 12px; background: var(--term-bg); font-family: 'SF Mono', 'Menlo', monospace; font-size: 0.8rem; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; word-break: break-all; color: var(--term-text); -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-.quick-actions { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
-.quick-actions button { padding: 10px 14px; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; flex: 1; min-width: 70px; display: flex; align-items: center; justify-content: center; gap: 6px; }
-.btn-yes { background: var(--green); color: #fff; } .btn-trust { background: var(--blue); color: #fff; } .btn-no { background: var(--red); color: #fff; }
-.term-input { border-top: 1px solid var(--border); padding: 8px 12px; display: flex; gap: 6px; background: var(--surface); flex-shrink: 0; }
-.term-input input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: monospace; min-width: 0; }
-.term-input button:last-child { padding: 10px 14px; border-radius: 6px; border: none; background: var(--blue); color: #fff; font-weight: 700; font-size: 16px; flex-shrink: 0; }
-.term-keys { border-top: 1px solid var(--border); padding: 8px 12px; display: flex; flex-direction: column; background: var(--surface); flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom, 8px); }
-.nav-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-weight: 500; cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: center; transition: background 0.15s, border-color 0.15s; }
-.nav-key:active { background: var(--border); transform: scale(0.97); }
-.mod-key { font-size: 12px; }
-.mod-key.armed { background: var(--blue); border-color: var(--blue); color: #fff; }
-.tab-btn { padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
-.tab-btn.active { background: var(--surface); color: var(--text); border-color: var(--blue); }
-.ctrl-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 12px; font-weight: 500; cursor: pointer; min-height: 44px; }
-.ctrl-key:active { background: var(--border); }
-.ctrl-key.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 30%, var(--border)); }
-.ctrl-key.confirm { background: var(--red); color: #fff; border-color: var(--red); }
-.digit-key { padding: 14px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 18px; font-family: monospace; font-weight: 600; cursor: pointer; min-height: 52px; display: flex; align-items: center; justify-content: center; }
-.digit-key:active { background: var(--border); }
-.queue-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: color-mix(in srgb, var(--text) 5%, var(--bg)); font-family: monospace; font-size: 12px; font-weight: 500; cursor: pointer; }
-.queue-chip:hover { border-color: var(--red); }
-.queue-chip.danger { border-color: color-mix(in srgb, var(--red) 40%, var(--border)); color: var(--red); }
-
-.empty { text-align: center; color: var(--muted); padding: 60px 20px; font-size: 0.85rem; }
-
-/* Desktop */
-@media (min-width: 768px) {
-  body { max-width: 960px; margin: 0 auto; padding: 0 16px; }
-  .terminal-view { position: static; display: none; }
-  .terminal-view.active { display: flex; height: calc(100dvh - 49px); }
-  .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
-  .section-header { grid-column: 1 / -1; }
-  .chip-strip { grid-column: 1 / -1; }
-  .term-content { min-height: 400px; }
-}
-@media (min-width: 1200px) {
-  body { max-width: 1100px; }
-  .agents { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
-}
-@media (max-width: 380px) {
-  .header { padding: 10px 12px; }
-  .header h1 { font-size: 0.9rem; }
-  .agents { padding: 8px; }
-  .agent { padding: 12px; }
-  .term-input { padding: 6px 8px; gap: 4px; }
-  .term-keys { padding: 6px 8px; }
-}
-@media (pointer: fine) {
-  .quick-actions button { flex: none; min-width: auto; padding: 8px 18px; }
-}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1020">
+  <meta name="color-scheme" content="dark light">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Herdr">
+  <meta name="description" content="通过 Tailscale 安全监控和控制 Herdr Agents">
+  <title>Herdr Control</title>
+  <link rel="icon" href="/logo.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
 
-<div class="header">
-  <span class="dot" id="statusDot"></span>
-  <h1>herdr</h1>
-  <span id="connLabel" style="font-size:0.65rem;font-weight:500"></span>
-  <span id="agentCount" style="font-size:0.7rem;color:var(--muted);margin-left:auto"></span>
-  <button onclick="toggleTimeline()" aria-label="Timeline"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
-  <button onclick="toggleSettings()" aria-label="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></button>
-</div>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand" aria-label="Herdr Control">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" role="img">
+            <path d="M7.3 4.4c1.8-1.6 4.7-1.6 6.5 0 .7.6 1.1 1.3 1.4 2.1 1.7.2 3.2 1 4.2 2.4 1.5 2.1 1.4 5-.3 6.9-1.1 1.2-2.6 1.9-4.2 2v1.1a2 2 0 0 1-2 2h-1.8a2 2 0 0 1-2-2v-1.1c-1.9-.2-3.6-1.2-4.6-2.7-1.3-2-1.1-4.7.4-6.5.7-.8 1.6-1.4 2.6-1.8-.4-.8-.4-1.7-.2-2.4Z"/>
+            <path class="brand-cut" d="M9 8.2c.9-.8 2.2-.8 3.1 0m2.8 2.8c.8-.7 2-.7 2.8 0M8.1 14.1c2.4 1.6 5.5 1.6 7.9 0"/>
+          </svg>
+        </span>
+        <span>
+          <strong>Herdr</strong>
+          <small>Agent Control</small>
+        </span>
+      </div>
 
-<div class="settings" id="settingsView">
-  <h2>Settings</h2>
-  <div class="setting-group">
-    <label for="relayUrl">Relay URL</label>
-    <input id="relayUrl" type="url" placeholder="wss://your-tunnel.trycloudflare.com" />
-    <label for="relayToken" style="margin-top:8px">Token (optional)</label>
-    <input id="relayToken" type="password" placeholder="shared secret" />
-    <button onclick="saveAndConnect()">Connect</button>
-    <div class="hint">Run <code>./relay/start.sh</code> to get a URL. <a href="https://github.com/dcolinmorgan/herdr-remote/blob/main/QUICKSTART.md" style="color:var(--blue)">Setup guide →</a></div>
-  </div>
+      <div class="topbar-status" aria-live="polite">
+        <span class="connection-dot is-connecting" id="connection-dot" aria-hidden="true"></span>
+        <span id="connection-label">正在连接</span>
+      </div>
 
-  <div class="setting-group">
-    <label>Push Notifications</label>
-    <div id="pushStatus" style="font-size:0.75rem;margin-bottom:6px"></div>
-    <button id="pushToggle" onclick="togglePush()">Enable Push</button>
-    <div class="hint">Get notified when agents are blocked, even with this tab closed.</div>
-  </div>
-  <div class="setting-group">
-    <label>Status</label>
-    <div id="settingsStatus" style="font-size:0.75rem"></div>
-  </div>
-</div>
+      <div class="topbar-actions">
+        <button class="icon-button" id="settings-button" type="button" aria-label="打开设置" title="设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/>
+            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/>
+          </svg>
+        </button>
+        <button class="primary-button topbar-new" id="new-agent-button" type="button" aria-label="新建 Agent">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          <span>新建 Agent</span>
+        </button>
+      </div>
+    </header>
 
-<div class="view" id="agentListView">
-  <div class="agents" id="agents"></div>
-</div>
-
-<div class="view" id="timelineView" style="display:none;padding:12px;">
-  <div id="timelineList" style="font-family:monospace;font-size:0.75rem;line-height:1.8;"></div>
-</div>
-
-<div class="terminal-view" id="terminalView">
-  <div class="term-header">
-    <button class="back" onclick="closeTerminal()" aria-label="Back to agent list"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></button>
-    <span class="title" id="termTitle"></span>
-    <button class="refresh-btn" onclick="refreshPane()" aria-label="Refresh pane"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
-  </div>
-  <div class="term-content" id="termContent">Loading…</div>
-  <div class="quick-actions" id="quickActions"></div>
-  <div class="term-input">
-    <button onclick="openCommandPalette()" aria-label="Commands" style="padding:10px 12px;border-radius:6px;border:1px solid var(--blue);background:var(--bg);color:var(--blue);font-weight:700;font-size:14px;flex-shrink:0">/</button>
-    <input id="termInput" placeholder="Type…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
-    <button onclick="toggleQuickDock()" aria-label="Quick actions" style="padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--orange);flex-shrink:0"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></button>
-    <button onclick="toggleKeysDock()" aria-label="Keys" style="padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--muted);flex-shrink:0"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.001M10 8h.001M14 8h.001M18 8h.001M8 12h.001M12 12h.001M16 12h.001M7 16h10"/></svg></button>
-    <button onclick="sendText()" aria-label="Send" style="padding:10px 14px;border-radius:6px;border:none;background:var(--blue);color:#fff;flex-shrink:0"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>
-  </div>
-  <div class="term-keys" id="termKeys" style="display:none">
-    <!-- Key queue strip (visible when composing) -->
-    <div id="keyQueueStrip" style="display:none;width:100%;padding:6px 0;border-bottom:1px solid var(--border);margin-bottom:6px;flex-wrap:wrap;gap:4px;align-items:center"></div>
-    <!-- Tab toggle -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;width:100%;margin-bottom:6px">
-      <button class="tab-btn active" id="tabKeys" onclick="switchKeyTab('keys')">Keys</button>
-      <button class="tab-btn" id="tabDigits" onclick="switchKeyTab('digits')">123</button>
+    <div class="connection-banner" id="connection-banner" role="status" hidden>
+      <span>与本机 Relay 的连接已断开，正在自动重连。</span>
+      <button id="reconnect-button" type="button">立即重试</button>
     </div>
-    <!-- Keys pad -->
-    <div id="keysPad" style="width:100%">
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:4px">
-        <button class="nav-key" onclick="fireKey('Escape')">Esc</button>
-        <button class="nav-key" style="grid-column:span 2" onclick="fireKey('Space')">Space</button>
-        <button class="nav-key" onclick="fireKey('Enter')">⏎ Enter</button>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:4px">
-        <button class="nav-key" onclick="fireKey('Tab')">Tab</button>
-        <button class="nav-key" onclick="fireKey('Left')">←</button>
-        <button class="nav-key" onclick="fireKey('Down')">↓</button>
-        <button class="nav-key" onclick="fireKey('Up')">↑</button>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:4px">
-        <button class="nav-key" onclick="fireKey('Right')">→</button>
-        <button class="nav-key mod-key" id="modShift" onclick="armMod('shift')">⇧ Shift</button>
-        <button class="nav-key mod-key" id="modCtrl" onclick="armMod('ctrl')">Ctrl</button>
-      </div>
-      <!-- Ctrl presets -->
-      <div>
-        <button onclick="toggleCtrlPresets()" style="background:none;border:none;color:var(--muted);font-size:0.7rem;cursor:pointer;padding:2px 4px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase">Presets <span id="ctrlChevron">▸</span></button>
-        <div id="ctrlPresets" style="display:none;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:4px"></div>
-      </div>
-    </div>
-    <!-- Digits pad -->
-    <div id="digitsPad" style="display:none;width:100%;grid-template-columns:repeat(3,1fr);gap:4px"></div>
-    <!-- Action keys for blocked state -->
-    <div id="actionKeys" style="width:100%;margin-top:4px"></div>
+
+    <main class="workspace" id="main-content">
+      <aside class="agent-panel" aria-labelledby="dashboard-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">LOCAL HERD</p>
+            <h1 id="dashboard-title">Agent Dashboard</h1>
+          </div>
+          <span class="agent-total" id="agent-total">0 Agents</span>
+        </div>
+
+        <section class="status-overview" aria-label="Agent 状态概览">
+          <button class="status-card status-card-attention" type="button" data-filter="attention">
+            <span class="status-card-value" id="blocked-count">0</span>
+            <span class="status-card-label">需要处理</span>
+          </button>
+          <button class="status-card status-card-working" type="button" data-filter="working">
+            <span class="status-card-value" id="working-count">0</span>
+            <span class="status-card-label">工作中</span>
+          </button>
+          <button class="status-card status-card-done" type="button" data-filter="done">
+            <span class="status-card-value" id="done-count">0</span>
+            <span class="status-card-label">已完成</span>
+          </button>
+        </section>
+
+        <div class="agent-tools">
+          <label class="search-field" for="agent-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+            <input id="agent-search" type="search" placeholder="搜索项目、路径或 Agent" autocomplete="off">
+          </label>
+          <div class="filter-tabs" role="group" aria-label="筛选 Agent">
+            <button class="filter-tab is-active" type="button" data-filter="all" aria-pressed="true">全部</button>
+            <button class="filter-tab" type="button" data-filter="attention" aria-pressed="false">待处理</button>
+            <button class="filter-tab" type="button" data-filter="working" aria-pressed="false">工作中</button>
+            <button class="filter-tab" type="button" data-filter="done" aria-pressed="false">完成</button>
+          </div>
+        </div>
+
+        <div class="agent-list" id="agent-list" aria-live="polite"></div>
+      </aside>
+
+      <section class="agent-detail" id="agent-detail" aria-label="Agent 控制台">
+        <div class="detail-empty" id="detail-empty">
+          <div class="empty-illustration" aria-hidden="true">
+            <span></span><span></span><span></span>
+            <svg viewBox="0 0 24 24"><path d="M7.3 4.4c1.8-1.6 4.7-1.6 6.5 0 .7.6 1.1 1.3 1.4 2.1 1.7.2 3.2 1 4.2 2.4 1.5 2.1 1.4 5-.3 6.9-1.1 1.2-2.6 1.9-4.2 2v1.1a2 2 0 0 1-2 2h-1.8a2 2 0 0 1-2-2v-1.1c-1.9-.2-3.6-1.2-4.6-2.7-1.3-2-1.1-4.7.4-6.5.7-.8 1.6-1.4 2.6-1.8-.4-.8-.4-1.7-.2-2.4Z"/></svg>
+          </div>
+          <p class="eyebrow">REMOTE CONTROL</p>
+          <h2>选择一个 Agent 开始控制</h2>
+          <p>查看实时输出、提交 Prompt，或在需要时安全地发送 Ctrl+C。</p>
+          <button class="secondary-button" id="empty-new-agent" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            在仓库中启动 Codex
+          </button>
+        </div>
+
+        <article class="detail-console" id="detail-console" hidden>
+          <header class="detail-header">
+            <button class="icon-button mobile-back" id="mobile-back" type="button" aria-label="返回 Agent 列表">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+            </button>
+            <div class="detail-identity">
+              <div class="agent-avatar" id="detail-avatar" aria-hidden="true">C</div>
+              <div>
+                <div class="detail-title-row">
+                  <h2 id="detail-title">Agent</h2>
+                  <span class="status-pill" id="detail-status">待命</span>
+                </div>
+                <p id="detail-meta">—</p>
+              </div>
+            </div>
+            <div class="detail-actions">
+              <button class="icon-button" id="copy-output-button" type="button" aria-label="复制输出" title="复制输出">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+              <button class="danger-button" id="interrupt-button" type="button" aria-label="Interrupt 当前 Agent">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                <span>Interrupt</span>
+              </button>
+            </div>
+          </header>
+
+          <section class="blocked-banner" id="blocked-banner" aria-labelledby="blocked-title" hidden>
+            <div class="blocked-copy">
+              <span class="blocked-icon" aria-hidden="true">!</span>
+              <div>
+                <h3 id="blocked-title">Agent 正在等待你的操作</h3>
+                <p id="blocked-prompt"></p>
+              </div>
+            </div>
+            <div class="approval-actions" id="approval-actions"></div>
+          </section>
+
+          <section class="terminal-card" aria-labelledby="terminal-title">
+            <div class="terminal-toolbar">
+              <div class="terminal-label">
+                <span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+                <strong id="terminal-title">最近输出</strong>
+                <span id="last-updated">等待数据</span>
+              </div>
+              <div class="terminal-controls">
+                <label for="line-count">行数</label>
+                <select id="line-count">
+                  <option value="60">60</option>
+                  <option value="120" selected>120</option>
+                  <option value="200">200</option>
+                </select>
+                <button class="toolbar-button is-active" id="auto-refresh-button" type="button" aria-pressed="true">自动刷新</button>
+                <button class="toolbar-button" id="refresh-output-button" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2m.5 5v-5h-5"/></svg>
+                  刷新
+                </button>
+              </div>
+            </div>
+            <pre class="terminal-output" id="terminal-output" tabindex="0" aria-label="Agent 最近输出">正在读取 Agent 输出…</pre>
+          </section>
+
+          <section class="composer-card" aria-labelledby="composer-title">
+            <div class="composer-heading">
+              <div>
+                <p class="eyebrow">NEXT INSTRUCTION</p>
+                <h3 id="composer-title">发送 Prompt</h3>
+              </div>
+              <span id="prompt-count">0 / 1000</span>
+            </div>
+            <div class="prompt-shortcuts" aria-label="常用 Prompt">
+              <button type="button" data-prompt="请汇报当前进展、已完成事项和下一步计划。">汇报进展</button>
+              <button type="button" data-prompt="请检查当前改动并运行相关测试，修复发现的问题。">检查并测试</button>
+              <button type="button" data-prompt="请总结当前上下文，列出关键决策和未完成事项。">总结上下文</button>
+            </div>
+            <form id="prompt-form">
+              <label class="sr-only" for="prompt-input">发送给 Agent 的 Prompt</label>
+              <textarea id="prompt-input" maxlength="1000" rows="4" placeholder="告诉 Agent 接下来要做什么…" required></textarea>
+              <div class="composer-footer">
+                <span><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd> 发送</span>
+                <button class="primary-button send-button" id="send-prompt-button" type="submit">
+                  <span>发送 Prompt</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+                </button>
+              </div>
+            </form>
+          </section>
+        </article>
+      </section>
+    </main>
   </div>
-  <!-- Quick actions dock -->
-  <div class="term-keys" id="quickDock" style="display:none">
-    <div style="display:flex;align-items:center;justify-content:space-between;width:100%;margin-bottom:8px">
-      <span style="font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted)">Quick Actions</span>
-      <button onclick="toggleQuickDock()" aria-label="Close" style="background:none;border:none;color:var(--muted);font-size:1rem;cursor:pointer">✕</button>
-    </div>
-    <div style="width:100%">
-      <p style="font-size:0.6rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:4px">Confirm</p>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px">
-        <button class="nav-key" style="color:var(--green);border-color:var(--green)" onclick="quickSend('yes')">yes</button>
-        <button class="nav-key" style="color:var(--red);border-color:var(--red)" onclick="quickSend('no')">no</button>
+
+  <dialog class="modal new-agent-modal" id="new-agent-dialog" aria-labelledby="new-agent-title">
+    <div class="modal-shell">
+      <header class="modal-header">
+        <div>
+          <p class="eyebrow">NEW CODEX</p>
+          <h2 id="new-agent-title">在仓库中启动 Agent</h2>
+          <p>只能浏览配置的 Workspace 白名单，Relay 不会执行任意 Shell 命令。</p>
+        </div>
+        <button class="icon-button modal-close" type="button" data-close-dialog="new-agent-dialog" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </header>
+
+      <div class="new-agent-grid">
+        <section class="repository-browser" aria-labelledby="repository-title">
+          <div class="section-title-row">
+            <div>
+              <span class="step-number">1</span>
+              <h3 id="repository-title">选择工作目录</h3>
+            </div>
+            <button class="toolbar-button" id="directory-refresh-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2m.5 5v-5h-5"/></svg>
+              刷新
+            </button>
+          </div>
+
+          <form class="path-jump" id="path-jump-form">
+            <label for="path-jump-input">快速跳转</label>
+            <div>
+              <input id="path-jump-input" type="text" placeholder="~/Workspace/others" autocomplete="off">
+              <button type="submit">前往</button>
+            </div>
+          </form>
+
+          <div class="directory-bar">
+            <button class="icon-button" id="directory-up-button" type="button" aria-label="返回上级目录" title="上级目录">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
+            </button>
+            <span id="directory-path">正在读取 Workspace…</span>
+          </div>
+          <ul class="directory-list" id="directory-list" aria-live="polite"></ul>
+          <p class="directory-note" id="directory-note" hidden>目录项目过多，仅显示前 200 项。</p>
+
+          <div class="selected-directory" id="selected-directory" hidden>
+            <span class="selected-check" aria-hidden="true">✓</span>
+            <div>
+              <strong>已选择工作目录</strong>
+              <span id="selected-directory-path"></span>
+            </div>
+          </div>
+          <button class="secondary-button select-directory-button" id="select-directory-button" type="button" disabled>选择当前目录</button>
+        </section>
+
+        <section class="initial-prompt" aria-labelledby="initial-prompt-title">
+          <div class="section-title-row">
+            <div>
+              <span class="step-number">2</span>
+              <h3 id="initial-prompt-title">设置首条任务</h3>
+            </div>
+            <span id="initial-prompt-count">0 / 1000</span>
+          </div>
+          <label for="initial-prompt-input">初始 Prompt <span>可选</span></label>
+          <textarea id="initial-prompt-input" maxlength="1000" rows="10" placeholder="例如：请解释这个代码库，检查当前改动，并给出下一步实现计划。"></textarea>
+          <div class="launch-summary">
+            <span>Agent</span><strong>Codex</strong>
+            <span>目录</span><strong id="launch-directory">尚未选择</strong>
+            <span>启动方式</span><strong>Herdr workspace</strong>
+          </div>
+        </section>
       </div>
-      <p style="font-size:0.6rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:4px">Common</p>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
-        <button class="nav-key" onclick="quickSend('continue')">continue</button>
-        <button class="nav-key" onclick="quickSend('retry')">retry</button>
-        <button class="nav-key" onclick="quickSend('skip')">skip</button>
-        <button class="nav-key" onclick="quickSend('commit and push')">commit & push</button>
+
+      <footer class="modal-footer">
+        <p><span class="security-dot" aria-hidden="true"></span>目录路径会在 Relay 端再次校验</p>
+        <div>
+          <button class="ghost-button" type="button" data-close-dialog="new-agent-dialog">取消</button>
+          <button class="primary-button" id="start-agent-button" type="button" disabled>
+            <span>启动 Codex</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>
+          </button>
+        </div>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog class="modal confirm-modal" id="interrupt-dialog" aria-labelledby="interrupt-title">
+    <div class="confirm-shell">
+      <span class="confirm-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+      </span>
+      <h2 id="interrupt-title">中断当前 Agent？</h2>
+      <p>这会向所选 Pane 发送 <code>Ctrl+C</code>。未保存的当前操作可能会停止。</p>
+      <div class="confirm-actions">
+        <button class="ghost-button" type="button" data-close-dialog="interrupt-dialog">取消</button>
+        <button class="danger-button danger-solid" id="confirm-interrupt-button" type="button">确认 Interrupt</button>
       </div>
     </div>
-  </div>
-</div>
+  </dialog>
 
-<!-- Command palette -->
-<div id="cmdPalette" style="display:none;position:fixed;inset:0;z-index:100;">
-  <div onclick="closePalette()" style="position:absolute;inset:0;background:rgba(0,0,0,0.5)"></div>
-  <div style="position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:420px;max-height:50dvh;background:var(--surface);border-top-left-radius:16px;border-top-right-radius:16px;border-top:1px solid var(--border);display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,8px)">
-    <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
-      <span style="font-size:0.8rem;font-weight:600;flex:1">Commands</span>
-      <button onclick="closePalette()" aria-label="Close" style="background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer">✕</button>
+  <dialog class="modal settings-modal" id="settings-dialog" aria-labelledby="settings-title">
+    <div class="settings-shell">
+      <header class="modal-header">
+        <div>
+          <p class="eyebrow">PREFERENCES</p>
+          <h2 id="settings-title">设置</h2>
+        </div>
+        <button class="icon-button modal-close" type="button" data-close-dialog="settings-dialog" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </header>
+      <div class="settings-content">
+        <section class="settings-section">
+          <div>
+            <h3>外观</h3>
+            <p>选择适合当前设备的显示主题。</p>
+          </div>
+          <label class="select-field" for="theme-select">
+            <span class="sr-only">主题</span>
+            <select id="theme-select">
+              <option value="system">跟随系统</option>
+              <option value="dark">深色</option>
+              <option value="light">浅色</option>
+            </select>
+          </label>
+        </section>
+        <section class="settings-section">
+          <div>
+            <h3>浏览器通知</h3>
+            <p id="push-status">正在检查浏览器通知支持…</p>
+          </div>
+          <button class="secondary-button compact-button" id="push-toggle-button" type="button" disabled>启用通知</button>
+        </section>
+        <section class="session-card">
+          <span class="session-avatar" id="session-avatar" aria-hidden="true">T</span>
+          <div>
+            <strong id="session-name">安全会话</strong>
+            <span id="session-login">等待 Relay 身份信息</span>
+          </div>
+          <span class="session-badge" id="session-auth">连接中</span>
+        </section>
+        <p class="settings-security">
+          Relay 仅监听本机回环地址。网页通过 Tailscale Serve 的身份头授权，长期 Relay token 不会保存在浏览器的 localStorage 中。
+        </p>
+      </div>
     </div>
-    <input id="cmdSearch" type="text" placeholder="Search commands…" autocomplete="off" autocorrect="off" style="margin:8px 12px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:14px" oninput="filterCommands()" />
-    <div id="cmdList" style="overflow-y:auto;padding:4px 12px;"></div>
-  </div>
-</div>
+  </dialog>
 
-<script>
-
-let ws = null, agents = [], activePane = null, refreshInterval = null, userScrolledUp = false;
-let timeline = [], prevStatuses = {};
-let activeWorkspace = null;
-let activeTab = null;
-
-// Settings — auto-detect relay when served from same origin
-const autoRelayUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
-const DEMO_RELAY = 'wss://herdr-remote-demo.yyrzrh5wfg.workers.dev';
-const isDemo = location.hostname.includes('herdr-demo.pages.dev');
-const isSelfRelay = !isDemo && !location.hostname.includes('pages.dev') && !location.hostname.includes('localhost');
-const savedUrl = localStorage.getItem('herdr_relay_url') || (isSelfRelay ? autoRelayUrl : (isDemo ? DEMO_RELAY : ''));
-const urlToken = new URLSearchParams(location.search).get('token');
-if (urlToken) localStorage.setItem('herdr_relay_token', urlToken);
-const savedToken = localStorage.getItem('herdr_relay_token') || '';
-document.getElementById('relayUrl').value = savedUrl;
-document.getElementById('relayToken').value = savedToken;
-
-
-
-function toggleSettings() {
-  const s = document.getElementById('settingsView');
-  const show = s.style.display !== 'block';
-  s.style.display = show ? 'block' : 'none';
-  document.getElementById('agentListView').style.display = show ? 'none' : '';
-  document.getElementById('timelineView').style.display = 'none';
-  if (show) {
-    document.getElementById('settingsStatus').innerHTML = ws && ws.readyState === 1
-      ? `<span style="color:var(--green)">● Connected</span> · ${agents.length} agents`
-      : `<span style="color:var(--red)">● Disconnected</span>`;
-  }
-}
-
-function toggleTimeline() {
-  const t = document.getElementById('timelineView');
-  const show = t.style.display !== 'block';
-  t.style.display = show ? 'block' : 'none';
-  document.getElementById('agentListView').style.display = show ? 'none' : '';
-  document.getElementById('settingsView').style.display = 'none';
-  if (show) renderTimeline();
-}
-
-function renderTimeline() {
-  const el = document.getElementById('timelineList');
-  if (!timeline.length) { el.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px">No activity yet. Status changes appear here.</p>'; return; }
-  el.innerHTML = timeline.map(e => {
-    const t = e.time.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-    const color = e.status==='blocked'?'var(--red)':e.status==='working'?'var(--green)':'var(--muted)';
-    return `<div style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)"><span style="color:var(--muted)">${t}</span><span style="flex:1">${e.project} (${e.agent})</span><span style="color:${color}">${e.status}</span></div>`;
-  }).join('');
-}
-
-function saveAndConnect() {
-  const url = document.getElementById('relayUrl').value.trim();
-  if (!url) return;
-  localStorage.setItem('herdr_relay_url', url);
-  const token = document.getElementById('relayToken').value.trim();
-  if (token) localStorage.setItem('herdr_relay_token', token);
-  else localStorage.removeItem('herdr_relay_token');
-  connect();
-  toggleSettings();
-}
-
-// Connection
-function connect() {
-  let url = localStorage.getItem('herdr_relay_url') || (isSelfRelay ? autoRelayUrl : (isDemo ? DEMO_RELAY : ''));
-  if (!url) { showSetup(); return; }
-  if (ws) ws.close();
-  setStatus('connecting');
-  // Append token as query param if stored separately
-  const token = localStorage.getItem('herdr_relay_token');
-  let wsUrl = url;
-  if (token) wsUrl += (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
-  ws = new WebSocket(wsUrl);
-  ws.onopen = () => { setStatus('connected'); if(window.cue) cue('ready'); };
-  ws.onclose = () => { setStatus('disconnected'); setTimeout(connect, 3000); };
-  ws.onerror = () => setStatus('disconnected');
-  ws.onmessage = (e) => handleMessage(JSON.parse(e.data));
-}
-
-function setStatus(s) {
-  const dot = document.getElementById('statusDot');
-  const label = document.getElementById('connLabel');
-  dot.style.background = s==='connected'?'var(--green)':s==='connecting'?'var(--orange)':'var(--red)';
-  label.textContent = s==='connected'?'live':s==='connecting'?'connecting…':'offline';
-  label.style.color = s==='connected'?'var(--green)':s==='connecting'?'var(--orange)':'var(--red)';
-}
-
-function showSetup() {
-  document.getElementById('agents').innerHTML = `<div class="empty">
-    <p style="font-size:1.5rem;margin-bottom:12px">🐑</p>
-    <p><strong>herdr-remote</strong></p>
-    <p style="margin-top:8px">Monitor & approve agents from your phone</p>
-    <p style="margin-top:16px"><button onclick="tryDemo()" style="padding:10px 20px;border-radius:8px;border:none;background:var(--blue);color:#fff;font-weight:600;font-size:0.85rem;cursor:pointer">Try Demo</button></p>
-    <p style="margin-top:16px;font-size:0.75rem;color:var(--muted);text-align:left;max-width:280px;margin-left:auto;margin-right:auto">
-      <strong>Connect your own:</strong><br>
-      1. Run: <code style="font-size:0.7rem">cd relay && ./start.sh</code><br>
-      2. Tap ⚙ → paste the wss:// URL<br>
-    </p>
-  </div>`;
-}
-function tryDemo() {
-  localStorage.setItem('herdr_relay_url', 'wss://herdr-remote-demo.yyrzrh5wfg.workers.dev');
-  localStorage.removeItem('herdr_relay_token');
-  document.getElementById('relayUrl').value = 'wss://herdr-remote-demo.yyrzrh5wfg.workers.dev';
-  connect();
-}
-
-function handleMessage(msg) {
-  if (msg.type === 'agents') {
-    // Track timeline on status changes
-    for (const a of msg.agents) {
-      const prev = prevStatuses[a.pane_id];
-      if (prev && prev !== a.status) {
-        timeline.unshift({project: a.project, agent: a.agent, status: a.status, time: new Date()});
-        if (timeline.length > 100) timeline.pop();
-      }
-      prevStatuses[a.pane_id] = a.status;
-    }
-    agents = msg.agents; render();
-  }
-  else if (msg.type === 'agent_update') {
-    const update = msg.agent;
-    if (!update || !update.pane_id) return;
-    const existing = agents.find(a => a.pane_id === update.pane_id);
-    const previousStatus = existing?.status || prevStatuses[update.pane_id];
-    if (existing) Object.assign(existing, update);
-    else agents.push({...update});
-    if (previousStatus && previousStatus !== update.status) {
-      timeline.unshift({project: update.project, agent: update.agent, status: update.status, time: new Date()});
-      if (timeline.length > 100) timeline.pop();
-    }
-    prevStatuses[update.pane_id] = update.status;
-    render();
-  }
-  else if (msg.type === 'blocked') {
-    const a = agents.find(x => x.pane_id === msg.pane_id);
-    if (a) { a.status='blocked'; a.prompt=msg.prompt; a.options=msg.options; }
-    else agents.push({...msg, status:'blocked'});
-    if(window.cue) cue('chime');
-    timeline.unshift({project: msg.project, agent: msg.agent, status: 'blocked', time: new Date()});
-    if (timeline.length > 100) timeline.pop();
-    render();
-  } else if (msg.type === 'pane_content' && msg.pane_id === activePane) {
-    const el = document.getElementById('termContent');
-    const prevHeight = el.scrollHeight;
-    const prevScroll = el.scrollTop;
-    el.textContent = msg.content || '(empty)';
-    if (userScrolledUp) {
-      // Keep scroll position relative to bottom (content may have grown at top)
-      const growth = el.scrollHeight - prevHeight;
-      el.scrollTop = prevScroll + growth;
-    } else {
-      el.scrollTop = el.scrollHeight;
-    }
-  }
-}
-
-function render() {
-  document.getElementById('agentCount').textContent = agents.length ? `${agents.length}` : '';
-  const workspaces = [...new Set(agents.map(a => a.workspace_id).filter(Boolean))];
-  if (workspaces.length <= 1) {
-    activeWorkspace = null;
-    activeTab = null;
-    renderAgentList(agents);
-    return;
-  }
-  renderWorkspaces(workspaces);
-}
-
-function renderWorkspaces(workspaces) {
-  let html = '';
-  // Hoist blocked agents
-  const blocked = agents.filter(a => a.status === 'blocked');
-  if (blocked.length) {
-    html += `<div class="section-header" style="color:var(--red)"><span class="dot" style="background:var(--red)"></span>Needs you <span style="opacity:0.6">(${blocked.length})</span></div>`;
-    html += blocked.map(a => agentCard(a)).join('');
-  }
-  // Space chip strip
-  html += `<div class="chip-strip"><span class="chip-label">Spaces</span>`;
-  html += `<button class="chip${activeWorkspace===null?' active':''}" onclick="backToWorkspaces()">All</button>`;
-  for (const wsId of workspaces) {
-    const wsAgents = agents.filter(a => a.workspace_id === wsId);
-    const hasBlocked = wsAgents.some(a => a.status === 'blocked');
-    const name = wsAgents[0]?.project || wsId.slice(0, 8);
-    html += `<button class="chip${activeWorkspace===wsId?' active':''}${hasBlocked?' alert':''}" onclick="selectWorkspace('${wsId}')">${name}</button>`;
-  }
-  html += `</div>`;
-  // Tab chip strip (always show when workspace selected)
-  if (activeWorkspace) {
-    const wsTabs = [...new Set(agents.filter(a => a.workspace_id === activeWorkspace).map(a => a.tab_id).filter(Boolean))];
-    html += `<div class="chip-strip"><span class="chip-label">Tabs</span>`;
-    if (wsTabs.length > 1) {
-      html += `<button class="chip${!activeTab?' active':''}" onclick="selectTab(null)">All</button>`;
-    }
-    wsTabs.forEach((tid, i) => {
-      const tabAgents = agents.filter(a => a.tab_id === tid);
-      const hasBlocked = tabAgents.some(a => a.status === 'blocked');
-      const tabLabel = tabAgents[0]?.label || 'Tab '+(i+1);
-      html += `<button class="chip${activeTab===tid?' active':''}${hasBlocked?' alert':''}" onclick="selectTab('${tid}')">${tabLabel}</button>`;
-    });
-    html += `<button class="chip chip-add" onclick="createTab('${activeWorkspace}')">+</button>`;
-    html += `</div>`;
-  }
-  // Agent list (filtered)
-  let filtered = agents;
-  if (activeWorkspace) filtered = filtered.filter(a => a.workspace_id === activeWorkspace);
-  if (activeTab) filtered = filtered.filter(a => a.tab_id === activeTab);
-  // Don't re-show blocked that are already hoisted
-  const working = filtered.filter(a => a.status==='working');
-  const done = filtered.filter(a => a.status==='done');
-  const idle = filtered.filter(a => a.status==='idle'||a.status==='unknown');
-  if (working.length) html += section('Working', 'var(--green)', working);
-  if (done.length) html += section('Done', 'var(--muted)', done);
-  if (idle.length) html += section('Idle', 'var(--muted)', idle);
-  if (!agents.length) html = '<div class="empty">Waiting for agents…</div>';
-  document.getElementById('agents').innerHTML = html;
-}
-
-function renderAgentList(list) {
-  const blocked = list.filter(a => a.status==='blocked');
-  const working = list.filter(a => a.status==='working');
-  const done = list.filter(a => a.status==='done');
-  const idle = list.filter(a => a.status==='idle'||a.status==='unknown');
-  let html = '';
-  if (blocked.length) html += section('Blocked', 'var(--red)', blocked);
-  if (working.length) html += section('Working', 'var(--green)', working);
-  if (done.length) html += section('Done', 'var(--muted)', done);
-  if (idle.length) html += section('Idle', 'var(--muted)', idle);
-  if (!list.length) html = '<div class="empty">Waiting for agents…</div>';
-  document.getElementById('agents').innerHTML = html;
-}
-
-function selectWorkspace(id) { activeWorkspace = id; activeTab = null; render(); }
-function backToWorkspaces() { activeWorkspace = null; activeTab = null; render(); }
-function selectTab(id) { activeTab = id; render(); }
-
-function createTab(workspaceId) {
-  if (!ws) return;
-  if (window.cue) cue('sparkle');
-  ws.send(JSON.stringify({type:'create_tab', workspace_id: workspaceId}));
-  setTimeout(() => { activeTab = null; }, 1500);
-}
-
-function agentCard(a) {
-  const color = a.status==='blocked'?'var(--red)':a.status==='working'?'var(--green)':'var(--muted)';
-  const pulseClass = a.status==='working'?' pulse':'';
-  const host = a.host&&a.host!=='local'?` <span style="color:var(--orange);font-size:0.6rem">@${a.host}</span>`:'';
-  const cwd = a.cwd ? `<span style="font-family:monospace;opacity:0.7">${a.cwd.split('/').slice(-2).join('/')}</span>` : '';
-  const label = a.label||a.project||a.agent;
-  return `<div class="agent${a.status==='blocked'?' blocked':''}" role="button" tabindex="0" aria-label="${label}, ${a.status}" onclick="openTerminal('${a.pane_id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${a.pane_id}')}">
-    <span class="dot${pulseClass}" style="background:${color}" aria-hidden="true"></span>
-    <div class="info"><div class="project">${label}${host}</div><div class="meta">${a.agent} · ${cwd}</div></div>
-    <span style="color:var(--muted);font-size:1.2rem" aria-hidden="true">›</span>
-  </div>`;
-}
-
-function section(title, color, list) {
-  return `<div class="section-header"><span class="dot" style="background:${color}"></span>${title}</div>` +
-    list.map(a => agentCard(a)).join('');
-}
-
-function openTerminal(paneId) {
-  activePane = paneId; paneLines = 200; userScrolledUp = false;
-  const a = agents.find(x => x.pane_id===paneId);
-  document.getElementById('termTitle').textContent = a?`${a.label||a.project} · ${a.agent}`:paneId;
-  document.getElementById('agentListView').style.display = 'none';
-  document.getElementById('terminalView').classList.add('active');
-  const qa = document.getElementById('quickActions');
-  const ak = document.getElementById('actionKeys');
-  if (a&&a.status==='blocked') {
-    const opts = a.options||['yes, single permission','trust, always allow','no (tab to edit)'];
-    qa.innerHTML = opts.map(o => {
-      const cls = o.includes('yes')||o.includes('approve')?'btn-yes':o.includes('trust')?'btn-trust':'btn-no';
-      const icon = o.includes('yes') ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : o.includes('trust') ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>' : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-      const label = o.includes('yes') ? 'Yes' : o.includes('trust') ? 'Yes All' : 'No';
-      return `<button class="${cls}" onclick="respond('${o.replace(/'/g,"\\'")}')">${icon} ${label}</button>`;
-    }).join('');
-    ak.innerHTML = '';
-  } else {
-    qa.innerHTML='';
-    ak.innerHTML='';
-  }
-  refreshPane();
-  refreshInterval = setInterval(refreshPane, 3000);
-}
-
-function closeTerminal() {
-  activePane = null; clearInterval(refreshInterval);
-  document.getElementById('terminalView').classList.remove('active');
-  document.getElementById('agentListView').style.display = '';
-}
-
-let paneLines = 200;
-function refreshPane() { if(ws&&activePane) ws.send(JSON.stringify({type:'read_pane',pane_id:activePane,lines:paneLines})); }
-function loadMore() { paneLines = Math.min(paneLines + 500, 5000); refreshPane(); }
-function sendText() {
-  const i=document.getElementById('termInput');
-  if(!i.value||!ws||!activePane)return;
-  ws.send(JSON.stringify({type:'send_text',pane_id:activePane,text:i.value}));
-  ws.send(JSON.stringify({type:'send_keys',pane_id:activePane,keys:['Enter']}));
-  i.value=''; setTimeout(refreshPane,500);
-}
-function sendKey(k){if(!ws||!activePane)return;ws.send(JSON.stringify({type:'send_keys',pane_id:activePane,keys:[k]}));setTimeout(refreshPane,300);}
-function sendKeys(k){if(!ws||!activePane)return;ws.send(JSON.stringify({type:'send_keys',pane_id:activePane,keys:k}));setTimeout(refreshPane,300);}
-
-// --- Nav Tray (collie-style) ---
-let keyQueue = [], armedMod = null, ctrlConfirm = null;
-const CTRL_PRESETS = [
-  {label:'Ctrl C', keys:['ctrl+c']},
-  {label:'Ctrl D', keys:['ctrl+d'], danger:true},
-  {label:'Ctrl U', keys:['ctrl+u']},
-  {label:'Ctrl R', keys:['ctrl+r']},
-  {label:'Ctrl L', keys:['ctrl+l']},
-  {label:'Ctrl Z', keys:['ctrl+z'], danger:true},
-];
-const DANGER_KEYS = new Set(['ctrl+c','ctrl+d','ctrl+z']);
-
-function fireKey(k) {
-  if(window.cue) cue('tick');
-  const composed = armedMod ? `${armedMod}+${k}` : k;
-  if (keyQueue.length > 0 || armedMod) {
-    keyQueue.push(composed);
-    armedMod = null;
-    if(window.cue) cue('droplet');
-    renderKeyQueue();
-    renderMods();
-  } else {
-    sendKeys([composed]);
-  }
-}
-
-function armMod(m) {
-  armedMod = armedMod === m ? null : m;
-  if(window.cue) cue('toggle');
-  renderMods();
-}
-
-function renderMods() {
-  const s = document.getElementById('modShift');
-  const c = document.getElementById('modCtrl');
-  if (s) s.classList.toggle('armed', armedMod === 'shift');
-  if (c) c.classList.toggle('armed', armedMod === 'ctrl');
-}
-
-function renderKeyQueue() {
-  const strip = document.getElementById('keyQueueStrip');
-  if (!keyQueue.length && !armedMod) { strip.style.display = 'none'; return; }
-  strip.style.display = 'flex';
-  let html = keyQueue.map((k,i) => {
-    const isDanger = DANGER_KEYS.has(k.toLowerCase());
-    const label = k.includes('+') ? k.replace('ctrl+','Ctrl ').replace('shift+','\u21e7 ') : k;
-    return `<span class="queue-chip${isDanger?' danger':''}" onclick="removeQueueKey(${i})">${label} \u00d7</span>`;
-  }).join('');
-  if (armedMod) html += `<span style="color:var(--muted);font-size:12px;padding:4px">${armedMod==='shift'?'\u21e7':'Ctrl'} + \u2026</span>`;
-  html += `<span style="margin-left:auto;display:flex;gap:4px">`;
-  html += `<button onclick="sendQueuedKeys()" style="padding:6px 12px;border-radius:6px;border:none;background:${keyQueue.some(k=>DANGER_KEYS.has(k.toLowerCase()))?'var(--red)':'var(--blue)'};color:#fff;font-size:12px;font-weight:600;cursor:pointer">Send</button>`;
-  html += `<button onclick="clearKeyQueue()" style="padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--muted);font-size:12px;cursor:pointer">✕</button>`;
-  html += `</span>`;
-  strip.innerHTML = html;
-}
-
-function removeQueueKey(i) { keyQueue.splice(i,1); renderKeyQueue(); }
-function clearKeyQueue() { keyQueue=[]; armedMod=null; renderKeyQueue(); renderMods(); }
-function sendQueuedKeys() {
-  if (!keyQueue.length) return;
-  if(window.cue) cue('success');
-  sendKeys(keyQueue);
-  keyQueue=[]; armedMod=null; renderKeyQueue(); renderMods();
-}
-
-function toggleKeysDock() {
-  const el = document.getElementById('termKeys');
-  const quick = document.getElementById('quickDock');
-  const show = el.style.display === 'none';
-  el.style.display = show ? '' : 'none';
-  if (show) quick.style.display = 'none'; // mutual exclusive
-  if(window.cue) cue(show ? 'page' : 'tick');
-}
-
-function toggleQuickDock() {
-  const el = document.getElementById('quickDock');
-  const keys = document.getElementById('termKeys');
-  const show = el.style.display === 'none';
-  el.style.display = show ? '' : 'none';
-  if (show) keys.style.display = 'none'; // mutual exclusive
-  if(window.cue) cue(show ? 'page' : 'tick');
-}
-
-function quickSend(text) {
-  if (!ws || !activePane) return;
-  if(window.cue) cue('success');
-  ws.send(JSON.stringify({type:'send_text', pane_id: activePane, text: text}));
-  ws.send(JSON.stringify({type:'send_keys', pane_id: activePane, keys:['Enter']}));
-  document.getElementById('quickDock').style.display = 'none';
-  setTimeout(refreshPane, 500);
-}
-
-function switchKeyTab(tab) {
-  document.getElementById('tabKeys').classList.toggle('active', tab==='keys');
-  document.getElementById('tabDigits').classList.toggle('active', tab==='digits');
-  document.getElementById('keysPad').style.display = tab==='keys' ? '' : 'none';
-  const dp = document.getElementById('digitsPad');
-  dp.style.display = tab==='digits' ? 'grid' : 'none';
-  if (tab==='digits' && !dp.innerHTML) {
-    dp.innerHTML = [1,2,3,4,5,6,7,8,9].map(d => `<button class="digit-key" onclick="fireKey('${d}')">${d}</button>`).join('');
-  }
-}
-
-function toggleCtrlPresets() {
-  const el = document.getElementById('ctrlPresets');
-  const chevron = document.getElementById('ctrlChevron');
-  const show = el.style.display === 'none';
-  el.style.display = show ? 'grid' : 'none';
-  chevron.textContent = show ? '\u25be' : '\u25b8';
-  if (show && !el.innerHTML) {
-    el.innerHTML = CTRL_PRESETS.map(p => {
-      const cls = p.danger ? 'ctrl-key danger' : 'ctrl-key';
-      return `<button class="${cls}" onclick="pressCtrl('${p.label}')">${p.label}</button>`;
-    }).join('');
-  }
-}
-
-function pressCtrl(label) {
-  const preset = CTRL_PRESETS.find(p => p.label === label);
-  if (!preset) return;
-  // If composing (queue has items), just stage it
-  if (keyQueue.length > 0) { keyQueue.push(...preset.keys); renderKeyQueue(); return; }
-  // Two-tap confirm for danger keys
-  if (preset.danger && ctrlConfirm !== label) {
-    ctrlConfirm = label;
-    if(window.cue) cue('error');
-    const el = document.getElementById('ctrlPresets');
-    el.innerHTML = CTRL_PRESETS.map(p => {
-      const cls = p.danger ? (p.label===label?'ctrl-key confirm':'ctrl-key danger') : 'ctrl-key';
-      const txt = p.label===label ? 'Confirm?' : p.label;
-      return `<button class="${cls}" onclick="pressCtrl('${p.label}')">${txt}</button>`;
-    }).join('');
-    setTimeout(() => { ctrlConfirm=null; toggleCtrlPresets(); toggleCtrlPresets(); }, 3000);
-    return;
-  }
-  ctrlConfirm = null;
-  sendKeys(preset.keys);
-}
-
-function toggleArrows(){}
-function hideArrows(){}
-function respond(t){if(!ws||!activePane)return;if(window.cue)cue('success');ws.send(JSON.stringify({type:'respond',pane_id:activePane,text:t}));document.getElementById('quickActions').innerHTML='';setTimeout(refreshPane,500);}
-document.getElementById('termInput').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();sendText();}});
-document.getElementById('termContent').addEventListener('scroll', function() {
-  const el = this;
-  userScrolledUp = (el.scrollHeight - el.scrollTop - el.clientHeight) > 50;
-  if (el.scrollTop === 0 && paneLines < 5000) loadMore();
-});
-
-if (savedUrl) setTimeout(connect, 100); else showSetup();
-
-// --- Command Palette ---
-const COMMANDS = {
-  claude: [
-    {cmd: '/compact', desc: 'Summarize context to free tokens', common: true},
-    {cmd: '/clear', desc: 'Start fresh conversation', common: true, danger: true},
-    {cmd: '/model', desc: 'Switch model', common: true},
-    {cmd: '/status', desc: 'Show version and connectivity', common: true},
-    {cmd: '/context', desc: 'Visualize context-window usage', common: true},
-    {cmd: '/review', desc: 'Review a pull request', common: true},
-    {cmd: '/diff', desc: 'Show uncommitted changes', common: false},
-    {cmd: '/resume', desc: 'Resume previous conversation', common: false},
-    {cmd: '/help', desc: 'Show all commands', common: false},
-  ],
-  codex: [
-    {cmd: '/compact', desc: 'Summarize history to free context', common: true},
-    {cmd: '/clear', desc: 'Reset and start new chat', common: true, danger: true},
-    {cmd: '/diff', desc: 'Show git diff of working tree', common: true},
-    {cmd: '/model', desc: 'Switch model', common: true},
-    {cmd: '/status', desc: 'Show model and token usage', common: true},
-    {cmd: '/review', desc: 'Code review working tree', common: true},
-    {cmd: '/mention', desc: 'Attach files to context', common: false},
-    {cmd: '/plan', desc: 'Enter plan mode', common: false},
-  ],
-  pi: [
-    {cmd: '/compact', desc: 'Compact context', common: true},
-    {cmd: '/new', desc: 'Start new session', common: true, danger: true},
-    {cmd: '/model', desc: 'Switch model', common: true},
-    {cmd: '/session', desc: 'Show session info', common: true},
-    {cmd: '/tree', desc: 'Jump to earlier point', common: true},
-    {cmd: '/share', desc: 'Share session as gist', common: true},
-    {cmd: '/copy', desc: 'Copy last response', common: false},
-    {cmd: '/reload', desc: 'Reload extensions and skills', common: false},
-  ],
-  opencode: [
-    {cmd: '/compact', desc: 'Compact current session', common: true},
-    {cmd: '/new', desc: 'Start new session', common: true, danger: true},
-    {cmd: '/models', desc: 'List and switch models', common: true},
-    {cmd: '/undo', desc: 'Undo last turn and revert', common: true, danger: true},
-    {cmd: '/share', desc: 'Share session', common: true},
-    {cmd: '/diff', desc: 'Show working changes', common: false},
-    {cmd: '/export', desc: 'Export to Markdown', common: false},
-  ],
-};
-
-function getAgentCommands() {
-  const a = agents.find(x => x.pane_id === activePane);
-  if (!a) return [];
-  const key = (a.agent || '').toLowerCase();
-  if (COMMANDS[key]) return COMMANDS[key];
-  if (key.startsWith('claude')) return COMMANDS.claude;
-  if (key.startsWith('codex')) return COMMANDS.codex;
-  if (key.startsWith('pi') || key === 'kiro') return COMMANDS.pi;
-  if (key.startsWith('opencode')) return COMMANDS.opencode;
-  return COMMANDS.claude; // fallback
-}
-
-function openCommandPalette() {
-  if(window.cue) cue('page');
-  document.getElementById('cmdPalette').style.display = '';
-  document.getElementById('cmdSearch').value = '';
-  filterCommands();
-  document.getElementById('cmdSearch').focus();
-}
-function closePalette() { document.getElementById('cmdPalette').style.display = 'none'; }
-
-function filterCommands() {
-  const q = (document.getElementById('cmdSearch').value || '').toLowerCase();
-  const cmds = getAgentCommands();
-  const filtered = q ? cmds.filter(c => c.cmd.includes(q) || c.desc.toLowerCase().includes(q)) : cmds.filter(c => c.common);
-  const el = document.getElementById('cmdList');
-  if (!filtered.length) { el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:0.8rem">No commands match</div>'; return; }
-  el.innerHTML = filtered.map(c => `<div role="button" tabindex="0" onclick="runCommand('${c.cmd}')" onkeydown="if(event.key==='Enter')runCommand('${c.cmd}')" style="padding:10px 12px;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px;margin-bottom:2px;transition:background 0.15s" onmouseover="this.style.background='var(--border)'" onmouseout="this.style.background=''">
-    <span style="font-family:monospace;font-weight:600;font-size:0.85rem;${c.danger?'color:var(--red)':'color:var(--blue)'}">${c.cmd}</span>
-    <span style="flex:1;font-size:0.75rem;color:var(--muted)">${c.desc}</span>
-  </div>`).join('');
-}
-
-function runCommand(cmd) {
-  closePalette();
-  if (!ws || !activePane) return;
-  ws.send(JSON.stringify({type:'send_text', pane_id: activePane, text: cmd}));
-  ws.send(JSON.stringify({type:'send_keys', pane_id: activePane, keys:['Enter']}));
-  setTimeout(refreshPane, 500);
-}
-
-// --- Web Push ---
-let pushSubscription = null;
-
-async function initPush() {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    document.getElementById('pushStatus').textContent = 'Push not supported in this browser';
-    document.getElementById('pushToggle').style.display = 'none';
-    return;
-  }
-  try {
-    const reg = await navigator.serviceWorker.register('/sw.js');
-    pushSubscription = await reg.pushManager.getSubscription();
-    updatePushUI();
-  } catch (e) {
-    document.getElementById('pushStatus').textContent = 'Service worker error: ' + e.message;
-  }
-}
-
-function updatePushUI() {
-  const btn = document.getElementById('pushToggle');
-  const status = document.getElementById('pushStatus');
-  if (pushSubscription) {
-    btn.textContent = 'Disable Push';
-    btn.style.background = 'var(--red)';
-    status.innerHTML = '<span style="color:var(--green)">● Enabled</span>';
-  } else {
-    btn.textContent = 'Enable Push';
-    btn.style.background = 'var(--green)';
-    status.innerHTML = '<span style="color:var(--muted)">○ Disabled</span>';
-  }
-}
-
-async function togglePush() {
-  if (pushSubscription) {
-    // Unsubscribe
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({type: 'push_unsubscribe', subscription: pushSubscription.toJSON()}));
-    }
-    await pushSubscription.unsubscribe();
-    pushSubscription = null;
-    updatePushUI();
-  } else {
-    // Subscribe
-    try {
-      const relayUrl = localStorage.getItem('herdr_relay_url') || '';
-      const httpUrl = relayUrl.replace('wss://', 'https://').replace('ws://', 'http://');
-      const resp = await fetch(httpUrl + '/api/vapid-public-key');
-      const {publicKey} = await resp.json();
-      if (!publicKey) {
-        document.getElementById('pushStatus').textContent = 'VAPID key not configured on relay';
-        return;
-      }
-      const reg = await navigator.serviceWorker.ready;
-      pushSubscription = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(publicKey)
-      });
-      if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({type: 'push_subscribe', subscription: pushSubscription.toJSON()}));
-      }
-      updatePushUI();
-    } catch (e) {
-      document.getElementById('pushStatus').textContent = 'Error: ' + e.message;
-    }
-  }
-}
-
-function urlBase64ToUint8Array(base64String) {
-  const padding = '='.repeat((4 - base64String.length % 4) % 4);
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const raw = atob(base64);
-  const arr = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
-  return arr;
-}
-
-initPush();
-</script>
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
 </body>
 </html>

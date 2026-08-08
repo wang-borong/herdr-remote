@@ -44,6 +44,17 @@ cd herdr-remote/relay && ./start.sh
 
 Open [herdr-demo.pages.dev](https://herdr-demo.pages.dev) on your phone, paste the tunnel URL.
 
+### Private Tailscale web console
+
+For a private, identity-aware web dashboard that works on desktop and mobile browsers, keep the relay on localhost and publish it with Tailscale Serve:
+
+```bash
+cd relay
+./install-tailscale-web.sh
+```
+
+The web console includes the Agent Dashboard, live pane output, semantic Prompt submission, confirmed Interrupt, safe repository browsing, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
+
 ## Telegram Bot
 
 For the hardened Telegram-only setup (recommended for personal remote control):
@@ -103,7 +114,7 @@ Finished and blocked notifications include **Open output & reply**. You can also
        └───── WebSocket ──┴──────────────────┘
                    │
         ┌──────────┴──────────┐
-        │   relay (:8375)     │  <- Cloudflare tunnel
+        │ relay (127.0.0.1)   │  <- Tailscale Serve / local clients
         └──────────┬──────────┘
                    │
      ┌─────────────┼─────────────┐
@@ -138,6 +149,7 @@ The relay listens on `127.0.0.1` by default. Remote binding requires the explici
 - macOS 14+ (menu bar app)
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/) (relay/TUI/bot)
 - `cloudflared` (for remote access)
+- `tailscale` (recommended for the private responsive web console)
 - herdr 0.8+ for semantic Telegram prompt submission
 - Zero-dep plugin: [`herdr-push`](https://github.com/dcolinmorgan/herdr-push)
 

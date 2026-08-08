@@ -50,6 +50,7 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         relay.pane_remote_map.clear()
         relay.clients.clear()
         relay.agent_cache.clear()
+        relay.client_auth.clear()
         relay.agent_start_in_progress = False
 
     def test_secure_runtime_defaults_to_loopback_and_requires_auth(self):
@@ -71,6 +72,132 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "Remote relay binding is disabled"):
                 relay.validate_runtime_config()
+
+    def test_tailscale_runtime_requires_loopback_and_an_explicit_user_allowlist(self):
+        with (
+            patch.object(relay, "AUTH_TOKEN", ""),
+            patch.object(relay, "TAILSCALE_WEB_ENABLED", True),
+            patch.object(relay, "TAILSCALE_ALLOWED_USERS", {"owner@example.com"}),
+            patch.object(relay, "RELAY_HOST", "127.0.0.1"),
+        ):
+            relay.validate_runtime_config()
+
+        with (
+            patch.object(relay, "TAILSCALE_WEB_ENABLED", True),
+            patch.object(relay, "TAILSCALE_ALLOWED_USERS", set()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HERDR_TAILSCALE_ALLOWED_USERS"):
+                relay.validate_runtime_config()
+
+        with (
+            patch.object(relay, "TAILSCALE_WEB_ENABLED", True),
+            patch.object(relay, "TAILSCALE_ALLOWED_USERS", {"owner@example.com"}),
+            patch.object(relay, "RELAY_HOST", "0.0.0.0"),
+            patch.object(relay, "ALLOW_REMOTE_BIND", True),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "requires HERDR_RELAY_HOST to be loopback"):
+                relay.validate_runtime_config()
+
+    async def test_tailscale_websocket_auth_checks_user_proxy_and_origin(self):
+        headers = {
+            "Upgrade": "websocket",
+            "Host": "herdr.tailnet.ts.net",
+            "Origin": "https://herdr.tailnet.ts.net",
+            "Tailscale-User-Login": "owner@example.com",
+            "Tailscale-User-Name": "Owner",
+        }
+        request = SimpleNamespace(path="/ws", headers=headers)
+        connection = SimpleNamespace(remote_address=("127.0.0.1", 43123))
+
+        with (
+            patch.object(relay, "TAILSCALE_WEB_ENABLED", True),
+            patch.object(relay, "TAILSCALE_ALLOWED_USERS", {"owner@example.com"}),
+        ):
+            response = await relay.process_request(connection, request)
+
+        self.assertIsNone(response)
+        self.assertEqual(relay.client_auth.pop(id(connection))["login"], "owner@example.com")
+
+        with (
+            patch.object(relay, "TAILSCALE_WEB_ENABLED", True),
+            patch.object(relay, "TAILSCALE_ALLOWED_USERS", {"someone-else@example.com"}),
+        ):
+            response = await relay.process_request(connection, request)
+        self.assertEqual(response.status_code, 403)
+
+        evil_request = SimpleNamespace(
+            path="/ws",
+            headers={**headers, "Origin": "https://attacker.example"},
+        )
+        with (
+            patch.object(relay, "TAILSCALE_WEB_ENABLED", True),
+            patch.object(relay, "TAILSCALE_ALLOWED_USERS", {"owner@example.com"}),
+        ):
+            response = await relay.process_request(connection, evil_request)
+        self.assertEqual(response.status_code, 403)
+
+        wrong_port_request = SimpleNamespace(
+            path="/ws",
+            headers={**headers, "Origin": "https://herdr.tailnet.ts.net:444"},
+        )
+        with (
+            patch.object(relay, "TAILSCALE_WEB_ENABLED", True),
+            patch.object(relay, "TAILSCALE_ALLOWED_USERS", {"owner@example.com"}),
+        ):
+            response = await relay.process_request(connection, wrong_port_request)
+        self.assertEqual(response.status_code, 403)
+
+        untrusted_connection = SimpleNamespace(remote_address=("100.64.0.2", 43123))
+        with (
+            patch.object(relay, "TAILSCALE_WEB_ENABLED", True),
+            patch.object(relay, "TAILSCALE_ALLOWED_USERS", {"owner@example.com"}),
+        ):
+            response = await relay.process_request(untrusted_connection, request)
+        self.assertEqual(response.status_code, 401)
+
+    def test_token_query_can_be_exchanged_for_a_short_lived_http_only_session(self):
+        token = "b" * 64
+        request = SimpleNamespace(
+            path=f"/?token={token}",
+            headers={"Host": "relay.example.com"},
+        )
+        connection = SimpleNamespace(remote_address=("127.0.0.1", 43123))
+        with patch.object(relay, "AUTH_TOKEN", token):
+            auth = relay.authenticate_request(connection, request)
+            self.assertTrue(auth["set_cookie"])
+            cookie_header = relay.web_session_cookie(request)
+            self.assertIn("HttpOnly", cookie_header)
+            self.assertIn("SameSite=Strict", cookie_header)
+            self.assertIn("; Secure", cookie_header)
+
+            session = relay.create_web_session(now=1000)
+            self.assertTrue(relay.valid_web_session(session, now=1001))
+            self.assertFalse(
+                relay.valid_web_session(session, now=1000 + relay.WEB_SESSION_TTL_SECONDS + 1)
+            )
+
+    async def test_token_bootstrap_serves_split_assets_through_session_cookie(self):
+        token = "c" * 64
+        connection = SimpleNamespace(remote_address=("127.0.0.1", 43123))
+        initial_request = SimpleNamespace(
+            path=f"/?token={token}",
+            headers={"Host": "127.0.0.1:8375"},
+        )
+        with patch.object(relay, "AUTH_TOKEN", token):
+            response = await relay.process_request(connection, initial_request)
+            self.assertEqual(response.status_code, 200)
+            cookie = response.headers["Set-Cookie"]
+            self.assertIn("HttpOnly", cookie)
+            cookie_pair = cookie.split(";", 1)[0]
+
+            asset_request = SimpleNamespace(
+                path="/app.js",
+                headers={"Host": "127.0.0.1:8375", "Cookie": cookie_pair},
+            )
+            asset_response = await relay.process_request(connection, asset_request)
+
+        self.assertEqual(asset_response.status_code, 200)
+        self.assertIn(b"new WebSocket", asset_response.body)
 
     async def test_agent_prompt_uses_herdr_api_and_redacts_audit_content(self):
         pane_id = "w0:p1"
@@ -218,13 +345,19 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch.object(relay, "WORKSPACE_ROOTS", [repo.parent.resolve()]),
-                patch.object(relay, "start_local_codex", return_value=started_agent) as start_codex,
+                patch.object(relay, "start_local_codex") as start_codex,
+                patch.object(
+                    relay.asyncio,
+                    "to_thread",
+                    new=AsyncMock(return_value=started_agent),
+                ) as to_thread,
                 patch.object(relay, "broadcast", new=AsyncMock()) as broadcast,
                 patch.object(relay, "audit") as audit,
             ):
                 await relay.handle_client(ws)
 
-            start_codex.assert_called_once_with(str(repo.resolve()), prompt)
+            to_thread.assert_awaited_once_with(start_codex, str(repo.resolve()), prompt)
+            start_codex.assert_not_called()
             self.assertIn({"type": "agent_started", "ok": True, "agent": started_agent}, ws.sent)
             self.assertEqual(broadcast.await_args.args[0]["agent"]["pane_id"], "w9:p1")
             self.assertIn(f"chars={len(prompt)}", audit.call_args.args[4])

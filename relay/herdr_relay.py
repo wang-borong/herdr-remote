@@ -4,19 +4,35 @@
 # dependencies = ["websockets>=14.0", "zeroconf>=0.80.0", "pywebpush>=2.0.0", "py-vapid>=1.9.0"]
 # ///
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
-import asyncio, hashlib, hmac, ipaddress, json, logging, os, re, shlex, shutil, signal, socket, subprocess, time
+import asyncio
+import hashlib
+import hmac
+import ipaddress
+import json
+import logging
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+from email.header import decode_header, make_header
+from http.cookies import CookieError, SimpleCookie
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
-from agent_state import complete_agent_update_message
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 try:
     from websockets.asyncio.server import serve
 except ImportError:
     from websockets.server import serve
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
-from logging.handlers import RotatingFileHandler
-import sys
+from agent_state import complete_agent_update_message
 
 os.umask(0o077)
 
@@ -59,6 +75,14 @@ AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")
 ALLOW_INSECURE_NO_AUTH = env_flag("HERDR_ALLOW_INSECURE_NO_AUTH")
 ALLOW_REMOTE_BIND = env_flag("HERDR_ALLOW_REMOTE_BIND")
 MDNS_ENABLED = env_flag("HERDR_MDNS_ENABLED")
+TAILSCALE_WEB_ENABLED = env_flag("HERDR_TAILSCALE_WEB")
+TAILSCALE_ALLOWED_USERS = {
+    value.strip().casefold()
+    for value in os.environ.get("HERDR_TAILSCALE_ALLOWED_USERS", "").split(",")
+    if value.strip()
+}
+WEB_SESSION_COOKIE = "herdr_session"
+WEB_SESSION_TTL_SECONDS = 8 * 60 * 60
 
 # VAPID Web Push
 VAPID_PUBLIC_KEY = os.environ.get("HERDR_VAPID_PUBLIC", "")
@@ -107,6 +131,7 @@ pane_remote_map = {}
 known_panes = set()
 agent_cache = {}
 agent_start_in_progress = False
+client_auth = {}
 
 SAFE_RESPONSES = {"y", "n", "a", "yes", "no", "trust", "yes, single permission", "trust, always allow", "no (tab to edit)", "approve all pending", "configure individually", "exit (cancel subagents)"}
 SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"} | {
@@ -559,113 +584,267 @@ async def event_push():
             await broadcast(update)
 
 
-async def process_request(connection, request):
-    """Handle HTTP POST on the same port as WebSocket."""
-    from websockets.http11 import Response
+def request_header(request, name: str) -> str:
+    headers = getattr(request, "headers", {})
+    try:
+        value = headers.get(name, "")
+    except (AttributeError, LookupError, TypeError, ValueError):
+        value = ""
+    if value:
+        return str(value)
+    try:
+        for key, raw_value in headers.raw_items():
+            if key.casefold() == name.casefold():
+                return str(raw_value)
+    except (AttributeError, TypeError):
+        pass
+    return ""
+
+
+def request_query(request) -> dict[str, list[str]]:
+    path = getattr(request, "path", "") or ""
+    query = path.split("?", 1)[1] if "?" in path else ""
+    return parse_qs(query, keep_blank_values=True)
+
+
+def clean_identity_header(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        value = str(make_header(decode_header(value)))
+    except (LookupError, UnicodeError, ValueError):
+        pass
+    return "".join(character for character in value.strip() if 31 < ord(character) != 127)[:256]
+
+
+def connection_is_loopback(connection) -> bool:
+    remote = getattr(connection, "remote_address", None)
+    if not remote:
+        return False
+    host = remote[0] if isinstance(remote, (tuple, list)) else str(remote)
+    return is_loopback_host(str(host))
+
+
+def create_web_session(now: int | None = None) -> str:
+    if not AUTH_TOKEN:
+        return ""
+    expires = int(now if now is not None else time.time()) + WEB_SESSION_TTL_SECONDS
+    payload = f"v1:{expires}"
+    signature = hmac.new(AUTH_TOKEN.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}:{signature}"
+
+
+def valid_web_session(value: str, now: int | None = None) -> bool:
+    if not AUTH_TOKEN or not value:
+        return False
+    try:
+        version, expires_text, signature = value.split(":", 2)
+        expires = int(expires_text)
+    except (TypeError, ValueError):
+        return False
+    if version != "v1" or expires < int(now if now is not None else time.time()):
+        return False
+    expected = hmac.new(
+        AUTH_TOKEN.encode(), f"{version}:{expires}".encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def request_cookie(request, name: str) -> str:
+    raw_cookie = request_header(request, "Cookie")
+    if not raw_cookie:
+        return ""
+    cookie = SimpleCookie()
+    try:
+        cookie.load(raw_cookie)
+    except CookieError:
+        return ""
+    morsel = cookie.get(name)
+    return morsel.value if morsel else ""
+
+
+def authenticate_request(connection, request) -> dict:
+    authorization = request_header(request, "Authorization")
+    if AUTH_TOKEN and authorization[:7].casefold() == "bearer ":
+        supplied = authorization[7:]
+        if hmac.compare_digest(supplied, AUTH_TOKEN):
+            return {"ok": True, "mode": "token", "login": "", "name": ""}
+
+    query_token = request_query(request).get("token", [""])[0]
+    if AUTH_TOKEN and query_token and hmac.compare_digest(query_token, AUTH_TOKEN):
+        return {
+            "ok": True,
+            "mode": "token-query",
+            "login": "",
+            "name": "",
+            "set_cookie": True,
+        }
+
+    if valid_web_session(request_cookie(request, WEB_SESSION_COOKIE)):
+        return {"ok": True, "mode": "web-session", "login": "", "name": ""}
+
+    tailscale_login = clean_identity_header(request_header(request, "Tailscale-User-Login"))
+    if TAILSCALE_WEB_ENABLED and tailscale_login:
+        if not connection_is_loopback(connection):
+            return {
+                "ok": False,
+                "status": 401,
+                "reason": "Unauthorized",
+                "message": "Untrusted Tailscale identity proxy",
+            }
+        if "*" not in TAILSCALE_ALLOWED_USERS and tailscale_login.casefold() not in TAILSCALE_ALLOWED_USERS:
+            return {
+                "ok": False,
+                "status": 403,
+                "reason": "Forbidden",
+                "message": "This Tailscale user is not allowed",
+            }
+        return {
+            "ok": True,
+            "mode": "tailscale",
+            "login": tailscale_login,
+            "name": clean_identity_header(request_header(request, "Tailscale-User-Name")),
+        }
+
+    if ALLOW_INSECURE_NO_AUTH:
+        return {"ok": True, "mode": "development", "login": "", "name": ""}
+
+    return {
+        "ok": False,
+        "status": 401,
+        "reason": "Unauthorized",
+        "message": "Authentication required",
+    }
+
+
+def websocket_origin_allowed(request) -> bool:
+    origin = request_header(request, "Origin")
+    if not origin:
+        return True
+    if origin == "null":
+        return False
+    host_header = request_header(request, "Host")
+    if not host_header:
+        return False
+    try:
+        parsed_origin = urlsplit(origin)
+        parsed_host = urlsplit(f"//{host_header}")
+        origin_host = (parsed_origin.hostname or "").casefold().rstrip(".")
+        request_host = (parsed_host.hostname or "").casefold().rstrip(".")
+        if not origin_host or origin_host != request_host:
+            return False
+        origin_port = parsed_origin.port or (443 if parsed_origin.scheme == "https" else 80)
+        request_port = parsed_host.port or (443 if parsed_origin.scheme == "https" else 80)
+        if origin_port != request_port:
+            return False
+    except ValueError:
+        return False
+    if parsed_origin.scheme not in {"http", "https"}:
+        return False
+    return parsed_origin.scheme == "https" or is_loopback_host(origin_host)
+
+
+def web_session_cookie(request) -> str:
+    value = create_web_session()
+    host_header = request_header(request, "Host")
+    try:
+        host = urlsplit(f"//{host_header}").hostname or ""
+    except ValueError:
+        host = ""
+    secure = "" if is_loopback_host(host) else "; Secure"
+    return (
+        f"{WEB_SESSION_COOKIE}={value}; Path=/; Max-Age={WEB_SESSION_TTL_SECONDS}; "
+        f"HttpOnly; SameSite=Strict{secure}"
+    )
+
+
+def http_headers(content_type: str, cache_control: str = "no-cache", extra: list | None = None):
     from websockets.datastructures import Headers
 
-    # Token auth (if configured)
-    if AUTH_TOKEN:
-        token = None
-        for key, value in request.headers.raw_items():
-            if key.lower() == "authorization" and value.startswith("Bearer "):
-                token = value[len("Bearer "):]
-        # Also check query param ?token=
-        if not token and "token=" in (request.path or ""):
-            import urllib.parse
-            _, qs = request.path.split("?", 1) if "?" in request.path else (request.path, "")
-            params = urllib.parse.parse_qs(qs)
-            token = params.get("token", [None])[0]
-        if token is None or not hmac.compare_digest(token, AUTH_TOKEN):
-            headers = Headers([("Content-Type", "text/plain")])
-            return Response(401, "Unauthorized", headers, b"Invalid token\n")
+    values = [
+        ("Content-Type", content_type),
+        ("Cache-Control", cache_control),
+        ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
+        ("Cross-Origin-Opener-Policy", "same-origin"),
+        ("Cross-Origin-Resource-Policy", "same-origin"),
+        ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"),
+        ("Referrer-Policy", "no-referrer"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+    ]
+    if extra:
+        values.extend(extra)
+    return Headers(values)
 
-    # Check if this is a WebSocket upgrade
-    upgrade = None
-    for key, value in request.headers.raw_items():
-        if key.lower() == "upgrade":
-            upgrade = value.lower()
+
+async def process_request(connection, request):
+    """Authenticate HTTP/WebSocket traffic and serve the browser client."""
+    from websockets.http11 import Response
+
+    auth = authenticate_request(connection, request)
+    if not auth["ok"]:
+        headers = http_headers("text/plain; charset=utf-8", "no-store")
+        return Response(
+            auth["status"], auth["reason"], headers,
+            f"{auth['message']}\n".encode(),
+        )
+
+    upgrade = request_header(request, "Upgrade").casefold()
     if upgrade == "websocket":
-        return None  # proceed with WebSocket handshake
+        if not websocket_origin_allowed(request):
+            headers = http_headers("text/plain; charset=utf-8", "no-store")
+            return Response(403, "Forbidden", headers, b"Cross-origin WebSocket rejected\n")
+        client_auth[id(connection)] = auth
+        return None
 
-    # For CORS preflight
-    if request.path and "OPTIONS" in str(request.headers):
-        headers = Headers([
-            ("Access-Control-Allow-Origin", "*"),
-            ("Access-Control-Allow-Methods", "POST, OPTIONS"),
-            ("Access-Control-Allow-Headers", "Content-Type"),
-        ])
-        return Response(204, "No Content", headers, b"")
+    # EVENT PUSH MUST BE HANDLED BEFORE STATIC ROUTES. A pushed event may
+    # arrive on `/` as `?d=<urlencoded json>`.
+    params = request_query(request)
+    if "d" in params:
+        payload = params["d"][0]
+        try:
+            event = json.loads(payload)
+            if not isinstance(event, dict):
+                raise ValueError("event payload must be an object")
+            event_queue.put_nowait(event)
+            log.debug("push: received event type=%s", event.get("type", "unknown"))
+        except (asyncio.QueueFull, json.JSONDecodeError, TypeError, ValueError) as e:
+            log.warning("push: unparseable event payload (%d bytes): %s", len(payload), e)
+        return Response(200, "OK", http_headers("text/plain; charset=utf-8", "no-store"), b"ok\n")
 
-    # ⚠ EVENT PUSH MUST BE HANDLED FIRST — ORDER IS LOAD-BEARING.
-    # A pushed event arrives as `?d=<urlencoded json>` on ANY path.
-    # The README shows POST to :8375 without naming a path, so `/` is common.
-    # Every static route below `return`s, so if reached first the event is
-    # dropped while caller still gets 200. Add new static routes BELOW, never above.
-    import urllib.parse
-    if "?" in (request.path or ""):
-        _, qs = (request.path or "").split("?", 1)
-        params = urllib.parse.parse_qs(qs)
-        if "d" in params:
-            try:
-                event = json.loads(params["d"][0])  # parse_qs already decodes
-                event_queue.put_nowait(event)
-                log.debug("push: received event type=%s", event.get("type", "unknown"))
-            except Exception as e:
-                log.warning("push: unparseable event payload (%d bytes): %s", len(params["d"][0]), e)
-            headers = Headers([("Access-Control-Allow-Origin", "*")])
-            return Response(200, "OK", headers, b"ok\n")
+    path = (getattr(request, "path", "") or "/").split("?", 1)[0]
+    web_dir = Path(__file__).resolve().parent.parent / "web"
+    static_files = {
+        "/": ("index.html", "text/html; charset=utf-8", "no-cache"),
+        "/index.html": ("index.html", "text/html; charset=utf-8", "no-cache"),
+        "/app.css": ("app.css", "text/css; charset=utf-8", "no-cache"),
+        "/app.js": ("app.js", "application/javascript; charset=utf-8", "no-cache"),
+        "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json", "no-cache"),
+        "/sw.js": ("sw.js", "application/javascript; charset=utf-8", "no-cache"),
+        "/logo.svg": ("logo.svg", "image/svg+xml", "public, max-age=86400"),
+    }
+    if path in static_files:
+        filename, content_type, cache_control = static_files[path]
+        asset_path = web_dir / filename
+        if asset_path.is_file():
+            extra_headers = []
+            if path == "/sw.js":
+                extra_headers.append(("Service-Worker-Allowed", "/"))
+            if auth.get("set_cookie"):
+                extra_headers.append(("Set-Cookie", web_session_cookie(request)))
+            return Response(
+                200, "OK", http_headers(content_type, cache_control, extra_headers),
+                asset_path.read_bytes(),
+            )
 
-    # Serve web app for GET / or GET /index.html
-    path = (request.path or "/").split("?")[0]
-    if path in ("/", "/index.html"):
-        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
-        index_path = os.path.join(web_dir, "index.html")
-        if os.path.isfile(index_path):
-            with open(index_path, "rb") as f:
-                body = f.read()
-            headers = Headers([
-                ("Content-Type", "text/html; charset=utf-8"),
-                ("Cache-Control", "no-cache"),
-            ])
-            return Response(200, "OK", headers, body)
-
-    # Serve service worker
-    if path == "/sw.js":
-        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
-        sw_path = os.path.join(web_dir, "sw.js")
-        if os.path.isfile(sw_path):
-            with open(sw_path, "rb") as f:
-                body = f.read()
-            headers = Headers([
-                ("Content-Type", "application/javascript"),
-                ("Cache-Control", "no-cache"),
-                ("Service-Worker-Allowed", "/"),
-            ])
-            return Response(200, "OK", headers, body)
-
-    # Serve VAPID public key
     if path == "/api/vapid-public-key":
         body = json.dumps({"publicKey": VAPID_PUBLIC_KEY}).encode()
-        headers = Headers([
-            ("Content-Type", "application/json"),
-            ("Access-Control-Allow-Origin", "*"),
-        ])
-        return Response(200, "OK", headers, body)
+        return Response(200, "OK", http_headers("application/json", "no-store"), body)
 
-    # Serve logo.svg
-    if path == "/logo.svg":
-        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
-        svg_path = os.path.join(web_dir, "logo.svg")
-        if os.path.isfile(svg_path):
-            with open(svg_path, "rb") as f:
-                body = f.read()
-            headers = Headers([("Content-Type", "image/svg+xml")])
-            return Response(200, "OK", headers, body)
-
-    # Fallback for unmatched paths
-    headers = Headers([("Access-Control-Allow-Origin", "*")])
-    return Response(404, "Not Found", headers, b"not found\n")
+    return Response(
+        404, "Not Found", http_headers("text/plain; charset=utf-8", "no-store"),
+        b"not found\n",
+    )
 
 
 async def handle_client(ws):
@@ -694,8 +873,18 @@ async def handle_client(ws):
 
     log.info("Client connected: ip=%s device=%s origin=%s", ip, device, origin or "-")
     clients.add(ws)
+    auth = client_auth.get(id(ws), {})
     connected_at = time.monotonic()
     try:
+        await ws.send(json.dumps({
+            "type": "session",
+            "auth": auth.get("mode", "token"),
+            "user": {
+                "login": auth.get("login", ""),
+                "name": auth.get("name", ""),
+            },
+        }))
+        await ws.send(json.dumps({"type": "agents", "agents": list(agent_cache.values())}))
         async for raw in ws:
             try:
                 msg = json.loads(raw)
@@ -878,6 +1067,7 @@ async def handle_client(ws):
         duration = int(time.monotonic() - connected_at)
         log.info("Client disconnected: ip=%s device=%s duration=%ds", ip, device, duration)
         clients.discard(ws)
+        client_auth.pop(id(ws), None)
 
 
 class UDPPlugin(asyncio.DatagramProtocol):
@@ -898,9 +1088,17 @@ def is_loopback_host(host: str) -> bool:
 
 
 def validate_runtime_config():
-    if not AUTH_TOKEN and not ALLOW_INSECURE_NO_AUTH:
+    if TAILSCALE_WEB_ENABLED and not TAILSCALE_ALLOWED_USERS:
         raise RuntimeError(
-            "HERDR_RELAY_TOKEN is required. Set HERDR_ALLOW_INSECURE_NO_AUTH=1 only for isolated development."
+            "HERDR_TAILSCALE_ALLOWED_USERS is required when HERDR_TAILSCALE_WEB=1. "
+            "Use '*' only if every authenticated tailnet user should have control."
+        )
+    if TAILSCALE_WEB_ENABLED and not is_loopback_host(RELAY_HOST):
+        raise RuntimeError("Tailscale web authentication requires HERDR_RELAY_HOST to be loopback.")
+    if not AUTH_TOKEN and not TAILSCALE_WEB_ENABLED and not ALLOW_INSECURE_NO_AUTH:
+        raise RuntimeError(
+            "HERDR_RELAY_TOKEN is required unless Tailscale web authentication is enabled. "
+            "Set HERDR_ALLOW_INSECURE_NO_AUTH=1 only for isolated development."
         )
     if AUTH_TOKEN and len(AUTH_TOKEN) < 16:
         raise RuntimeError("HERDR_RELAY_TOKEN must contain at least 16 characters.")

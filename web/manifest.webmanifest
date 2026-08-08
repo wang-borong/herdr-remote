@@ -1,0 +1,19 @@
+{
+  "name": "Herdr Agent Control",
+  "short_name": "Herdr",
+  "description": "Secure remote control dashboard for local Herdr agents",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#080b14",
+  "theme_color": "#0b1020",
+  "icons": [
+    {
+      "src": "/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
