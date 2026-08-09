@@ -198,9 +198,17 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Host": "127.0.0.1:8375", "Cookie": cookie_pair},
             )
             asset_response = await relay.process_request(connection, asset_request)
+            font_request = SimpleNamespace(
+                path="/vendor/fonts/firacode-nerd-mono-v3.3.0.woff2",
+                headers={"Host": "127.0.0.1:8375", "Cookie": cookie_pair},
+            )
+            font_response = await relay.process_request(connection, font_request)
 
         self.assertEqual(asset_response.status_code, 200)
         self.assertIn(b"new WebSocket", asset_response.body)
+        self.assertEqual(font_response.status_code, 200)
+        self.assertEqual(font_response.headers["Content-Type"], "font/woff2")
+        self.assertTrue(font_response.body.startswith(b"wOF2"))
 
     def test_web_terminal_requires_a_separate_tailscale_user_allowlist(self):
         tailscale_auth = {

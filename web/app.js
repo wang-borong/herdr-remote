@@ -126,6 +126,12 @@ const TERMINAL_KEY_SEQUENCES = {
   down: "\x1b[B",
 };
 
+const TERMINAL_FALLBACK_FONT_FAMILY = '"SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", monospace';
+const TERMINAL_FONT_FAMILY = '"Herdr FiraCode Nerd", "FiraCode Nerd Font Mono", "MesloLGS Nerd Font Mono", "SFMono-Regular", Consolas, monospace';
+const terminalFontReady = document.fonts && typeof document.fonts.load === "function"
+  ? document.fonts.load('400 13px "Herdr FiraCode Nerd"').catch(() => [])
+  : Promise.resolve([]);
+
 const state = {
   ws: null,
   activeView: "agents",
@@ -584,7 +590,9 @@ function ensureWebTerminal() {
   const terminal = new window.Terminal({
     cursorBlink: true,
     cursorStyle: "bar",
-    fontFamily: '"SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", monospace',
+    fontFamily: document.fonts?.check('400 13px "Herdr FiraCode Nerd"')
+      ? TERMINAL_FONT_FAMILY
+      : TERMINAL_FALLBACK_FONT_FAMILY,
     fontSize: isDesktop() ? 13 : 12,
     lineHeight: 1.25,
     scrollback: 6000,
@@ -598,6 +606,13 @@ function ensureWebTerminal() {
   terminal.onData((data) => sendTerminalText(data));
   state.terminalInstance = terminal;
   state.terminalFitAddon = fitAddon;
+
+  terminalFontReady.then(() => {
+    if (state.terminalInstance !== terminal) return;
+    terminal.options.fontFamily = TERMINAL_FONT_FAMILY;
+    terminal.refresh(0, Math.max(0, terminal.rows - 1));
+    window.requestAnimationFrame(fitWebTerminal);
+  });
 
   if ("ResizeObserver" in window) {
     state.terminalResizeObserver = new ResizeObserver(() => fitWebTerminal());

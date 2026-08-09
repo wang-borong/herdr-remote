@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Herdr FiraCode Nerd";
+  src: url("/vendor/fonts/firacode-nerd-mono-v3.3.0.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 :root {
   --bg: #080b14;
   --bg-elevated: #0c1120;

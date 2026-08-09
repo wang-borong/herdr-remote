@@ -64,6 +64,7 @@ ssh 本机用户名@cachyos-wpc
 - **tmux 持久会话**：浏览器断线、手机切后台或 Relay 重连后，可重新附着到原会话。
 - **移动快捷键**：Esc、Tab、Ctrl+C、Ctrl+L、上下方向键和剪贴板粘贴。
 - **快捷命令**：`pwd`、`ls -la`、`git status`、`git diff --stat`、`htop`。
+- **终端字体**：网页本地提供 FiraCode Nerd Font Mono，Powerline、Starship 与 Nerd Font 图标不依赖手机或电脑预装字体。
 
 每个入口使用独立的 tmux Session，并使用专用 socket：
 
@@ -201,6 +202,7 @@ ssh -vvv build-server
 - **局域网服务器连接超时**：先在本机终端执行相同的 `ssh` 命令，确认路由、防火墙和 sshd。
 - **SSH Key 未生效**：检查本机 `~/.ssh/config`、文件权限和 `SSH_AUTH_SOCK`。
 - **重新打开网页后看不到原现场**：运行 `tmux -L herdr-web list-sessions`，确认 tmux Server 仍在运行。
+- **仍显示方框或缺失图标**：先强制刷新网页；字体由 Relay 本地提供，不需要在手机上单独安装 Nerd Font。
 
 ## 停用
 

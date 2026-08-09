@@ -963,7 +963,7 @@ def http_headers(content_type: str, cache_control: str = "no-cache", extra: list
     values = [
         ("Content-Type", content_type),
         ("Cache-Control", cache_control),
-        ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
+        ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
         ("Cross-Origin-Opener-Policy", "same-origin"),
         ("Cross-Origin-Resource-Policy", "same-origin"),
         ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"),
@@ -1026,6 +1026,11 @@ async def process_request(connection, request):
         ),
         "/vendor/xterm/addon-fit.js": (
             "vendor/xterm/addon-fit.js", "application/javascript; charset=utf-8", "public, max-age=86400",
+        ),
+        "/vendor/fonts/firacode-nerd-mono-v3.3.0.woff2": (
+            "vendor/fonts/firacode-nerd-mono-v3.3.0.woff2",
+            "font/woff2",
+            "public, max-age=31536000, immutable",
         ),
         "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json", "no-cache"),
         "/sw.js": ("sw.js", "application/javascript; charset=utf-8", "no-cache"),

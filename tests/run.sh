@@ -88,10 +88,15 @@ WEB_JS="$DIR/web/app.js"
   grep -q 'message.delivery === "queued"' "$WEB_JS" && \
   grep -q "list_directories" "$WEB_JS" && grep -q "start_agent" "$WEB_JS" && \
   grep -q "C-c" "$WEB_JS" && grep -q "terminal_open" "$WEB_JS" && \
-  grep -q "ssh_profile_save" "$WEB_JS" && grep -q "mobile-keybar" "$WEB" && \
+  grep -q "ssh_profile_save" "$WEB_JS" && grep -q "Herdr FiraCode Nerd" "$WEB_JS" && \
+  grep -q "mobile-keybar" "$WEB" && \
   [ -f "$DIR/web/vendor/xterm/xterm.js" ] && \
   [ -f "$DIR/web/vendor/xterm/xterm.css" ] && \
-  [ -f "$DIR/web/vendor/xterm/addon-fit.js" ] && node --check "$WEB_JS"
+  [ -f "$DIR/web/vendor/xterm/addon-fit.js" ] && \
+  [ -f "$DIR/web/vendor/fonts/firacode-nerd-mono-v3.3.0.woff2" ] && \
+  grep -q "firacode-nerd-mono-v3.3.0.woff2" "$DIR/web/app.css" && \
+  grep -q "firacode-nerd-mono-v3.3.0.woff2" "$DIR/relay/herdr_relay.py" && \
+  node --check "$WEB_JS"
 assert_eq "$?" "0" "has responsive Agent and Remote Shell controls"
 
 echo "14. web app no hardcoded secrets"
