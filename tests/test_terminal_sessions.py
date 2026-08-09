@@ -1,0 +1,220 @@
+import asyncio
+import base64
+import os
+import stat
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "relay"))
+
+from terminal_sessions import (
+    TerminalConfigError,
+    TerminalSession,
+    delete_ssh_profile,
+    load_ssh_profiles,
+    normalize_ssh_profile,
+    persistent_session_name,
+    save_ssh_profile,
+    terminal_environment,
+    terminal_profile_command,
+    terminate_persistent_session,
+    validated_terminal_dimensions,
+)
+
+
+class TerminalProfileTests(unittest.TestCase):
+    def test_profiles_are_validated_and_saved_with_private_permissions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config_file = Path(temporary) / "config" / "ssh-hosts.json"
+            saved = save_ssh_profile(config_file, {
+                "label": "Build Server",
+                "target": "builder@192.168.50.20",
+                "port": 2222,
+                "description": "LAN build machine",
+                "color": "green",
+            })
+
+            self.assertEqual(saved["id"], "build-server")
+            self.assertEqual(load_ssh_profiles(config_file), [saved])
+            self.assertEqual(stat.S_IMODE(config_file.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(config_file.parent.stat().st_mode), 0o700)
+
+            delete_ssh_profile(config_file, saved["id"])
+            self.assertEqual(load_ssh_profiles(config_file), [])
+
+    def test_profile_rejects_option_injection_and_invalid_ports(self):
+        with self.assertRaisesRegex(TerminalConfigError, "SSH target"):
+            normalize_ssh_profile({"label": "Unsafe", "target": "-oProxyCommand=bad"})
+        with self.assertRaisesRegex(TerminalConfigError, "SSH port"):
+            normalize_ssh_profile({"label": "Server", "target": "server", "port": 70000})
+        with self.assertRaisesRegex(TerminalConfigError, "Profile id"):
+            normalize_ssh_profile({"id": "local", "label": "Server", "target": "server"})
+
+    def test_tmux_commands_use_a_dedicated_persistent_socket(self):
+        profile = normalize_ssh_profile({
+            "id": "build",
+            "label": "Build",
+            "target": "builder@10.10.0.5",
+            "port": 2222,
+        })
+        command, cwd, persistent = terminal_profile_command(
+            profile,
+            shell_binary="/bin/zsh",
+            ssh_binary="/usr/bin/ssh",
+            tmux_binary="/usr/bin/tmux",
+            cwd=Path("/tmp"),
+        )
+
+        self.assertTrue(persistent)
+        self.assertEqual(command[:4], ["/usr/bin/tmux", "-L", "herdr-web", "new-session"])
+        session_name = command[command.index("-s") + 1]
+        self.assertTrue(session_name.startswith("herdr-ssh-build-"))
+        self.assertIn("/usr/bin/ssh -tt", command[-1])
+        self.assertIn("-p 2222", command[-1])
+        self.assertEqual(cwd, Path("/tmp"))
+
+    def test_persistent_ssh_session_tracks_endpoint_and_can_be_terminated(self):
+        profile = normalize_ssh_profile({
+            "id": "build",
+            "label": "Build",
+            "target": "builder@10.10.0.5",
+            "port": 22,
+        })
+        moved_profile = {**profile, "target": "builder@10.10.0.6"}
+
+        self.assertEqual(persistent_session_name({"kind": "local"}), "herdr-local")
+        self.assertNotEqual(
+            persistent_session_name(profile),
+            persistent_session_name(moved_profile),
+        )
+
+        with patch("terminal_sessions.subprocess.run") as run:
+            run.return_value.returncode = 0
+            self.assertTrue(terminate_persistent_session(profile, "/usr/bin/tmux"))
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ["/usr/bin/tmux", "-L", "herdr-web", "kill-session"])
+        self.assertEqual(command[-1], persistent_session_name(profile))
+
+    def test_terminal_size_is_bounded_and_secret_environment_is_removed(self):
+        self.assertEqual(validated_terminal_dimensions(9999, 1), (400, 5))
+        with patch.dict(os.environ, {
+            "HERDR_RELAY_TOKEN": "relay-secret",
+            "HERDR_TG_TOKEN": "telegram-secret",
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
+            "VIRTUAL_ENV": "/tmp/relay-venv",
+            "UV_RUN_RECURSION_DEPTH": "1",
+            "PATH": "/tmp/relay-venv/bin:/usr/bin",
+        }):
+            environment = terminal_environment()
+        self.assertNotIn("HERDR_RELAY_TOKEN", environment)
+        self.assertNotIn("HERDR_TG_TOKEN", environment)
+        self.assertEqual(environment["SSH_AUTH_SOCK"], "/tmp/agent.sock")
+        self.assertNotIn("VIRTUAL_ENV", environment)
+        self.assertNotIn("UV_RUN_RECURSION_DEPTH", environment)
+        self.assertEqual(environment["PATH"], "/usr/bin")
+        self.assertEqual(environment["TERM"], "xterm-256color")
+
+
+class TerminalSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_pty_streams_output_and_accepts_input(self):
+        events = []
+        finished = asyncio.Event()
+
+        async def event_handler(event):
+            events.append(event)
+            if event["type"] == "terminal_exit":
+                finished.set()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            session = TerminalSession(
+                {
+                    "id": "local",
+                    "kind": "local",
+                    "label": "Local",
+                    "target": "localhost",
+                    "port": 0,
+                    "description": "",
+                    "color": "violet",
+                },
+                event_handler,
+                shell_binary="/bin/sh",
+                ssh_binary="/usr/bin/ssh",
+                tmux_binary=None,
+                cwd=Path(temporary),
+                cols=80,
+                rows=24,
+            )
+            await session.spawn()
+            session.start_reader()
+            await session.write(b"printf '__HERDR_PTY_OK__\\n'; exit\n")
+            await asyncio.wait_for(finished.wait(), timeout=5)
+            await session.close()
+
+        encoded_output = "".join(
+            event["data"] for event in events if event["type"] == "terminal_output"
+        )
+        self.assertTrue(encoded_output)
+        output = b"".join(
+            base64.b64decode(event["data"])
+            for event in events
+            if event["type"] == "terminal_output"
+        )
+        self.assertIn(b"__HERDR_PTY_OK__", output)
+
+    async def test_pty_retries_partial_writes(self):
+        events = []
+        finished = asyncio.Event()
+
+        async def event_handler(event):
+            events.append(event)
+            if event["type"] == "terminal_exit":
+                finished.set()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            session = TerminalSession(
+                {
+                    "id": "local",
+                    "kind": "local",
+                    "label": "Local",
+                    "target": "localhost",
+                    "port": 0,
+                    "description": "",
+                    "color": "violet",
+                },
+                event_handler,
+                shell_binary="/bin/sh",
+                ssh_binary="/usr/bin/ssh",
+                tmux_binary=None,
+                cwd=Path(temporary),
+                cols=80,
+                rows=24,
+            )
+            await session.spawn()
+            session.start_reader()
+            original_write = os.write
+
+            def short_write(descriptor, data):
+                return original_write(descriptor, data[:7])
+
+            with patch("terminal_sessions.os.write", side_effect=short_write) as mocked_write:
+                await session.write(b"printf '__HERDR_PARTIAL_WRITE_OK__\\n'; exit\n")
+            await asyncio.wait_for(finished.wait(), timeout=5)
+            await session.close()
+
+        output = b"".join(
+            base64.b64decode(event["data"])
+            for event in events
+            if event["type"] == "terminal_output"
+        )
+        self.assertIn(b"__HERDR_PARTIAL_WRITE_OK__", output)
+        self.assertGreater(mocked_write.call_count, 1)
+        self.assertIsNone(session.master_fd)
+
+
+if __name__ == "__main__":
+    unittest.main()

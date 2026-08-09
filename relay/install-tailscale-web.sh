@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${HERDR_CONFIG_DIR:-$HOME/.config/herdr-remote}"
@@ -9,8 +10,11 @@ ALLOWED_USERS="${HERDR_TAILSCALE_ALLOWED_USERS:-}"
 TAILSCALE_PROXY="${HERDR_TAILSCALE_PROXY:-}"
 TAILSCALE_LOGIN_TIMEOUT="${HERDR_TAILSCALE_LOGIN_TIMEOUT:-3m}"
 TAILSCALE_PROXY_DROPIN="/etc/systemd/system/tailscaled.service.d/herdr-remote-proxy.conf"
+SSH_HOSTS_FILE="${HERDR_SSH_HOSTS_FILE:-$CONFIG_DIR/ssh-hosts.json}"
 CONFIGURE_ONLY=false
 RESET_FUNNEL=false
+REMOTE_SHELL=false
+ADVERTISE_ROUTES=""
 INSTALL_TEMP_DIR=""
 
 usage() {
@@ -27,6 +31,14 @@ Options:
   --tailscale-proxy URL             Route tailscaled control traffic through a
                                     loopback HTTP proxy. Clash ports 7897 and
                                     7890 are auto-detected for fake-IP DNS.
+  --remote-shell                    Enable official Tailscale SSH and the
+                                    allowlisted Herdr Web Terminal. Installs
+                                    OpenSSH client and tmux when needed.
+  --ssh-hosts-file PATH             SSH profile JSON used by the Web Terminal.
+                                    Defaults to ~/.config/herdr-remote/ssh-hosts.json.
+  --advertise-routes CIDR[,CIDR...] Optionally make this machine a Tailscale
+                                    subnet router for its LAN. Requires admin
+                                    approval in the Tailscale console.
   --configure-only                  Skip package installation.
   --reset-funnel                    Reset every Funnel route on this machine
                                     before configuring private Serve.
@@ -63,6 +75,20 @@ while [[ $# -gt 0 ]]; do
         --tailscale-proxy)
             [[ $# -ge 2 ]] || die "--tailscale-proxy requires a value"
             TAILSCALE_PROXY="$2"
+            shift 2
+            ;;
+        --remote-shell)
+            REMOTE_SHELL=true
+            shift
+            ;;
+        --ssh-hosts-file)
+            [[ $# -ge 2 ]] || die "--ssh-hosts-file requires a value"
+            SSH_HOSTS_FILE="$2"
+            shift 2
+            ;;
+        --advertise-routes)
+            [[ $# -ge 2 ]] || die "--advertise-routes requires a value"
+            ADVERTISE_ROUTES="$2"
             shift 2
             ;;
         --reset-funnel)
@@ -113,14 +139,22 @@ install_dependencies() {
     if [[ "$is_arch" == true ]]; then
         command -v pacman >/dev/null 2>&1 || die "pacman is required on Arch Linux-compatible systems"
         echo "Installing Tailscale and helper packages with pacman ($DISTRO_ID)..."
-        sudo pacman -S --needed tailscale curl python
+        local packages=(tailscale curl python)
+        if [[ "$REMOTE_SHELL" == true ]]; then
+            packages+=(openssh tmux)
+        fi
+        sudo pacman -S --needed "${packages[@]}"
         return
     fi
 
     command -v apt-get >/dev/null 2>&1 || die "apt-get is required on Debian"
     echo "Installing Debian prerequisites..."
     sudo apt-get update
-    sudo apt-get install -y ca-certificates curl python3
+    local packages=(ca-certificates curl python3)
+    if [[ "$REMOTE_SHELL" == true ]]; then
+        packages+=(openssh-client tmux)
+    fi
+    sudo apt-get install -y "${packages[@]}"
 
     ensure_install_temp_dir
     curl --fail --location --silent --show-error \
@@ -146,6 +180,23 @@ fi
 command -v tailscale >/dev/null 2>&1 || die "tailscale is not installed; rerun without --configure-only"
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
 command -v systemctl >/dev/null 2>&1 || die "systemd is required"
+if [[ "$REMOTE_SHELL" == true ]]; then
+    command -v ssh >/dev/null 2>&1 \
+        || die "OpenSSH client is required; rerun without --configure-only"
+    command -v tmux >/dev/null 2>&1 \
+        || die "tmux is required for persistent web terminal sessions; rerun without --configure-only"
+fi
+
+if [[ "$SSH_HOSTS_FILE" == "~/"* ]]; then
+    SSH_HOSTS_FILE="$HOME/${SSH_HOSTS_FILE#\~/}"
+fi
+if [[ "$SSH_HOSTS_FILE" != /* ]]; then
+    SSH_HOSTS_FILE="$PWD/${SSH_HOSTS_FILE#./}"
+fi
+[[ "$SSH_HOSTS_FILE" != *$'\n'* && "$SSH_HOSTS_FILE" != *$'\r'* ]] \
+    || die "--ssh-hosts-file contains control characters"
+[[ "$SSH_HOSTS_FILE" != *[[:space:]]* ]] \
+    || die "--ssh-hosts-file must not contain whitespace"
 
 proxy_reaches_controlplane() {
     curl --proxy "$1" --noproxy "" \
@@ -293,14 +344,49 @@ if [[ -z "$ALLOWED_USERS" ]]; then
 fi
 
 IFS=',' read -r -a allowed_user_items <<< "$ALLOWED_USERS"
+WILDCARD_ALLOWED=false
 for allowed_user in "${allowed_user_items[@]}"; do
     [[ -n "$allowed_user" ]] || die "the Tailscale user allowlist contains an empty item"
     if [[ "$allowed_user" != "*" && ! "$allowed_user" =~ ^[A-Za-z0-9._+@:%-]+$ ]]; then
         die "invalid Tailscale login in allowlist: $allowed_user"
     fi
+    [[ "$allowed_user" == "*" ]] && WILDCARD_ALLOWED=true
 done
-if [[ "$ALLOWED_USERS" == "*" ]]; then
+if [[ "$WILDCARD_ALLOWED" == true ]]; then
     echo "Warning: '*' authorizes every authenticated user who can reach this machine in the tailnet."
+fi
+if [[ "$REMOTE_SHELL" == true && "$WILDCARD_ALLOWED" == true ]]; then
+    die "--remote-shell requires explicit Tailscale login names; wildcard terminal access is not allowed by the installer"
+fi
+
+if [[ "$REMOTE_SHELL" == true ]]; then
+    echo "Enabling the official Tailscale SSH server..."
+    sudo tailscale set --ssh
+fi
+
+if [[ -n "$ADVERTISE_ROUTES" ]]; then
+    python3 -c '
+import ipaddress, sys
+routes = [value.strip() for value in sys.argv[1].split(",")]
+if not routes or any(not value for value in routes):
+    raise SystemExit("route list contains an empty item")
+for value in routes:
+    network = ipaddress.ip_network(value, strict=False)
+    if network.is_multicast or network.is_unspecified or network.is_loopback:
+        raise SystemExit(f"unsafe subnet route: {value}")
+' "$ADVERTISE_ROUTES" || die "--advertise-routes must contain safe CIDR networks"
+
+    ensure_install_temp_dir
+    subnet_sysctl="$INSTALL_TEMP_DIR/99-herdr-tailscale-subnet.conf"
+    printf '%s\n' 'net.ipv4.ip_forward = 1' > "$subnet_sysctl"
+    if [[ "$ADVERTISE_ROUTES" == *:* ]]; then
+        printf '%s\n' 'net.ipv6.conf.all.forwarding = 1' >> "$subnet_sysctl"
+    fi
+    echo "Enabling kernel forwarding for the requested subnet routes..."
+    sudo install -m 0644 "$subnet_sysctl" /etc/sysctl.d/99-herdr-tailscale-subnet.conf
+    sudo sysctl -p /etc/sysctl.d/99-herdr-tailscale-subnet.conf
+    echo "Advertising LAN routes through Tailscale: $ADVERTISE_ROUTES"
+    sudo tailscale set --advertise-routes="$ADVERTISE_ROUTES"
 fi
 
 [[ -f "$CONFIG_FILE" ]] || die "Herdr Relay is not installed. Run $SCRIPT_DIR/install-telegram-only.sh first."
@@ -342,6 +428,25 @@ upsert_config HERDR_ALLOW_REMOTE_BIND 0
 upsert_config HERDR_ALLOW_INSECURE_NO_AUTH 0
 upsert_config HERDR_TAILSCALE_WEB 1
 upsert_config HERDR_TAILSCALE_ALLOWED_USERS "$ALLOWED_USERS"
+if [[ "$REMOTE_SHELL" == true ]]; then
+    mkdir -p "$(dirname "$SSH_HOSTS_FILE")"
+    if [[ ! -f "$SSH_HOSTS_FILE" ]]; then
+        printf '%s\n' '{' '  "version": 1,' '  "hosts": []' '}' > "$SSH_HOSTS_FILE"
+    fi
+    chmod 0600 "$SSH_HOSTS_FILE"
+    PYTHONPATH="$SCRIPT_DIR" python3 -c '
+import sys
+from pathlib import Path
+from terminal_sessions import load_ssh_profiles
+load_ssh_profiles(Path(sys.argv[1]))
+' "$SSH_HOSTS_FILE" || die "the SSH profile file is invalid: $SSH_HOSTS_FILE"
+
+    upsert_config HERDR_TAILSCALE_SSH 1
+    upsert_config HERDR_WEB_TERMINAL 1
+    upsert_config HERDR_TERMINAL_ALLOWED_USERS "$ALLOWED_USERS"
+    upsert_config HERDR_SSH_HOSTS_FILE "$SSH_HOSTS_FILE"
+    upsert_config HERDR_TERMINAL_MAX_SESSIONS 6
+fi
 
 if ! systemctl --user cat herdr-relay.service >/dev/null 2>&1; then
     die "herdr-relay.service is missing; rerun install-telegram-only.sh before this script"
@@ -389,8 +494,22 @@ echo "Herdr Tailscale web control is ready."
 echo "Authorized user(s): $ALLOWED_USERS"
 echo "Relay:              127.0.0.1:$WS_PORT"
 echo "Config:             $CONFIG_FILE"
+if [[ "$REMOTE_SHELL" == true ]]; then
+    LOCAL_USER="$(id -un)"
+    echo "Tailscale SSH:       enabled"
+    [[ -n "$DNS_NAME" ]] && echo "Native SSH command:  tailscale ssh $LOCAL_USER@$DNS_NAME"
+    echo "Web Terminal:        enabled for $ALLOWED_USERS"
+    echo "SSH profiles:        $SSH_HOSTS_FILE"
+    echo ""
+    echo "Tailscale SSH access still follows your tailnet SSH/grants policy."
+fi
+if [[ -n "$ADVERTISE_ROUTES" ]]; then
+    echo "Subnet routes:       $ADVERTISE_ROUTES (advertised)"
+    echo "Approve these routes in the Tailscale admin console before clients can use them."
+fi
 echo ""
 echo "Useful checks:"
 echo "  systemctl --user status herdr-relay"
 echo "  sudo tailscale serve status"
 echo "  sudo tailscale funnel status"
+[[ "$REMOTE_SHELL" == true ]] && echo "  tailscale debug prefs | grep -i RunSSH"

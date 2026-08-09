@@ -3,6 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["websockets>=14.0"]
 # ///
+import base64
 import importlib
 import json
 import os
@@ -51,6 +52,8 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         relay.clients.clear()
         relay.agent_cache.clear()
         relay.client_auth.clear()
+        relay.active_terminal_sessions.clear()
+        relay.machine_access_cache = None
         relay.agent_start_in_progress = False
 
     def test_secure_runtime_defaults_to_loopback_and_requires_auth(self):
@@ -198,6 +201,194 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(asset_response.status_code, 200)
         self.assertIn(b"new WebSocket", asset_response.body)
+
+    def test_web_terminal_requires_a_separate_tailscale_user_allowlist(self):
+        tailscale_auth = {
+            "mode": "tailscale",
+            "login": "owner@example.com",
+            "name": "Owner",
+        }
+        with (
+            patch.object(relay, "WEB_TERMINAL_ENABLED", True),
+            patch.object(relay, "TERMINAL_ALLOWED_USERS", {"owner@example.com"}),
+        ):
+            self.assertTrue(relay.terminal_access_allowed(tailscale_auth))
+            self.assertFalse(relay.terminal_access_allowed({"mode": "token", "login": ""}))
+
+        with (
+            patch.object(relay, "WEB_TERMINAL_ENABLED", True),
+            patch.object(relay, "TERMINAL_ALLOWED_USERS", {"someone@example.com"}),
+        ):
+            self.assertFalse(relay.terminal_access_allowed(tailscale_auth))
+
+        with (
+            patch.object(relay, "WEB_TERMINAL_ENABLED", True),
+            patch.object(relay, "TERMINAL_ALLOWED_USERS", {"*"}),
+        ):
+            self.assertFalse(relay.terminal_access_allowed(tailscale_auth))
+
+    def test_web_terminal_runtime_rejects_a_wildcard_user_allowlist(self):
+        with (
+            patch.object(relay, "WEB_TERMINAL_ENABLED", True),
+            patch.object(relay, "TAILSCALE_WEB_ENABLED", True),
+            patch.object(relay, "TAILSCALE_ALLOWED_USERS", {"*"}),
+            patch.object(relay, "TERMINAL_ALLOWED_USERS", {"*"}),
+            self.assertRaisesRegex(RuntimeError, "wildcard terminal access"),
+        ):
+            relay.validate_runtime_config()
+
+    async def test_authorized_web_terminal_stream_uses_scoped_session_messages(self):
+        profile = {
+            "id": "local",
+            "kind": "local",
+            "label": "本机终端",
+            "target": "workstation",
+            "port": 0,
+            "description": "",
+            "color": "violet",
+        }
+        typed = b"git status\n"
+        ws = FakeWebSocket([
+            {"type": "terminal_open", "profile_id": "local", "cols": 100, "rows": 30},
+            {
+                "type": "terminal_input",
+                "session_id": "terminal-test",
+                "data": base64.b64encode(typed).decode(),
+            },
+            {
+                "type": "terminal_resize",
+                "session_id": "terminal-test",
+                "cols": 120,
+                "rows": 40,
+            },
+            {"type": "terminal_close", "session_id": "terminal-test"},
+        ])
+        relay.client_auth[id(ws)] = {
+            "mode": "tailscale",
+            "login": "owner@example.com",
+            "name": "Owner",
+        }
+        instances = []
+
+        class FakeTerminalSession:
+            def __init__(self, selected_profile, event_handler, **options):
+                self.profile = selected_profile
+                self.event_handler = event_handler
+                self.session_id = "terminal-test"
+                self.persistent = True
+                self.cols = int(options["cols"])
+                self.rows = int(options["rows"])
+                self.writes = []
+                self.closed = False
+                instances.append(self)
+
+            async def spawn(self):
+                return None
+
+            def start_reader(self):
+                return None
+
+            async def write(self, data):
+                self.writes.append(data)
+
+            async def resize(self, cols, rows):
+                self.cols = int(cols)
+                self.rows = int(rows)
+                return self.cols, self.rows
+
+            async def close(self):
+                self.closed = True
+
+        with (
+            patch.object(relay, "WEB_TERMINAL_ENABLED", True),
+            patch.object(relay, "TERMINAL_ALLOWED_USERS", {"owner@example.com"}),
+            patch.object(relay, "TAILSCALE_SSH_ENABLED", True),
+            patch.object(relay, "TerminalSession", FakeTerminalSession),
+            patch.object(relay, "configured_terminal_profiles", return_value=[profile]),
+            patch.object(relay, "machine_access_info", return_value={"hostname": "workstation"}),
+            patch.object(relay, "audit") as audit,
+        ):
+            await relay.handle_client(ws)
+
+        self.assertEqual(instances[0].writes, [typed])
+        self.assertTrue(instances[0].closed)
+        self.assertIn(
+            {
+                "type": "terminal_opened",
+                "session_id": "terminal-test",
+                "profile": profile,
+                "persistent": True,
+                "cols": 100,
+                "rows": 30,
+            },
+            ws.sent,
+        )
+        session_message = next(message for message in ws.sent if message["type"] == "session")
+        self.assertTrue(session_message["features"]["terminal"])
+        self.assertEqual(session_message["terminal_profiles"], [profile])
+        audit_details = [call.args[4] for call in audit.call_args_list]
+        self.assertFalse(any("git status" in detail for detail in audit_details))
+
+    async def test_token_client_cannot_open_a_web_terminal(self):
+        ws = FakeWebSocket([{"type": "terminal_open", "profile_id": "local"}])
+        relay.client_auth[id(ws)] = {"mode": "token", "login": ""}
+        with (
+            patch.object(relay, "WEB_TERMINAL_ENABLED", True),
+            patch.object(relay, "TERMINAL_ALLOWED_USERS", {"owner@example.com"}),
+            patch.object(relay, "machine_access_info", return_value={}),
+        ):
+            await relay.handle_client(ws)
+
+        self.assertIn(
+            {
+                "type": "terminal_error",
+                "operation": "terminal",
+                "message": "Web terminal access is not authorized",
+            },
+            ws.sent,
+        )
+
+    async def test_editing_an_ssh_endpoint_retires_the_previous_tmux_session(self):
+        previous = {
+            "id": "build",
+            "kind": "ssh",
+            "label": "Build",
+            "target": "builder@192.168.1.20",
+            "port": 22,
+            "description": "",
+            "color": "cyan",
+        }
+        saved = {**previous, "target": "builder@192.168.1.21"}
+        ws = FakeWebSocket([{"type": "ssh_profile_save", "profile": saved}])
+        relay.client_auth[id(ws)] = {
+            "mode": "tailscale",
+            "login": "owner@example.com",
+            "name": "Owner",
+        }
+
+        with (
+            patch.object(relay, "WEB_TERMINAL_ENABLED", True),
+            patch.object(relay, "TERMINAL_ALLOWED_USERS", {"owner@example.com"}),
+            patch.object(relay, "TMUX_BINARY", "/usr/bin/tmux"),
+            patch.object(relay, "terminal_profile", return_value=previous),
+            patch.object(relay, "save_ssh_profile", return_value=saved),
+            patch.object(relay, "terminate_persistent_session") as terminate,
+            patch.object(relay, "configured_terminal_profiles", return_value=[saved]),
+            patch.object(relay, "machine_access_info", return_value={}),
+            patch.object(relay, "audit"),
+        ):
+            await relay.handle_client(ws)
+
+        terminate.assert_called_once_with(previous, "/usr/bin/tmux")
+        self.assertIn(
+            {
+                "type": "command_result",
+                "command": "ssh_profile_save",
+                "ok": True,
+                "profile_id": "build",
+            },
+            ws.sent,
+        )
 
     async def test_agent_prompt_uses_herdr_api_and_redacts_audit_content(self):
         pane_id = "w0:p1"

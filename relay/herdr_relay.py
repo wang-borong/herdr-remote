@@ -5,6 +5,10 @@
 # ///
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
 import asyncio
+import base64
+import binascii
+import contextlib
+import getpass
 import hashlib
 import hmac
 import ipaddress
@@ -33,6 +37,15 @@ except ImportError:
     from websockets.server import serve
 
 from agent_state import complete_agent_update_message
+from terminal_sessions import (
+    TerminalConfigError,
+    TerminalSession,
+    delete_ssh_profile,
+    load_ssh_profiles,
+    save_ssh_profile,
+    terminate_persistent_session,
+    terminal_profiles,
+)
 
 os.umask(0o077)
 
@@ -81,6 +94,26 @@ TAILSCALE_ALLOWED_USERS = {
     for value in os.environ.get("HERDR_TAILSCALE_ALLOWED_USERS", "").split(",")
     if value.strip()
 }
+WEB_TERMINAL_ENABLED = env_flag("HERDR_WEB_TERMINAL")
+TERMINAL_ALLOWED_USERS = {
+    value.strip().casefold()
+    for value in os.environ.get("HERDR_TERMINAL_ALLOWED_USERS", "").split(",")
+    if value.strip()
+}
+TERMINAL_ALLOW_DEVELOPMENT = env_flag("HERDR_TERMINAL_ALLOW_DEVELOPMENT")
+TAILSCALE_SSH_ENABLED = env_flag("HERDR_TAILSCALE_SSH")
+SSH_HOSTS_FILE = Path(os.path.expanduser(os.environ.get(
+    "HERDR_SSH_HOSTS_FILE",
+    "~/.config/herdr-remote/ssh-hosts.json",
+)))
+TERMINAL_SHELL = os.environ.get("HERDR_TERMINAL_SHELL") or os.environ.get("SHELL") or "/bin/sh"
+TERMINAL_SHELL = shutil.which(TERMINAL_SHELL) or TERMINAL_SHELL
+SSH_BINARY = shutil.which("ssh") or "/usr/bin/ssh"
+TMUX_BINARY = shutil.which("tmux")
+try:
+    TERMINAL_MAX_SESSIONS = max(1, min(int(os.environ.get("HERDR_TERMINAL_MAX_SESSIONS", "6")), 16))
+except ValueError:
+    TERMINAL_MAX_SESSIONS = 6
 WEB_SESSION_COOKIE = "herdr_session"
 WEB_SESSION_TTL_SECONDS = 8 * 60 * 60
 
@@ -136,6 +169,8 @@ known_panes = set()
 agent_cache = {}
 agent_start_in_progress = False
 client_auth = {}
+active_terminal_sessions = set()
+machine_access_cache = None
 
 SAFE_RESPONSES = {"y", "n", "a", "yes", "no", "trust", "yes, single permission", "trust, always allow", "no (tab to edit)", "approve all pending", "configure individually", "exit (cancel subagents)"}
 SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"} | {
@@ -278,6 +313,70 @@ def display_workspace_path(path: Path) -> str:
         return "~/" + str(path.relative_to(home))
     except ValueError:
         return str(path)
+
+
+def terminal_access_allowed(auth: dict) -> bool:
+    if not WEB_TERMINAL_ENABLED:
+        return False
+    mode = auth.get("mode", "")
+    if mode == "tailscale":
+        login = str(auth.get("login", "")).casefold()
+        return bool(login) and login in TERMINAL_ALLOWED_USERS
+    return mode == "development" and TERMINAL_ALLOW_DEVELOPMENT
+
+
+def configured_terminal_profiles() -> list[dict]:
+    return terminal_profiles(SSH_HOSTS_FILE, socket.gethostname())
+
+
+def terminal_profile(profile_id: str) -> dict:
+    for profile in configured_terminal_profiles():
+        if profile["id"] == profile_id:
+            return profile
+    raise TerminalConfigError("Terminal profile was not found")
+
+
+def terminal_working_directory() -> Path:
+    configured = os.environ.get("HERDR_TERMINAL_CWD", str(Path.home()))
+    try:
+        directory = Path(os.path.expanduser(configured)).resolve(strict=True)
+    except (OSError, RuntimeError):
+        directory = Path.home()
+    return directory if directory.is_dir() else Path.home()
+
+
+def machine_access_info() -> dict:
+    global machine_access_cache
+    if machine_access_cache is not None:
+        return machine_access_cache
+
+    info = {
+        "hostname": socket.gethostname(),
+        "username": getpass.getuser(),
+        "tailscale_dns": "",
+        "tailscale_ips": [],
+        "native_ssh": TAILSCALE_SSH_ENABLED,
+        "tmux": bool(TMUX_BINARY),
+    }
+    tailscale = shutil.which("tailscale")
+    if tailscale and (TAILSCALE_WEB_ENABLED or TAILSCALE_SSH_ENABLED):
+        try:
+            result = subprocess.run(
+                [tailscale, "status", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            status = json.loads(result.stdout) if result.returncode == 0 else {}
+            self_node = status.get("Self") or {}
+            info["tailscale_dns"] = str(self_node.get("DNSName", "")).rstrip(".")
+            addresses = self_node.get("TailscaleIPs") or []
+            info["tailscale_ips"] = [str(address) for address in addresses[:4]]
+        except (json.JSONDecodeError, OSError, subprocess.SubprocessError):
+            pass
+    machine_access_cache = info
+    return info
 
 
 def git_root_for(path: Path) -> Path | None:
@@ -864,7 +963,7 @@ def http_headers(content_type: str, cache_control: str = "no-cache", extra: list
     values = [
         ("Content-Type", content_type),
         ("Cache-Control", cache_control),
-        ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
+        ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
         ("Cross-Origin-Opener-Policy", "same-origin"),
         ("Cross-Origin-Resource-Policy", "same-origin"),
         ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"),
@@ -919,6 +1018,15 @@ async def process_request(connection, request):
         "/index.html": ("index.html", "text/html; charset=utf-8", "no-cache"),
         "/app.css": ("app.css", "text/css; charset=utf-8", "no-cache"),
         "/app.js": ("app.js", "application/javascript; charset=utf-8", "no-cache"),
+        "/vendor/xterm/xterm.css": (
+            "vendor/xterm/xterm.css", "text/css; charset=utf-8", "public, max-age=86400",
+        ),
+        "/vendor/xterm/xterm.js": (
+            "vendor/xterm/xterm.js", "application/javascript; charset=utf-8", "public, max-age=86400",
+        ),
+        "/vendor/xterm/addon-fit.js": (
+            "vendor/xterm/addon-fit.js", "application/javascript; charset=utf-8", "public, max-age=86400",
+        ),
         "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json", "no-cache"),
         "/sw.js": ("sw.js", "application/javascript; charset=utf-8", "no-cache"),
         "/logo.svg": ("logo.svg", "image/svg+xml", "public, max-age=86400"),
@@ -975,7 +1083,34 @@ async def handle_client(ws):
     clients.add(ws)
     auth = client_auth.get(id(ws), {})
     connected_at = time.monotonic()
+    terminal_session = None
+
+    async def send_terminal_event(event: dict):
+        if (
+            event.get("type") == "terminal_exit"
+            and terminal_session
+            and event.get("session_id") == terminal_session.session_id
+        ):
+            active_terminal_sessions.discard(terminal_session)
+        await ws.send(json.dumps(event))
+
+    async def send_terminal_error(message: str, operation: str = "terminal"):
+        await ws.send(json.dumps({
+            "type": "terminal_error",
+            "operation": operation,
+            "message": message,
+        }))
+
+    async def close_terminal():
+        nonlocal terminal_session
+        if terminal_session is None:
+            return
+        active_terminal_sessions.discard(terminal_session)
+        await terminal_session.close()
+        terminal_session = None
+
     try:
+        terminal_enabled = terminal_access_allowed(auth)
         await ws.send(json.dumps({
             "type": "session",
             "auth": auth.get("mode", "token"),
@@ -983,6 +1118,12 @@ async def handle_client(ws):
                 "login": auth.get("login", ""),
                 "name": auth.get("name", ""),
             },
+            "features": {
+                "terminal": terminal_enabled,
+                "native_ssh": TAILSCALE_SSH_ENABLED,
+            },
+            "machine": machine_access_info(),
+            "terminal_profiles": configured_terminal_profiles() if terminal_enabled else [],
         }))
         await ws.send(json.dumps({"type": "agents", "agents": list(agent_cache.values())}))
         async for raw in ws:
@@ -991,7 +1132,172 @@ async def handle_client(ws):
             except json.JSONDecodeError:
                 continue
             msg_type = msg.get("type")
-            if msg_type == "respond":
+            if msg_type == "terminal_profiles_request":
+                if not terminal_enabled:
+                    await send_terminal_error("Web terminal access is not authorized")
+                    continue
+                await ws.send(json.dumps({
+                    "type": "terminal_profiles",
+                    "profiles": configured_terminal_profiles(),
+                }))
+            elif msg_type == "ssh_profile_save":
+                if not terminal_enabled:
+                    await send_terminal_error(
+                        "Web terminal access is not authorized", "ssh_profile"
+                    )
+                    continue
+                raw_profile = msg.get("profile")
+                previous_profile = None
+                if isinstance(raw_profile, dict) and raw_profile.get("id"):
+                    with contextlib.suppress(TerminalConfigError):
+                        previous_profile = terminal_profile(str(raw_profile["id"]))
+                try:
+                    saved_profile = await asyncio.to_thread(
+                        save_ssh_profile,
+                        SSH_HOSTS_FILE,
+                        raw_profile,
+                    )
+                    endpoint_changed = previous_profile and (
+                        previous_profile.get("target"), previous_profile.get("port")
+                    ) != (saved_profile.get("target"), saved_profile.get("port"))
+                    if endpoint_changed:
+                        await asyncio.to_thread(
+                            terminate_persistent_session,
+                            previous_profile,
+                            TMUX_BINARY,
+                        )
+                    profiles = configured_terminal_profiles()
+                except TerminalConfigError as e:
+                    await send_terminal_error(str(e), "ssh_profile")
+                    continue
+                audit("ssh_profile_save", ip, device, "", f"profile={saved_profile['id']}")
+                await ws.send(json.dumps({"type": "terminal_profiles", "profiles": profiles}))
+                await ws.send(json.dumps({
+                    "type": "command_result",
+                    "command": "ssh_profile_save",
+                    "ok": True,
+                    "profile_id": saved_profile["id"],
+                }))
+            elif msg_type == "ssh_profile_delete":
+                if not terminal_enabled:
+                    await send_terminal_error(
+                        "Web terminal access is not authorized", "ssh_profile"
+                    )
+                    continue
+                profile_id = msg.get("profile_id", "")
+                try:
+                    deleted_profile = terminal_profile(str(profile_id))
+                    await asyncio.to_thread(delete_ssh_profile, SSH_HOSTS_FILE, profile_id)
+                    await asyncio.to_thread(
+                        terminate_persistent_session,
+                        deleted_profile,
+                        TMUX_BINARY,
+                    )
+                    if terminal_session and terminal_session.profile["id"] == profile_id:
+                        await close_terminal()
+                    profiles = configured_terminal_profiles()
+                except TerminalConfigError as e:
+                    await send_terminal_error(str(e), "ssh_profile")
+                    continue
+                audit("ssh_profile_delete", ip, device, "", f"profile={profile_id}")
+                await ws.send(json.dumps({"type": "terminal_profiles", "profiles": profiles}))
+                await ws.send(json.dumps({
+                    "type": "command_result",
+                    "command": "ssh_profile_delete",
+                    "ok": True,
+                    "profile_id": profile_id,
+                }))
+            elif msg_type == "terminal_open":
+                if not terminal_enabled:
+                    await send_terminal_error("Web terminal access is not authorized")
+                    continue
+                await close_terminal()
+                if len(active_terminal_sessions) >= TERMINAL_MAX_SESSIONS:
+                    await send_terminal_error("Too many web terminal sessions are active")
+                    continue
+                session = None
+                try:
+                    profile = terminal_profile(str(msg.get("profile_id", "")))
+                    session = TerminalSession(
+                        profile,
+                        send_terminal_event,
+                        shell_binary=TERMINAL_SHELL,
+                        ssh_binary=SSH_BINARY,
+                        tmux_binary=TMUX_BINARY,
+                        cwd=terminal_working_directory(),
+                        cols=msg.get("cols", 120),
+                        rows=msg.get("rows", 32),
+                    )
+                    # Reserve the slot before spawning so concurrent clients cannot
+                    # race past the global session limit while process creation awaits.
+                    active_terminal_sessions.add(session)
+                    await session.spawn()
+                except TerminalConfigError as e:
+                    if session is not None:
+                        active_terminal_sessions.discard(session)
+                        await session.close()
+                    await send_terminal_error(str(e))
+                    continue
+                except (OSError, subprocess.SubprocessError) as e:
+                    if session is not None:
+                        active_terminal_sessions.discard(session)
+                        await session.close()
+                    log.warning(
+                        "Terminal start failed for profile %s (%s)",
+                        msg.get("profile_id", ""),
+                        type(e).__name__,
+                    )
+                    await send_terminal_error("Could not start the terminal session")
+                    continue
+                terminal_session = session
+                audit("terminal_open", ip, device, "", f"profile={profile['id']}")
+                await ws.send(json.dumps({
+                    "type": "terminal_opened",
+                    "session_id": session.session_id,
+                    "profile": profile,
+                    "persistent": session.persistent,
+                    "cols": session.cols,
+                    "rows": session.rows,
+                }))
+                session.start_reader()
+            elif msg_type == "terminal_input":
+                if not terminal_enabled or terminal_session is None:
+                    await send_terminal_error("Terminal session is not running")
+                    continue
+                if msg.get("session_id") != terminal_session.session_id:
+                    await send_terminal_error("Terminal session id does not match")
+                    continue
+                encoded = msg.get("data", "")
+                if not isinstance(encoded, str) or len(encoded) > 24 * 1024:
+                    await send_terminal_error("Terminal input is invalid")
+                    continue
+                try:
+                    data = base64.b64decode(encoded, validate=True)
+                    await terminal_session.write(data)
+                except (binascii.Error, TerminalConfigError) as e:
+                    await send_terminal_error(str(e))
+            elif msg_type == "terminal_resize":
+                if not terminal_enabled or terminal_session is None:
+                    await send_terminal_error("Terminal session is not running")
+                    continue
+                if msg.get("session_id") != terminal_session.session_id:
+                    await send_terminal_error("Terminal session id does not match")
+                    continue
+                try:
+                    await terminal_session.resize(msg.get("cols"), msg.get("rows"))
+                except TerminalConfigError as e:
+                    await send_terminal_error(str(e))
+            elif msg_type == "terminal_close":
+                if terminal_session is not None:
+                    profile_id = terminal_session.profile["id"]
+                    await close_terminal()
+                    audit("terminal_close", ip, device, "", f"profile={profile_id}")
+                await ws.send(json.dumps({
+                    "type": "command_result",
+                    "command": "terminal_close",
+                    "ok": True,
+                }))
+            elif msg_type == "respond":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
@@ -1166,6 +1472,7 @@ async def handle_client(ws):
     except (ConnectionClosedError, ConnectionClosedOK):
         pass
     finally:
+        await close_terminal()
         duration = int(time.monotonic() - connected_at)
         log.info("Client disconnected: ip=%s device=%s duration=%ds", ip, device, duration)
         clients.discard(ws)
@@ -1197,6 +1504,39 @@ def validate_runtime_config():
         )
     if TAILSCALE_WEB_ENABLED and not is_loopback_host(RELAY_HOST):
         raise RuntimeError("Tailscale web authentication requires HERDR_RELAY_HOST to be loopback.")
+    if WEB_TERMINAL_ENABLED:
+        if not TAILSCALE_WEB_ENABLED and not TERMINAL_ALLOW_DEVELOPMENT:
+            raise RuntimeError(
+                "HERDR_WEB_TERMINAL requires HERDR_TAILSCALE_WEB=1. "
+                "Development access needs the explicit HERDR_TERMINAL_ALLOW_DEVELOPMENT=1 opt-in."
+            )
+        if TAILSCALE_WEB_ENABLED and not TERMINAL_ALLOWED_USERS:
+            raise RuntimeError(
+                "HERDR_TERMINAL_ALLOWED_USERS is required when HERDR_WEB_TERMINAL=1."
+            )
+        if "*" in TERMINAL_ALLOWED_USERS:
+            raise RuntimeError(
+                "HERDR_TERMINAL_ALLOWED_USERS must contain explicit Tailscale login names; "
+                "wildcard terminal access is not allowed."
+            )
+        if (
+            TAILSCALE_WEB_ENABLED
+            and "*" not in TAILSCALE_ALLOWED_USERS
+            and "*" not in TERMINAL_ALLOWED_USERS
+            and not TERMINAL_ALLOWED_USERS.issubset(TAILSCALE_ALLOWED_USERS)
+        ):
+            raise RuntimeError(
+                "Every HERDR_TERMINAL_ALLOWED_USERS login must also be in "
+                "HERDR_TAILSCALE_ALLOWED_USERS."
+            )
+        if not os.path.isfile(TERMINAL_SHELL) or not os.access(TERMINAL_SHELL, os.X_OK):
+            raise RuntimeError("HERDR_TERMINAL_SHELL must point to an executable shell.")
+        if not os.path.isfile(SSH_BINARY) or not os.access(SSH_BINARY, os.X_OK):
+            raise RuntimeError("OpenSSH is required when HERDR_WEB_TERMINAL=1.")
+        try:
+            load_ssh_profiles(SSH_HOSTS_FILE)
+        except TerminalConfigError as error:
+            raise RuntimeError(str(error)) from error
     if not AUTH_TOKEN and not TAILSCALE_WEB_ENABLED and not ALLOW_INSECURE_NO_AUTH:
         raise RuntimeError(
             "HERDR_RELAY_TOKEN is required unless Tailscale web authentication is enabled. "

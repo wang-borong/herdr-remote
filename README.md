@@ -55,6 +55,15 @@ cd relay
 
 The web console includes the Agent Dashboard, live pane output, semantic Prompt submission, confirmed Interrupt, safe workspace-directory browsing, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
 
+For full workstation maintenance, enable official Tailscale SSH plus the responsive Web Terminal:
+
+```bash
+cd relay
+./install-tailscale-web.sh --remote-shell
+```
+
+Remote Shell provides a real PTY with xterm.js, persistent tmux sessions, Git/system maintenance, mobile shortcut keys, and allowlisted SSH profiles for LAN servers. Native SSH, ProxyJump, and optional subnet-router workflows remain available even when the browser console is offline. See [Remote Shell and LAN access](REMOTE_SHELL.md).
+
 ## Telegram Bot
 
 For the hardened Telegram-only setup (recommended for personal remote control):
@@ -150,6 +159,7 @@ The relay listens on `127.0.0.1` by default. Remote binding requires the explici
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/) (relay/TUI/bot)
 - `cloudflared` (for remote access)
 - `tailscale` (recommended for the private responsive web console)
+- `openssh` and `tmux` (installed by `--remote-shell` for full workstation and LAN-server control)
 - herdr 0.8+ for semantic Telegram prompt submission
 - Zero-dep plugin: [`herdr-push`](https://github.com/dcolinmorgan/herdr-push)
 

@@ -8,6 +8,8 @@ const elements = {
   connectionLabel: byId("connection-label"),
   connectionBanner: byId("connection-banner"),
   reconnectButton: byId("reconnect-button"),
+  agentWorkspace: byId("agent-workspace"),
+  terminalWorkspace: byId("terminal-workspace"),
   newAgentButton: byId("new-agent-button"),
   emptyNewAgent: byId("empty-new-agent"),
   settingsButton: byId("settings-button"),
@@ -63,6 +65,48 @@ const elements = {
   sessionName: byId("session-name"),
   sessionLogin: byId("session-login"),
   sessionAuth: byId("session-auth"),
+  addSshHostButton: byId("add-ssh-host-button"),
+  nativeSshStatus: byId("native-ssh-status"),
+  copyNativeSshButton: byId("copy-native-ssh-button"),
+  terminalProfileCount: byId("terminal-profile-count"),
+  terminalProfileList: byId("terminal-profile-list"),
+  refreshTerminalProfilesButton: byId("refresh-terminal-profiles-button"),
+  terminalEmpty: byId("terminal-empty"),
+  terminalEmptyTitle: byId("terminal-empty-title"),
+  terminalEmptyCopy: byId("terminal-empty-copy"),
+  terminalSetupCommand: byId("terminal-setup-command"),
+  copyTerminalSetupButton: byId("copy-terminal-setup-button"),
+  shellConsole: byId("shell-console"),
+  mobileTerminalBack: byId("mobile-terminal-back"),
+  terminalProfileAvatar: byId("terminal-profile-avatar"),
+  terminalProfileTitle: byId("terminal-profile-title"),
+  terminalSessionStatus: byId("terminal-session-status"),
+  terminalProfileMeta: byId("terminal-profile-meta"),
+  editSshHostButton: byId("edit-ssh-host-button"),
+  copyJumpCommandButton: byId("copy-jump-command-button"),
+  disconnectTerminalButton: byId("disconnect-terminal-button"),
+  clearWebTerminalButton: byId("clear-web-terminal-button"),
+  reconnectTerminalButton: byId("reconnect-terminal-button"),
+  webTerminal: byId("web-terminal"),
+  terminalConnectionOverlay: byId("terminal-connection-overlay"),
+  terminalOverlayTitle: byId("terminal-overlay-title"),
+  terminalOverlayCopy: byId("terminal-overlay-copy"),
+  terminalPasteButton: byId("terminal-paste-button"),
+  sshHostDialog: byId("ssh-host-dialog"),
+  sshHostForm: byId("ssh-host-form"),
+  sshHostTitle: byId("ssh-host-title"),
+  sshHostId: byId("ssh-host-id"),
+  sshHostLabel: byId("ssh-host-label"),
+  sshHostTarget: byId("ssh-host-target"),
+  sshHostPort: byId("ssh-host-port"),
+  sshHostColor: byId("ssh-host-color"),
+  sshHostDescription: byId("ssh-host-description"),
+  saveSshHostButton: byId("save-ssh-host-button"),
+  deleteSshHostButton: byId("delete-ssh-host-button"),
+  deleteSshHostDialog: byId("delete-ssh-host-dialog"),
+  confirmDeleteSshHostButton: byId("confirm-delete-ssh-host-button"),
+  remoteAccessStatus: byId("remote-access-status"),
+  openRemoteShellButton: byId("open-remote-shell-button"),
   toastRegion: byId("toast-region"),
 };
 
@@ -73,8 +117,18 @@ const STATUS = {
   done: { label: "已完成", rank: 3 },
 };
 
+const TERMINAL_KEY_SEQUENCES = {
+  escape: "\x1b",
+  tab: "\t",
+  "ctrl-c": "\x03",
+  "ctrl-l": "\x0c",
+  up: "\x1b[A",
+  down: "\x1b[B",
+};
+
 const state = {
   ws: null,
+  activeView: "agents",
   connection: "connecting",
   reconnectAttempt: 0,
   reconnectTimer: null,
@@ -97,9 +151,27 @@ const state = {
   startPending: false,
   pushSubscription: null,
   serviceWorkerRegistration: null,
+  terminalAuthorized: false,
+  nativeSshEnabled: false,
+  machine: null,
+  terminalProfiles: [],
+  activeTerminalProfile: null,
+  terminalRequestedProfile: null,
+  terminalSessionId: null,
+  terminalPending: false,
+  terminalConnected: false,
+  terminalShouldReconnect: false,
+  terminalInstance: null,
+  terminalFitAddon: null,
+  terminalResizeObserver: null,
+  sshProfilePending: false,
+  pendingDeleteProfile: null,
 };
 
-const initialPane = new URL(window.location.href).searchParams.get("pane");
+const initialUrl = new URL(window.location.href);
+const initialPane = initialUrl.searchParams.get("pane");
+const initialView = initialUrl.searchParams.get("view") === "terminal" ? "terminal" : "agents";
+const initialTerminalProfile = initialUrl.searchParams.get("terminal");
 
 function removeLegacyCredentials() {
   localStorage.removeItem("herdr_relay_token");
@@ -115,6 +187,38 @@ function applyTheme(theme) {
   document.documentElement.dataset.theme = selected;
   elements.themeSelect.value = selected;
   localStorage.setItem("herdr_theme", selected);
+  applyTerminalTheme();
+}
+
+function terminalTheme() {
+  const styles = getComputedStyle(document.documentElement);
+  return {
+    background: styles.getPropertyValue("--terminal").trim() || "#060810",
+    foreground: styles.getPropertyValue("--terminal-text").trim() || "#d7def0",
+    cursor: styles.getPropertyValue("--accent-strong").trim() || "#a69bff",
+    cursorAccent: styles.getPropertyValue("--terminal").trim() || "#060810",
+    selectionBackground: "rgba(139, 124, 255, 0.36)",
+    black: "#111827",
+    red: "#ff6b7f",
+    green: "#4ed49c",
+    yellow: "#f5b95c",
+    blue: "#8b7cff",
+    magenta: "#d78bff",
+    cyan: "#53d7de",
+    white: "#d7def0",
+    brightBlack: "#667085",
+    brightRed: "#ff8b9a",
+    brightGreen: "#72e5b5",
+    brightYellow: "#ffd27d",
+    brightBlue: "#afa5ff",
+    brightMagenta: "#e6b0ff",
+    brightCyan: "#7ce7ec",
+    brightWhite: "#ffffff",
+  };
+}
+
+function applyTerminalTheme() {
+  if (state.terminalInstance) state.terminalInstance.options.theme = terminalTheme();
 }
 
 function normalizedStatus(agent) {
@@ -202,14 +306,21 @@ function connect() {
     const operationWasPending = state.promptPending
       || state.interruptPending
       || state.startPending
-      || state.directoryPending;
+      || state.directoryPending
+      || state.sshProfilePending;
     state.ws = null;
     state.promptPending = false;
     state.pendingPromptText = "";
     state.interruptPending = false;
     state.startPending = false;
     state.directoryPending = false;
+    state.sshProfilePending = false;
+    state.terminalSessionId = null;
+    state.terminalPending = false;
+    state.terminalConnected = false;
     renderDirectoryBrowser();
+    renderRemoteAccess();
+    renderTerminalConnection();
     setConnection("offline");
     if (operationWasPending) {
       showToast(
@@ -236,8 +347,7 @@ function scheduleReconnect() {
 function handleMessage(message) {
   switch (message.type) {
     case "session":
-      state.session = message;
-      renderSession();
+      handleSession(message);
       break;
     case "agents":
       replaceAgentSnapshot(Array.isArray(message.agents) ? message.agents : []);
@@ -256,6 +366,22 @@ function handleMessage(message) {
       break;
     case "agent_started":
       handleAgentStarted(message);
+      break;
+    case "terminal_profiles":
+      state.terminalProfiles = Array.isArray(message.profiles) ? message.profiles : [];
+      renderRemoteAccess();
+      break;
+    case "terminal_opened":
+      handleTerminalOpened(message);
+      break;
+    case "terminal_output":
+      handleTerminalOutput(message);
+      break;
+    case "terminal_exit":
+      handleTerminalExit(message);
+      break;
+    case "terminal_error":
+      handleTerminalError(message);
       break;
     case "command_result":
       handleCommandResult(message);
@@ -359,6 +485,510 @@ function handleAgentStarted(message) {
   );
 }
 
+function handleSession(message) {
+  state.session = message;
+  state.terminalAuthorized = message.features?.terminal === true;
+  state.nativeSshEnabled = message.features?.native_ssh === true;
+  state.machine = message.machine || {};
+  state.terminalProfiles = Array.isArray(message.terminal_profiles)
+    ? message.terminal_profiles
+    : [];
+  const requestedProfile = state.terminalRequestedProfile;
+  if (
+    state.activeView === "terminal"
+    && !state.activeTerminalProfile
+    && requestedProfile
+    && terminalProfileById(requestedProfile)
+  ) {
+    state.activeTerminalProfile = requestedProfile;
+    state.terminalShouldReconnect = true;
+    document.body.classList.add("shell-open");
+  }
+  state.terminalRequestedProfile = null;
+  if (requestedProfile && !terminalProfileById(requestedProfile)) updateAppUrl();
+  renderSession();
+  renderRemoteAccess();
+
+  if (
+    state.activeView === "terminal"
+    && state.terminalAuthorized
+    && state.activeTerminalProfile
+    && state.terminalShouldReconnect
+    && !state.terminalPending
+    && !state.terminalConnected
+  ) {
+    window.setTimeout(() => openTerminalProfile(state.activeTerminalProfile), 80);
+  }
+}
+
+function terminalProfileById(profileId) {
+  return state.terminalProfiles.find((profile) => profile.id === profileId) || null;
+}
+
+function nativeSshCommand() {
+  const username = state.machine?.username;
+  const host = state.machine?.tailscale_dns || state.machine?.hostname;
+  return username && host ? `tailscale ssh ${username}@${host}` : "";
+}
+
+function proxyJumpCommand(profile) {
+  if (!profile) return "";
+  if (profile.kind === "local") return nativeSshCommand();
+  const username = state.machine?.username;
+  const gateway = state.machine?.tailscale_dns || state.machine?.hostname;
+  if (!username || !gateway) return "";
+  const port = Number(profile.port) === 22 ? "" : ` -p ${profile.port}`;
+  return `ssh -J ${username}@${gateway}${port} ${profile.target}`;
+}
+
+function setAppView(view, updateHistory = true) {
+  state.activeView = view === "terminal" ? "terminal" : "agents";
+  const terminalActive = state.activeView === "terminal";
+  elements.agentWorkspace.hidden = terminalActive;
+  elements.terminalWorkspace.hidden = !terminalActive;
+  document.body.classList.toggle("terminal-view", terminalActive);
+  document.querySelectorAll("[data-app-view]").forEach((button) => {
+    const active = button.dataset.appView === state.activeView;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  if (updateHistory) updateAppUrl();
+  if (terminalActive) {
+    renderRemoteAccess();
+    window.requestAnimationFrame(fitWebTerminal);
+  } else {
+    selectInitialAgentIfNeeded();
+  }
+}
+
+function updateAppUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("token");
+  if (state.activeView === "terminal") {
+    url.searchParams.set("view", "terminal");
+    if (state.activeTerminalProfile) url.searchParams.set("terminal", state.activeTerminalProfile);
+    else url.searchParams.delete("terminal");
+  } else {
+    url.searchParams.delete("view");
+    url.searchParams.delete("terminal");
+  }
+  history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function ensureWebTerminal() {
+  if (state.terminalInstance) return true;
+  if (typeof window.Terminal !== "function" || typeof window.FitAddon?.FitAddon !== "function") {
+    showToast("终端组件不可用", "请刷新页面以重新加载本地 xterm.js 资源。", "error");
+    return false;
+  }
+  const terminal = new window.Terminal({
+    cursorBlink: true,
+    cursorStyle: "bar",
+    fontFamily: '"SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", monospace',
+    fontSize: isDesktop() ? 13 : 12,
+    lineHeight: 1.25,
+    scrollback: 6000,
+    theme: terminalTheme(),
+    allowTransparency: false,
+    macOptionIsMeta: true,
+  });
+  const fitAddon = new window.FitAddon.FitAddon();
+  terminal.loadAddon(fitAddon);
+  terminal.open(elements.webTerminal);
+  terminal.onData((data) => sendTerminalText(data));
+  state.terminalInstance = terminal;
+  state.terminalFitAddon = fitAddon;
+
+  if ("ResizeObserver" in window) {
+    state.terminalResizeObserver = new ResizeObserver(() => fitWebTerminal());
+    state.terminalResizeObserver.observe(elements.webTerminal);
+  }
+  window.requestAnimationFrame(fitWebTerminal);
+  return true;
+}
+
+function fitWebTerminal() {
+  if (!state.terminalInstance || !state.terminalFitAddon || elements.terminalWorkspace.hidden) return;
+  if (elements.webTerminal.clientWidth < 80 || elements.webTerminal.clientHeight < 80) return;
+  try {
+    state.terminalFitAddon.fit();
+  } catch (_) {
+    return;
+  }
+  if (state.terminalSessionId && socketReady()) {
+    send({
+      type: "terminal_resize",
+      session_id: state.terminalSessionId,
+      cols: state.terminalInstance.cols,
+      rows: state.terminalInstance.rows,
+    });
+  }
+}
+
+function openTerminalProfile(profileId) {
+  const profile = terminalProfileById(profileId);
+  if (!state.terminalAuthorized || !profile) {
+    showToast("终端不可用", "请先启用 Remote Shell，或刷新服务器列表。", "error");
+    return;
+  }
+  if (!socketReady()) {
+    showToast("Relay 尚未连接", "连接恢复后会重新附着到 tmux 会话。", "error");
+    return;
+  }
+  state.activeView = "terminal";
+  state.activeTerminalProfile = profile.id;
+  state.terminalRequestedProfile = null;
+  state.terminalShouldReconnect = true;
+  state.terminalPending = true;
+  state.terminalConnected = false;
+  state.terminalSessionId = null;
+  document.body.classList.add("shell-open");
+  setAppView("terminal");
+  if (!ensureWebTerminal()) {
+    state.terminalPending = false;
+    return;
+  }
+  state.terminalInstance.reset();
+  renderRemoteAccess();
+  renderTerminalConnection();
+  window.requestAnimationFrame(() => {
+    fitWebTerminal();
+    const delivered = send({
+      type: "terminal_open",
+      profile_id: profile.id,
+      cols: state.terminalInstance.cols || 100,
+      rows: state.terminalInstance.rows || 30,
+    });
+    if (!delivered) {
+      state.terminalPending = false;
+      renderTerminalConnection();
+    }
+  });
+}
+
+function handleTerminalOpened(message) {
+  if (!message.session_id || !message.profile) return;
+  state.activeTerminalProfile = message.profile.id;
+  state.terminalSessionId = message.session_id;
+  state.terminalPending = false;
+  state.terminalConnected = true;
+  state.terminalShouldReconnect = true;
+  if (!terminalProfileById(message.profile.id)) state.terminalProfiles.unshift(message.profile);
+  ensureWebTerminal();
+  renderRemoteAccess();
+  renderTerminalConnection();
+  updateAppUrl();
+  window.requestAnimationFrame(() => {
+    fitWebTerminal();
+    state.terminalInstance?.focus();
+  });
+}
+
+function handleTerminalOutput(message) {
+  if (message.session_id !== state.terminalSessionId || !message.data) return;
+  if (!ensureWebTerminal()) return;
+  try {
+    const binary = window.atob(message.data);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    state.terminalInstance.write(bytes);
+  } catch (_) {
+    showToast("终端输出损坏", "Relay 返回了无法解码的数据。", "error");
+  }
+}
+
+function handleTerminalExit(message) {
+  if (message.session_id !== state.terminalSessionId) return;
+  state.terminalSessionId = null;
+  state.terminalPending = false;
+  state.terminalConnected = false;
+  state.terminalShouldReconnect = false;
+  state.terminalInstance?.write(`\r\n\x1b[38;5;245m[会话已结束${Number.isInteger(message.exit_code) ? `，退出码 ${message.exit_code}` : ""}]\x1b[0m\r\n`);
+  renderTerminalConnection();
+}
+
+function handleTerminalError(message) {
+  const operation = message.operation || "terminal";
+  if (operation === "ssh_profile") {
+    state.sshProfilePending = false;
+    renderSshProfileForm();
+  } else {
+    state.terminalSessionId = null;
+    state.terminalPending = false;
+    state.terminalConnected = false;
+    state.terminalShouldReconnect = false;
+    renderTerminalConnection();
+  }
+  showToast("远程操作失败", message.message || "终端操作失败", "error");
+}
+
+function sendTerminalText(text) {
+  if (!state.terminalSessionId || !socketReady() || typeof text !== "string" || !text) return;
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length > 64 * 1024) {
+    showToast("输入内容过长", "单次终端粘贴最多允许 64 KiB。", "error");
+    return;
+  }
+  for (let offset = 0; offset < bytes.length; offset += 12 * 1024) {
+    const chunk = bytes.subarray(offset, offset + 12 * 1024);
+    let binary = "";
+    for (const byte of chunk) binary += String.fromCharCode(byte);
+    send({
+      type: "terminal_input",
+      session_id: state.terminalSessionId,
+      data: window.btoa(binary),
+    });
+  }
+}
+
+function closeTerminalSelection() {
+  if (state.terminalSessionId && socketReady()) {
+    send({type: "terminal_close", session_id: state.terminalSessionId});
+  }
+  state.terminalSessionId = null;
+  state.terminalPending = false;
+  state.terminalConnected = false;
+  state.terminalShouldReconnect = false;
+  state.activeTerminalProfile = null;
+  document.body.classList.remove("shell-open");
+  renderRemoteAccess();
+  renderTerminalConnection();
+  updateAppUrl();
+}
+
+function renderRemoteAccess() {
+  const connected = socketReady();
+  const profiles = state.terminalAuthorized ? state.terminalProfiles : [];
+  const activeProfile = terminalProfileById(state.activeTerminalProfile);
+  if (state.activeTerminalProfile && !activeProfile) {
+    state.activeTerminalProfile = null;
+    state.terminalSessionId = null;
+    state.terminalConnected = false;
+    state.terminalPending = false;
+    document.body.classList.remove("shell-open");
+    updateAppUrl();
+  }
+
+  elements.addSshHostButton.disabled = !connected || !state.terminalAuthorized;
+  elements.refreshTerminalProfilesButton.disabled = !connected || !state.terminalAuthorized;
+  elements.terminalProfileCount.textContent = state.terminalAuthorized
+    ? `${profiles.length} 个可用入口`
+    : "Remote Shell 未授权";
+  elements.terminalProfileList.replaceChildren();
+
+  if (!state.terminalAuthorized) {
+    const unavailable = document.createElement("div");
+    unavailable.className = "terminal-profile-empty";
+    const strong = document.createElement("strong");
+    strong.textContent = "完整终端尚未启用";
+    const span = document.createElement("span");
+    span.textContent = "运行安装器的 --remote-shell 模式后，这里会显示本机和局域网服务器。";
+    unavailable.append(strong, span);
+    elements.terminalProfileList.append(unavailable);
+  } else {
+    for (const profile of profiles) {
+      elements.terminalProfileList.append(createTerminalProfileCard(profile));
+    }
+  }
+
+  const sshCommand = nativeSshCommand();
+  elements.nativeSshStatus.textContent = state.nativeSshEnabled
+    ? (sshCommand || "已启用，可使用普通 SSH 客户端连接")
+    : "尚未启用；Remote Shell 安装模式可同时开启";
+  elements.copyNativeSshButton.disabled = !state.nativeSshEnabled || !sshCommand;
+
+  const hasActiveProfile = Boolean(terminalProfileById(state.activeTerminalProfile));
+  elements.terminalEmpty.hidden = hasActiveProfile;
+  elements.shellConsole.hidden = !hasActiveProfile;
+  elements.terminalSetupCommand.hidden = state.terminalAuthorized;
+  elements.copyTerminalSetupButton.hidden = state.terminalAuthorized;
+  elements.terminalEmptyTitle.textContent = state.terminalAuthorized
+    ? "选择一个终端入口"
+    : "启用安全 Remote Shell";
+  elements.terminalEmptyCopy.textContent = state.terminalAuthorized
+    ? "使用完整 Shell 查看代码、运行 Git、维护系统，或连接局域网中的其他服务器。"
+    : "安装器会启用官方 Tailscale SSH，并为单独的 Tailscale 用户白名单开启 Web Terminal。";
+  document.body.classList.toggle("shell-open", hasActiveProfile);
+  renderTerminalConnection();
+  renderRemoteAccessStatus();
+}
+
+function createTerminalProfileCard(profile) {
+  const item = document.createElement("article");
+  item.className = `terminal-profile-item${profile.id === state.activeTerminalProfile ? " is-selected" : ""}`;
+
+  const openButton = document.createElement("button");
+  openButton.type = "button";
+  openButton.className = "terminal-profile-card";
+  openButton.setAttribute("aria-label", `打开 ${profile.label}`);
+  openButton.addEventListener("click", () => openTerminalProfile(profile.id));
+
+  const avatar = document.createElement("span");
+  avatar.className = `machine-avatar is-${profile.color || "cyan"}`;
+  avatar.setAttribute("aria-hidden", "true");
+  avatar.textContent = profile.kind === "local" ? ">_" : (profile.label.trim().charAt(0) || "S");
+
+  const copy = document.createElement("span");
+  copy.className = "terminal-profile-copy";
+  const title = document.createElement("strong");
+  title.textContent = profile.label;
+  const target = document.createElement("span");
+  const port = profile.kind === "ssh" && Number(profile.port) !== 22 ? `:${profile.port}` : "";
+  target.textContent = profile.kind === "local" ? profile.target : `${profile.target}${port}`;
+  const description = document.createElement("small");
+  description.textContent = profile.kind === "local"
+    ? (state.machine?.tmux ? "tmux 持久会话" : "临时 Shell 会话")
+    : (profile.description || "通过本机连接局域网");
+  copy.append(title, target, description);
+
+  const trailing = document.createElement("span");
+  trailing.className = "terminal-profile-trailing";
+  const badge = document.createElement("span");
+  badge.className = "machine-kind-badge";
+  badge.textContent = profile.kind === "local" ? "LOCAL" : "SSH";
+  const chevron = document.createElement("span");
+  chevron.className = "agent-card-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "›";
+  trailing.append(badge, chevron);
+  openButton.append(avatar, copy, trailing);
+  item.append(openButton);
+
+  if (profile.kind === "ssh") {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "profile-edit-button";
+    edit.setAttribute("aria-label", `编辑 ${profile.label}`);
+    edit.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>';
+    edit.addEventListener("click", () => openSshHostDialog(profile.id));
+    item.append(edit);
+  }
+  return item;
+}
+
+function renderTerminalConnection() {
+  const profile = terminalProfileById(state.activeTerminalProfile);
+  if (!profile) return;
+  elements.terminalProfileAvatar.className = `machine-avatar is-${profile.color || "cyan"}`;
+  elements.terminalProfileAvatar.textContent = profile.kind === "local" ? ">_" : (profile.label.trim().charAt(0) || "S");
+  elements.terminalProfileTitle.textContent = profile.label;
+  const port = profile.kind === "ssh" && Number(profile.port) !== 22 ? `:${profile.port}` : "";
+  elements.terminalProfileMeta.textContent = profile.kind === "local"
+    ? `${profile.target} · ${state.machine?.tmux ? "tmux 持久会话" : "临时 Shell"}`
+    : `${profile.target}${port} · 经本机局域网连接`;
+  elements.editSshHostButton.hidden = profile.kind !== "ssh";
+  elements.copyJumpCommandButton.disabled = !proxyJumpCommand(profile);
+  elements.disconnectTerminalButton.disabled = state.terminalPending && !state.terminalSessionId;
+  elements.reconnectTerminalButton.disabled = !socketReady() || state.terminalPending || state.terminalConnected;
+  elements.clearWebTerminalButton.disabled = !state.terminalInstance;
+  elements.terminalPasteButton.disabled = !state.terminalConnected;
+
+  if (state.terminalConnected) {
+    elements.terminalSessionStatus.textContent = "已连接";
+    elements.terminalSessionStatus.className = "status-pill status-working";
+    elements.terminalConnectionOverlay.hidden = true;
+  } else {
+    elements.terminalSessionStatus.textContent = state.terminalPending ? "连接中" : "已断开";
+    elements.terminalSessionStatus.className = "status-pill";
+    elements.terminalConnectionOverlay.hidden = false;
+    elements.terminalOverlayTitle.textContent = state.terminalPending ? "正在附着会话" : "终端已断开";
+    elements.terminalOverlayCopy.textContent = state.terminalPending
+      ? "tmux 会保留之前的工作现场"
+      : "点击重新连接可回到持久会话";
+  }
+}
+
+function renderRemoteAccessStatus() {
+  if (!state.session) {
+    elements.remoteAccessStatus.textContent = "正在读取 Tailscale SSH 与 Web Terminal 状态…";
+    return;
+  }
+  const webTerminal = state.terminalAuthorized ? "Web Terminal 已授权" : "Web Terminal 未启用";
+  const nativeSsh = state.nativeSshEnabled ? "Tailscale SSH 已启用" : "Tailscale SSH 未启用";
+  elements.remoteAccessStatus.textContent = `${nativeSsh}；${webTerminal}。`;
+}
+
+function openSshHostDialog(profileId = "") {
+  if (!state.terminalAuthorized) {
+    showToast("终端未授权", "先使用 Remote Shell 安装模式启用该功能。", "error");
+    return;
+  }
+  const profile = terminalProfileById(profileId);
+  elements.sshHostId.value = profile?.id || "";
+  elements.sshHostLabel.value = profile?.label || "";
+  elements.sshHostTarget.value = profile?.target || "";
+  elements.sshHostPort.value = String(profile?.port || 22);
+  elements.sshHostColor.value = profile?.color || "cyan";
+  elements.sshHostDescription.value = profile?.description || "";
+  elements.sshHostTitle.textContent = profile ? "编辑 SSH 服务器" : "添加 SSH 服务器";
+  elements.deleteSshHostButton.hidden = !profile;
+  state.sshProfilePending = false;
+  renderSshProfileForm();
+  elements.sshHostDialog.showModal();
+  window.setTimeout(() => elements.sshHostLabel.focus(), 40);
+}
+
+function renderSshProfileForm() {
+  elements.saveSshHostButton.disabled = state.sshProfilePending || !socketReady();
+  elements.deleteSshHostButton.disabled = state.sshProfilePending || !socketReady();
+  elements.saveSshHostButton.textContent = state.sshProfilePending ? "正在保存…" : "保存并连接";
+}
+
+function saveSshHost() {
+  if (state.sshProfilePending || !elements.sshHostForm.reportValidity()) return;
+  const profile = {
+    id: elements.sshHostId.value,
+    label: elements.sshHostLabel.value.trim(),
+    target: elements.sshHostTarget.value.trim(),
+    port: Number(elements.sshHostPort.value),
+    color: elements.sshHostColor.value,
+    description: elements.sshHostDescription.value.trim(),
+  };
+  if (!send({type: "ssh_profile_save", profile})) return;
+  state.sshProfilePending = true;
+  renderSshProfileForm();
+}
+
+function requestDeleteSshHost() {
+  const profile = terminalProfileById(elements.sshHostId.value);
+  if (!profile || profile.kind !== "ssh") return;
+  state.pendingDeleteProfile = profile;
+  elements.deleteSshHostDialog.showModal();
+}
+
+function confirmDeleteSshHost() {
+  const profile = state.pendingDeleteProfile;
+  if (!profile || state.sshProfilePending) return;
+  if (!send({type: "ssh_profile_delete", profile_id: profile.id})) return;
+  state.sshProfilePending = true;
+  elements.confirmDeleteSshHostButton.disabled = true;
+}
+
+async function copyText(text, title, detail) {
+  if (!text) {
+    showToast("没有可复制内容", "Relay 尚未提供完整连接信息。", "error");
+    return false;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(title, detail, "success");
+    return true;
+  } catch (_) {
+    showToast("复制失败", "浏览器未授予剪贴板权限。", "error");
+    return false;
+  }
+}
+
+async function pasteIntoTerminal() {
+  if (!state.terminalConnected) return;
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) sendTerminalText(text);
+    state.terminalInstance?.focus();
+  } catch (_) {
+    showToast("无法读取剪贴板", "请长按终端并使用系统粘贴菜单。", "error");
+  }
+}
+
 function handleCommandResult(message) {
   if (!message.ok) return;
   if (message.command === "agent_prompt") {
@@ -384,6 +1014,23 @@ function handleCommandResult(message) {
     showToast("Interrupt 已发送", "已向当前 Agent 发送 Ctrl+C。", "success");
     window.setTimeout(refreshOutput, 350);
   }
+  if (message.command === "ssh_profile_save") {
+    state.sshProfilePending = false;
+    if (elements.sshHostDialog.open) elements.sshHostDialog.close();
+    showToast("服务器已保存", "正在打开持久 SSH 终端。", "success");
+    if (message.profile_id) window.setTimeout(() => openTerminalProfile(message.profile_id), 80);
+  }
+  if (message.command === "ssh_profile_delete") {
+    const removedId = message.profile_id;
+    const selectedInUrl = new URL(window.location.href).searchParams.get("terminal") === removedId;
+    state.sshProfilePending = false;
+    state.pendingDeleteProfile = null;
+    elements.confirmDeleteSshHostButton.disabled = false;
+    if (elements.deleteSshHostDialog.open) elements.deleteSshHostDialog.close();
+    if (elements.sshHostDialog.open) elements.sshHostDialog.close();
+    if (state.activeTerminalProfile === removedId || selectedInUrl) closeTerminalSelection();
+    showToast("服务器入口已删除", "远端服务器和 SSH 配置未被修改。", "success");
+  }
 }
 
 function handleRelayError(message) {
@@ -391,9 +1038,11 @@ function handleRelayError(message) {
   state.interruptPending = false;
   state.startPending = false;
   state.directoryPending = false;
+  state.sshProfilePending = false;
   renderPromptState();
   renderInterruptState();
   renderDirectoryBrowser();
+  renderSshProfileForm();
   refreshActionAvailability();
   showToast("操作失败", message, "error");
 }
@@ -498,6 +1147,7 @@ function createAgentListEmpty() {
 }
 
 function selectInitialAgentIfNeeded() {
+  if (state.activeView !== "agents") return;
   if (state.activePane && activeAgent()) return;
   if (initialPane && state.agents.some((agent) => agent.pane_id === initialPane)) {
     selectAgent(initialPane, false);
@@ -654,12 +1304,7 @@ async function copyOutput() {
     showToast("暂无可复制内容", "先刷新当前 Agent 的输出。", "error");
     return;
   }
-  try {
-    await navigator.clipboard.writeText(content);
-    showToast("已复制", "终端输出已复制到剪贴板。", "success");
-  } catch (_) {
-    showToast("复制失败", "浏览器未授予剪贴板权限。", "error");
-  }
+  await copyText(content, "已复制", "终端输出已复制到剪贴板。");
 }
 
 function setFilter(filter) {
@@ -795,9 +1440,13 @@ function refreshActionAvailability() {
   elements.interruptButton.disabled = !connected || !state.activePane;
   elements.startAgentButton.disabled = !connected || !state.selectedDirectory || state.startPending;
   elements.startAgentButton.querySelector("span").textContent = state.startPending ? "正在启动…" : "启动 Codex";
+  elements.addSshHostButton.disabled = !connected || !state.terminalAuthorized;
+  elements.refreshTerminalProfilesButton.disabled = !connected || !state.terminalAuthorized;
   renderPromptState();
   renderInterruptState();
   renderPushStatus();
+  renderSshProfileForm();
+  renderTerminalConnection();
 }
 
 function renderSession() {
@@ -815,6 +1464,7 @@ function renderSession() {
   elements.sessionLogin.textContent = user.login || "通过本机 Relay 完成授权";
   elements.sessionAvatar.textContent = displayName.trim().charAt(0).toUpperCase() || "H";
   elements.sessionAuth.textContent = authLabels[auth] || "已连接";
+  renderRemoteAccessStatus();
 }
 
 async function initPush() {
@@ -914,6 +1564,9 @@ function closeDialogById(id) {
 }
 
 function bindEvents() {
+  document.querySelectorAll("[data-app-view]").forEach((button) => {
+    button.addEventListener("click", () => setAppView(button.dataset.appView));
+  });
   elements.reconnectButton.addEventListener("click", () => {
     if (state.ws) state.ws.close();
     state.ws = null;
@@ -993,6 +1646,63 @@ function bindEvents() {
 
   elements.themeSelect.addEventListener("change", () => applyTheme(elements.themeSelect.value));
   elements.pushToggleButton.addEventListener("click", togglePush);
+  elements.addSshHostButton.addEventListener("click", () => openSshHostDialog());
+  elements.refreshTerminalProfilesButton.addEventListener("click", () => {
+    if (state.terminalAuthorized) send({type: "terminal_profiles_request"});
+  });
+  elements.copyNativeSshButton.addEventListener("click", () => {
+    copyText(nativeSshCommand(), "SSH 命令已复制", "可在电脑终端或支持 Tailscale 的 SSH App 中执行。");
+  });
+  elements.copyTerminalSetupButton.addEventListener("click", () => {
+    copyText(
+      "./install-tailscale-web.sh --remote-shell",
+      "启用命令已复制",
+      "请在仓库的 relay 目录中执行。",
+    );
+  });
+  elements.mobileTerminalBack.addEventListener("click", closeTerminalSelection);
+  elements.disconnectTerminalButton.addEventListener("click", closeTerminalSelection);
+  elements.reconnectTerminalButton.addEventListener("click", () => {
+    if (state.activeTerminalProfile) openTerminalProfile(state.activeTerminalProfile);
+  });
+  elements.clearWebTerminalButton.addEventListener("click", () => {
+    state.terminalInstance?.clear();
+    state.terminalInstance?.focus();
+  });
+  elements.editSshHostButton.addEventListener("click", () => {
+    if (state.activeTerminalProfile) openSshHostDialog(state.activeTerminalProfile);
+  });
+  elements.copyJumpCommandButton.addEventListener("click", () => {
+    const profile = terminalProfileById(state.activeTerminalProfile);
+    copyText(
+      proxyJumpCommand(profile),
+      profile?.kind === "local" ? "Tailscale SSH 命令已复制" : "ProxyJump 命令已复制",
+      "可从其他电脑直接经本机跳转到目标服务器。",
+    );
+  });
+  document.querySelectorAll("[data-terminal-key]").forEach((button) => {
+    button.addEventListener("click", () => {
+      sendTerminalText(TERMINAL_KEY_SEQUENCES[button.dataset.terminalKey] || "");
+      state.terminalInstance?.focus();
+    });
+  });
+  document.querySelectorAll("[data-terminal-command]").forEach((button) => {
+    button.addEventListener("click", () => {
+      sendTerminalText(`${button.dataset.terminalCommand}\r`);
+      state.terminalInstance?.focus();
+    });
+  });
+  elements.terminalPasteButton.addEventListener("click", pasteIntoTerminal);
+  elements.sshHostForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveSshHost();
+  });
+  elements.deleteSshHostButton.addEventListener("click", requestDeleteSshHost);
+  elements.confirmDeleteSshHostButton.addEventListener("click", confirmDeleteSshHost);
+  elements.openRemoteShellButton.addEventListener("click", () => {
+    if (elements.settingsDialog.open) elements.settingsDialog.close();
+    setAppView("terminal");
+  });
 
   document.querySelectorAll("[data-close-dialog]").forEach((button) => {
     button.addEventListener("click", () => closeDialogById(button.dataset.closeDialog));
@@ -1008,8 +1718,17 @@ function bindEvents() {
     if (!document.hidden && state.autoRefresh) refreshOutput();
   });
   window.addEventListener("online", connect);
+  window.addEventListener("resize", fitWebTerminal);
   window.addEventListener("popstate", () => {
-    const pane = new URL(window.location.href).searchParams.get("pane");
+    const url = new URL(window.location.href);
+    const view = url.searchParams.get("view") === "terminal" ? "terminal" : "agents";
+    setAppView(view, false);
+    if (view === "terminal") {
+      const profileId = url.searchParams.get("terminal");
+      if (profileId && profileId !== state.activeTerminalProfile) openTerminalProfile(profileId);
+      return;
+    }
+    const pane = url.searchParams.get("pane");
     if (pane && state.agents.some((agent) => agent.pane_id === pane)) selectAgent(pane, false);
     else if (!pane) clearAgentSelection();
   });
@@ -1027,9 +1746,12 @@ function initialize() {
   removeLegacyCredentials();
   applyTheme(localStorage.getItem("herdr_theme") || "system");
   bindEvents();
+  state.terminalRequestedProfile = initialTerminalProfile;
+  setAppView(initialView, false);
   updateCounter(elements.promptInput, elements.promptCount);
   updateCounter(elements.initialPromptInput, elements.initialPromptCount);
   renderAll();
+  renderRemoteAccess();
   connect();
   initPush();
   window.setInterval(() => {

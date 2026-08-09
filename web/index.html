@@ -12,7 +12,10 @@
   <title>Herdr Control</title>
   <link rel="icon" href="/logo.svg" type="image/svg+xml">
   <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/vendor/xterm/xterm.css">
   <link rel="stylesheet" href="/app.css">
+  <script src="/vendor/xterm/xterm.js" defer></script>
+  <script src="/vendor/xterm/addon-fit.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -33,9 +36,21 @@
         </span>
       </div>
 
-      <div class="topbar-status" aria-live="polite">
-        <span class="connection-dot is-connecting" id="connection-dot" aria-hidden="true"></span>
-        <span id="connection-label">正在连接</span>
+      <div class="topbar-center">
+        <nav class="primary-nav" aria-label="主要功能">
+          <button class="primary-nav-button is-active" type="button" data-app-view="agents" aria-pressed="true">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+            Agents
+          </button>
+          <button class="primary-nav-button" type="button" data-app-view="terminal" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 4 4-4 4M11 17h8"/></svg>
+            Remote Shell
+          </button>
+        </nav>
+        <div class="topbar-status" aria-live="polite">
+          <span class="connection-dot is-connecting" id="connection-dot" aria-hidden="true"></span>
+          <span id="connection-label">正在连接</span>
+        </div>
       </div>
 
       <div class="topbar-actions">
@@ -57,7 +72,8 @@
       <button id="reconnect-button" type="button">立即重试</button>
     </div>
 
-    <main class="workspace" id="main-content">
+    <main class="main-stage" id="main-content">
+      <section class="workspace agent-workspace" id="agent-workspace" aria-label="Agent 控制">
       <aside class="agent-panel" aria-labelledby="dashboard-title">
         <div class="panel-heading">
           <div>
@@ -201,7 +217,146 @@
           </section>
         </article>
       </section>
+      </section>
+
+      <section class="remote-workspace" id="terminal-workspace" aria-label="远程终端与服务器" hidden>
+        <aside class="machine-panel" aria-labelledby="remote-shell-title">
+          <div class="panel-heading machine-heading">
+            <div>
+              <p class="eyebrow">TAILSCALE OPS</p>
+              <h1 id="remote-shell-title">Remote Shell</h1>
+            </div>
+            <button class="primary-button compact-button" id="add-ssh-host-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              添加服务器
+            </button>
+          </div>
+
+          <section class="native-ssh-card" aria-labelledby="native-ssh-title">
+            <div class="native-ssh-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 8.5a7 7 0 0 1 14 0v7a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3v-7Z"/><path d="M9 12h6M12 9v6"/></svg>
+            </div>
+            <div>
+              <span class="native-ssh-kicker">NATIVE ACCESS</span>
+              <strong id="native-ssh-title">Tailscale SSH</strong>
+              <span id="native-ssh-status">等待 Relay 状态…</span>
+            </div>
+            <button class="icon-button" id="copy-native-ssh-button" type="button" aria-label="复制 Tailscale SSH 命令" title="复制 SSH 命令">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+          </section>
+
+          <div class="machine-section-heading">
+            <div>
+              <strong>终端与服务器</strong>
+              <span id="terminal-profile-count">0 个可用入口</span>
+            </div>
+            <button class="toolbar-button" id="refresh-terminal-profiles-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2m.5 5v-5h-5"/></svg>
+              刷新
+            </button>
+          </div>
+          <div class="terminal-profile-list" id="terminal-profile-list" aria-live="polite"></div>
+
+          <div class="gateway-note">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 5 3.4 8.4 8 9 4.6-.6 8-4 8-9V7l-8-4Z"/><path d="m9 12 2 2 4-4"/></svg>
+            <p><strong>本机就是安全跳板</strong><span>网页终端从本机直接 SSH 到局域网服务器；原生客户端也可使用 ProxyJump 或可选子网路由。</span></p>
+          </div>
+        </aside>
+
+        <section class="web-terminal-detail" aria-label="交互式终端">
+          <div class="remote-empty" id="terminal-empty">
+            <div class="remote-empty-visual" aria-hidden="true">
+              <span>&gt;_</span>
+            </div>
+            <p class="eyebrow">FULL MACHINE CONTROL</p>
+            <h2 id="terminal-empty-title">选择一个终端入口</h2>
+            <p id="terminal-empty-copy">使用完整 Shell 查看代码、运行 Git、维护系统，或连接局域网中的其他服务器。</p>
+            <code id="terminal-setup-command">./install-tailscale-web.sh --remote-shell</code>
+            <button class="secondary-button" id="copy-terminal-setup-button" type="button">复制启用命令</button>
+          </div>
+
+          <article class="shell-console" id="shell-console" hidden>
+            <header class="shell-header">
+              <button class="icon-button mobile-terminal-back" id="mobile-terminal-back" type="button" aria-label="返回服务器列表">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+              </button>
+              <span class="machine-avatar is-violet" id="terminal-profile-avatar" aria-hidden="true">&gt;_</span>
+              <div class="shell-identity">
+                <div><h2 id="terminal-profile-title">本机终端</h2><span class="status-pill status-working" id="terminal-session-status">正在连接</span></div>
+                <p id="terminal-profile-meta">本机 · tmux 持久会话</p>
+              </div>
+              <div class="shell-actions">
+                <button class="icon-button" id="edit-ssh-host-button" type="button" aria-label="编辑服务器" title="编辑服务器">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>
+                </button>
+                <button class="icon-button" id="copy-jump-command-button" type="button" aria-label="复制 ProxyJump 命令" title="复制 ProxyJump 命令">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/><path d="M5 5v14h14"/></svg>
+                </button>
+                <button class="danger-button" id="disconnect-terminal-button" type="button" aria-label="断开终端" title="断开终端">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17 5 12l5-5M5 12h11M16 5h3v14h-3"/></svg>
+                  <span>断开</span>
+                </button>
+              </div>
+            </header>
+
+            <section class="interactive-terminal-card" aria-labelledby="interactive-terminal-title">
+              <div class="interactive-terminal-toolbar">
+                <div class="terminal-label">
+                  <span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+                  <strong id="interactive-terminal-title">Interactive PTY</strong>
+                  <span id="terminal-transport-label">Tailscale HTTPS · WebSocket</span>
+                </div>
+                <div class="interactive-terminal-actions">
+                  <button class="toolbar-button" id="clear-web-terminal-button" type="button">清屏</button>
+                  <button class="toolbar-button" id="reconnect-terminal-button" type="button">重新连接</button>
+                </div>
+              </div>
+              <div class="xterm-frame">
+                <div class="web-terminal" id="web-terminal" aria-label="远程交互式终端"></div>
+                <div class="terminal-connection-overlay" id="terminal-connection-overlay">
+                  <span class="terminal-spinner" aria-hidden="true"></span>
+                  <strong id="terminal-overlay-title">准备终端</strong>
+                  <span id="terminal-overlay-copy">选择入口后建立加密会话</span>
+                </div>
+              </div>
+              <div class="mobile-keybar" aria-label="终端快捷键">
+                <button type="button" data-terminal-key="escape">Esc</button>
+                <button type="button" data-terminal-key="tab">Tab</button>
+                <button type="button" data-terminal-key="ctrl-c">Ctrl+C</button>
+                <button type="button" data-terminal-key="ctrl-l">Ctrl+L</button>
+                <button type="button" data-terminal-key="up">↑</button>
+                <button type="button" data-terminal-key="down">↓</button>
+                <button type="button" id="terminal-paste-button">粘贴</button>
+              </div>
+            </section>
+
+            <section class="terminal-utilities" aria-label="终端快捷操作">
+              <div class="terminal-quick-commands">
+                <span>快捷命令</span>
+                <button type="button" data-terminal-command="pwd">pwd</button>
+                <button type="button" data-terminal-command="ls -la">ls -la</button>
+                <button type="button" data-terminal-command="git status">git status</button>
+                <button type="button" data-terminal-command="git diff --stat">git diff --stat</button>
+                <button type="button" data-terminal-command="htop">htop</button>
+              </div>
+              <p><span class="security-dot" aria-hidden="true"></span>终端拥有当前 Linux 用户的完整权限。命令与终端内容不会写入 Relay 审计日志。</p>
+            </section>
+          </article>
+        </section>
+      </section>
     </main>
+
+    <nav class="mobile-nav" aria-label="移动端主要功能">
+      <button class="mobile-nav-button is-active" type="button" data-app-view="agents" aria-pressed="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        <span>Agents</span>
+      </button>
+      <button class="mobile-nav-button" type="button" data-app-view="terminal" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 4 4-4 4M11 17h8"/></svg>
+        <span>终端</span>
+      </button>
+    </nav>
   </div>
 
   <dialog class="modal new-agent-modal" id="new-agent-dialog" aria-labelledby="new-agent-title">
@@ -210,7 +365,7 @@
         <div>
           <p class="eyebrow">NEW CODEX</p>
           <h2 id="new-agent-title">在目录中启动 Agent</h2>
-          <p>只能浏览配置的 Workspace 白名单，Relay 不会执行任意 Shell 命令。</p>
+          <p>目录浏览与 Agent 启动仍限制在 Workspace 白名单；完整 Shell 位于单独授权的 Remote Shell 页面。</p>
         </div>
         <button class="icon-button modal-close" type="button" data-close-dialog="new-agent-dialog" aria-label="关闭">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -302,6 +457,75 @@
     </div>
   </dialog>
 
+  <dialog class="modal ssh-host-modal" id="ssh-host-dialog" aria-labelledby="ssh-host-title">
+    <form class="ssh-host-shell" id="ssh-host-form">
+      <header class="modal-header">
+        <div>
+          <p class="eyebrow">LAN / SSH CONFIG</p>
+          <h2 id="ssh-host-title">添加 SSH 服务器</h2>
+          <p>保存连接目标，不保存密码或私钥。支持 <code>user@192.168.1.20</code> 和 <code>~/.ssh/config</code> 中的 Host 别名。</p>
+        </div>
+        <button class="icon-button modal-close" type="button" data-close-dialog="ssh-host-dialog" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </header>
+      <input id="ssh-host-id" type="hidden">
+      <div class="ssh-host-fields">
+        <label class="field-stack" for="ssh-host-label">
+          <span>显示名称</span>
+          <input id="ssh-host-label" type="text" maxlength="64" placeholder="例如：编译服务器" required autocomplete="off">
+        </label>
+        <label class="field-stack field-wide" for="ssh-host-target">
+          <span>SSH 目标</span>
+          <input id="ssh-host-target" type="text" maxlength="255" placeholder="user@192.168.1.20 或 ssh-config-alias" required spellcheck="false" autocomplete="off">
+        </label>
+        <label class="field-stack" for="ssh-host-port">
+          <span>端口</span>
+          <input id="ssh-host-port" type="number" min="1" max="65535" value="22" inputmode="numeric" required>
+        </label>
+        <label class="field-stack" for="ssh-host-color">
+          <span>标识颜色</span>
+          <select id="ssh-host-color">
+            <option value="cyan">青色</option>
+            <option value="green">绿色</option>
+            <option value="amber">琥珀色</option>
+            <option value="rose">玫红色</option>
+            <option value="violet">紫色</option>
+          </select>
+        </label>
+        <label class="field-stack field-wide" for="ssh-host-description">
+          <span>备注 <small>可选</small></span>
+          <input id="ssh-host-description" type="text" maxlength="160" placeholder="用途、机房或系统版本" autocomplete="off">
+        </label>
+      </div>
+      <div class="ssh-host-hint">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 5 3.4 8.4 8 9 4.6-.6 8-4 8-9V7l-8-4Z"/><path d="M12 8v5M12 16h.01"/></svg>
+        首次连接时，SSH 的主机指纹确认或密码提示会直接显示在终端中。推荐提前配置密钥认证。
+      </div>
+      <footer class="modal-footer">
+        <button class="danger-button" id="delete-ssh-host-button" type="button" hidden>删除服务器</button>
+        <div>
+          <button class="ghost-button" type="button" data-close-dialog="ssh-host-dialog">取消</button>
+          <button class="primary-button" id="save-ssh-host-button" type="submit">保存并连接</button>
+        </div>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="modal confirm-modal" id="delete-ssh-host-dialog" aria-labelledby="delete-ssh-host-title">
+    <div class="confirm-shell">
+      <span class="confirm-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
+      </span>
+      <h2 id="delete-ssh-host-title">删除这台服务器？</h2>
+      <p>只会删除 Herdr 的连接入口，不会修改远端服务器或你的 <code>~/.ssh/config</code>。</p>
+      <div class="confirm-actions">
+        <button class="ghost-button" type="button" data-close-dialog="delete-ssh-host-dialog">取消</button>
+        <button class="danger-button danger-solid" id="confirm-delete-ssh-host-button" type="button">确认删除</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog class="modal settings-modal" id="settings-dialog" aria-labelledby="settings-title">
     <div class="settings-shell">
       <header class="modal-header">
@@ -335,6 +559,13 @@
           </div>
           <button class="secondary-button compact-button" id="push-toggle-button" type="button" disabled>启用通知</button>
         </section>
+        <section class="settings-section">
+          <div>
+            <h3>远程维护</h3>
+            <p id="remote-access-status">正在读取 Tailscale SSH 与 Web Terminal 状态…</p>
+          </div>
+          <button class="secondary-button compact-button" id="open-remote-shell-button" type="button">打开终端</button>
+        </section>
         <section class="session-card">
           <span class="session-avatar" id="session-avatar" aria-hidden="true">T</span>
           <div>
@@ -344,7 +575,7 @@
           <span class="session-badge" id="session-auth">连接中</span>
         </section>
         <p class="settings-security">
-          Relay 仅监听本机回环地址。网页通过 Tailscale Serve 的身份头授权，长期 Relay token 不会保存在浏览器的 localStorage 中。
+          Relay 仅监听本机回环地址。网页通过 Tailscale Serve 的身份头授权，长期 Relay token 不会保存在浏览器的 localStorage 中。Remote Shell 仅对单独的终端用户白名单开放。
         </p>
       </div>
     </div>

@@ -22,6 +22,9 @@
 - 在配置的 Workspace 白名单中浏览目录。
 - 在白名单内的普通目录、Git 仓库或其子目录中安全创建新的 Codex Agent。
 - Agent 阻塞时显示允许、拒绝和 Trust 等上下文操作。
+- 可选完整 Web Terminal：本机 Shell、Git/systemd 维护、tmux 持久会话和手机快捷键。
+- 可添加局域网 SSH Server Profile，由本机安全跳转到其他工作机器。
+- 可选官方 Tailscale SSH 与 subnet router，保留网页之外的原生维护链路。
 - 可选 Web Push、PWA 安装、深色/浅色主题。
 
 ## 安全边界
@@ -34,7 +37,9 @@
 - 旧式 `?token=` 网页访问会换成短时 HttpOnly、SameSite 会话 Cookie；token 不写入 `localStorage`。
 - Prompt 正文不会写入 Relay 日志或审计日志。
 - 工作目录会解析为真实路径，并限制在 `HERDR_WORKSPACE_ROOTS` 中；目录符号链接不会出现在列表中。
-- 远程端只提供明确的 Herdr RPC，不提供任意 Shell 命令入口。
+- 默认 Agent 模式只提供明确的 Herdr RPC。完整 Shell 必须通过 `--remote-shell` 显式启用，并使用不支持 `*` 通配符的独立 `HERDR_TERMINAL_ALLOWED_USERS` 白名单。
+- Relay Token/Web Session 客户端不能打开完整 Shell；Web Terminal 要求经过 Tailscale 身份认证的 WebSocket。
+- Terminal 命令、按键和输出不会写入 Relay 审计日志。
 - 本机回环网络属于信任边界：不要在存在不可信本地系统用户或不可信本地进程的共享主机上启用此模式。
 
 Tailscale 官方也建议：使用 Serve 身份头鉴权时，后端服务只监听 localhost。本项目会在启动时强制检查这一点。
@@ -79,6 +84,26 @@ cd relay
 
 7. 输出类似 `https://your-machine.your-tailnet.ts.net` 的访问地址。
 8. 在配置前后检查 Funnel；如果无法确认仅为私网访问，脚本会停止。
+
+### 启用原生 SSH 与完整 Web Terminal
+
+```bash
+./install-tailscale-web.sh --remote-shell
+```
+
+该模式会安装 OpenSSH Client 和 tmux、开启官方 Tailscale SSH，并在 Dashboard 中增加响应式 Remote Shell 页面。手机端提供 Esc、Tab、Ctrl+C、方向键和粘贴按钮；PC 端提供服务器列表与大尺寸终端双栏布局。
+
+局域网服务器可以直接在网页中添加，Herdr 只保存 SSH Target 和端口，不保存密码或私钥。更完整的使用方式、ProxyJump 和可选子网路由见 [Remote Shell 文档](REMOTE_SHELL.md)。
+
+如果希望 tailnet 设备直接访问本机所在 LAN，可显式配置：
+
+```bash
+./install-tailscale-web.sh \
+  --configure-only \
+  --advertise-routes 192.168.1.0/24
+```
+
+此操作还需要在 Tailscale Admin Console 批准 Route。
 
 如果只想配置已有的 Tailscale：
 
@@ -150,6 +175,10 @@ HERDR_RELAY_HOST=127.0.0.1
 HERDR_TAILSCALE_WEB=1
 HERDR_TAILSCALE_ALLOWED_USERS=you@example.com
 HERDR_WORKSPACE_ROOTS=/home/user/Workspace:/srv/repos
+HERDR_TAILSCALE_SSH=1
+HERDR_WEB_TERMINAL=1
+HERDR_TERMINAL_ALLOWED_USERS=you@example.com
+HERDR_SSH_HOSTS_FILE=/home/user/.config/herdr-remote/ssh-hosts.json
 ```
 
 修改后重启 Relay：
