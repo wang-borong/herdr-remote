@@ -17,10 +17,10 @@
 - 响应式 Agent Dashboard，兼容桌面和手机浏览器。
 - 按状态筛选和搜索本机 Agent。
 - 查看最近 60、120 或 200 行 Pane 输出，并可自动刷新。
-- 通过 `herdr agent prompt` 提交 Prompt。
+- 通过 `herdr agent prompt` 提交 Prompt；Agent 已在工作时显示为安全排队，而不会因等待下一次状态变化误报失败。
 - 二次确认后发送规范的 `C-c` Interrupt。
 - 在配置的 Workspace 白名单中浏览目录。
-- 在 Git 仓库或其子目录中安全创建新的 Codex Agent。
+- 在白名单内的普通目录、Git 仓库或其子目录中安全创建新的 Codex Agent。
 - Agent 阻塞时显示允许、拒绝和 Trust 等上下文操作。
 - 可选 Web Push、PWA 安装、深色/浅色主题。
 
@@ -33,7 +33,7 @@
 - WebSocket 必须同源，阻止其他网页借用你的 Tailscale 身份发起控制请求。
 - 旧式 `?token=` 网页访问会换成短时 HttpOnly、SameSite 会话 Cookie；token 不写入 `localStorage`。
 - Prompt 正文不会写入 Relay 日志或审计日志。
-- 仓库路径会解析为真实路径，并限制在 `HERDR_WORKSPACE_ROOTS` 中；目录符号链接不会出现在列表中。
+- 工作目录会解析为真实路径，并限制在 `HERDR_WORKSPACE_ROOTS` 中；目录符号链接不会出现在列表中。
 - 远程端只提供明确的 Herdr RPC，不提供任意 Shell 命令入口。
 - 本机回环网络属于信任边界：不要在存在不可信本地系统用户或不可信本地进程的共享主机上启用此模式。
 
@@ -50,7 +50,7 @@ Tailscale 官方也建议：使用 Serve 身份头鉴权时，后端服务只监
 
 2. Linux 使用 systemd。安装脚本支持：
 
-   - Arch Linux
+   - Arch Linux 及兼容衍生发行版（包括 CachyOS）
    - Debian 13 (trixie)
 
 3. 手机安装 Tailscale App，并登录与电脑相同的 tailnet。
@@ -66,9 +66,9 @@ cd relay
 
 脚本会：
 
-1. 在 Arch 使用 `pacman`，或在 Debian 13 配置 Tailscale 官方 trixie 软件源并安装依赖。
+1. 在 Arch/CachyOS 等 Arch 兼容系统使用 `pacman`，或在 Debian 13 配置 Tailscale 官方 trixie 软件源并安装依赖。
 2. 启用 `tailscaled.service`。
-3. 如果机器尚未登录，运行 `tailscale up` 并显示登录 URL。
+3. 如果机器尚未登录，运行带 3 分钟超时的 `tailscale up` 并显示登录 URL，不会无限等待。
 4. 自动读取当前 Tailscale 登录名，写入允许用户白名单。
 5. 开启 Relay 的 Tailscale Web 身份认证并重启用户服务。
 6. 运行：
@@ -85,6 +85,36 @@ cd relay
 ```bash
 ./install-tailscale-web.sh --configure-only
 ```
+
+### Clash Meta / Mihomo 共存
+
+Clash Meta 的 Fake-IP 模式可能把 `controlplane.tailscale.com` 解析到
+`198.18.0.0/15`。普通程序会由 Clash TUN 接管，但 `tailscaled` 可能无法通过
+这个 Fake-IP 建立控制连接，表现为安装器停在登录提示且始终不显示 URL。
+
+安装器检测到 Fake-IP 后，会自动尝试 Clash Verge Rev 常用的 `7897` 和传统
+Clash 常用的 `7890` 端口。检测成功时，仍可直接运行：
+
+```bash
+./install-tailscale-web.sh
+```
+
+如果使用的是其他端口，可以显式指定 Clash 的 HTTP 或 mixed 端口：
+
+```bash
+./install-tailscale-web.sh \
+  --tailscale-proxy http://127.0.0.1:7897
+```
+
+安装器会先验证代理能访问 Tailscale 控制面，然后写入：
+
+```text
+/etc/systemd/system/tailscaled.service.d/herdr-remote-proxy.conf
+```
+
+并重启 `tailscaled`。使用这一配置时，需要保持 Clash 本地代理可用。如果你的
+Clash mixed 端口不同，请替换 `7897`。也可以设置
+`HERDR_TAILSCALE_PROXY=http://127.0.0.1:端口`。
 
 指定一个或多个允许登录名：
 

@@ -369,7 +369,12 @@ function handleCommandResult(message) {
     }
     state.pendingPromptText = "";
     renderPromptState();
-    showToast("Prompt 已发送", "Agent 已收到新的任务。", "success");
+    const queued = message.delivery === "queued";
+    showToast(
+      queued ? "Prompt 已排队" : "Prompt 已发送",
+      queued ? "Agent 正在工作，新任务已提交并将在当前任务后处理。" : "Agent 已收到新的任务。",
+      "success",
+    );
     window.setTimeout(refreshOutput, 500);
   }
   if (message.command === "send_keys" && state.interruptPending) {

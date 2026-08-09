@@ -208,7 +208,11 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(relay, "submit_agent_prompt") as submit_prompt,
-            patch.object(relay.asyncio, "to_thread", new=AsyncMock(return_value=True)) as to_thread,
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                new=AsyncMock(return_value="queued"),
+            ) as to_thread,
             patch.object(relay, "audit") as audit,
         ):
             await relay.handle_client(ws)
@@ -216,7 +220,12 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         to_thread.assert_awaited_once_with(submit_prompt, pane_id, prompt, None)
         submit_prompt.assert_not_called()
         self.assertIn(
-            {"type": "command_result", "command": "agent_prompt", "ok": True},
+            {
+                "type": "command_result",
+                "command": "agent_prompt",
+                "ok": True,
+                "delivery": "queued",
+            },
             ws.sent,
         )
         detail = audit.call_args.args[4]
@@ -225,24 +234,44 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
 
     def test_submit_agent_prompt_waits_for_observed_state_change(self):
         prompt = "run the tests"
+        idle = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "result": {
+                    "agent": {
+                        "agent_status": "idle",
+                        "interactive_ready": True,
+                        "state_change_seq": 41,
+                    }
+                }
+            }),
+            stderr="",
+        )
         accepted = subprocess.CompletedProcess(
             [], 0,
             stdout=json.dumps({"result": {"agent": {"agent_status": "working"}}}),
             stderr="",
         )
 
-        with patch.object(relay, "run_herdr_result", return_value=accepted) as run_herdr:
-            self.assertTrue(relay.submit_agent_prompt("w0:p1", prompt))
+        with patch.object(
+            relay,
+            "run_herdr_result",
+            side_effect=[idle, accepted],
+        ) as run_herdr:
+            self.assertEqual(relay.submit_agent_prompt("w0:p1", prompt), "confirmed")
 
-        run_herdr.assert_called_once_with(
-            "agent", "prompt", "w0:p1", prompt,
-            "--wait",
-            "--until", "working",
-            "--until", "blocked",
-            "--until", "done",
-            "--timeout", "8000",
-            remote=None,
-            timeout=12,
+        self.assertEqual(
+            run_herdr.call_args_list[1],
+            unittest.mock.call(
+                "agent", "prompt", "w0:p1", prompt,
+                "--wait",
+                "--until", "working",
+                "--until", "blocked",
+                "--until", "done",
+                "--timeout", "8000",
+                remote=None,
+                timeout=12,
+            ),
         )
 
     def test_submit_agent_prompt_safely_retries_enter_after_stall(self):
@@ -287,23 +316,18 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             relay,
             "run_herdr_result",
-            side_effect=[stalled, idle, entered, working],
+            side_effect=[idle, stalled, idle, entered, working],
         ) as run_herdr:
-            self.assertTrue(relay.submit_agent_prompt("w0:p1", "continue"))
+            self.assertEqual(relay.submit_agent_prompt("w0:p1", "continue"), "confirmed")
 
         self.assertEqual(
-            run_herdr.call_args_list[2],
+            run_herdr.call_args_list[3],
             unittest.mock.call(
                 "agent", "send-keys", "w0:p1", "Enter", remote=None, timeout=5,
             ),
         )
 
-    def test_submit_agent_prompt_does_not_press_enter_if_agent_is_working(self):
-        stalled = subprocess.CompletedProcess(
-            [], 1,
-            stdout="",
-            stderr=json.dumps({"error": {"code": "agent_prompt_stalled"}}),
-        )
+    def test_submit_agent_prompt_queues_without_waiting_if_agent_is_working(self):
         working = subprocess.CompletedProcess(
             [], 0,
             stdout=json.dumps({
@@ -317,15 +341,63 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             }),
             stderr="",
         )
+        accepted = subprocess.CompletedProcess([], 0, stdout='{"result":{}}', stderr="")
 
         with patch.object(
             relay,
             "run_herdr_result",
-            side_effect=[stalled, working],
+            side_effect=[working, accepted],
         ) as run_herdr:
-            self.assertTrue(relay.submit_agent_prompt("w0:p1", "continue"))
+            self.assertEqual(relay.submit_agent_prompt("w0:p1", "continue"), "queued")
 
         self.assertEqual(len(run_herdr.call_args_list), 2)
+        self.assertEqual(
+            run_herdr.call_args_list[1],
+            unittest.mock.call(
+                "agent", "prompt", "w0:p1", "continue", remote=None, timeout=5,
+            ),
+        )
+
+    def test_submit_agent_prompt_accepts_timeout_after_state_advanced(self):
+        idle = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "result": {
+                    "agent": {
+                        "agent_status": "idle",
+                        "interactive_ready": True,
+                        "state_change_seq": 41,
+                    }
+                }
+            }),
+            stderr="",
+        )
+        timed_out = subprocess.CompletedProcess(
+            [], 1,
+            stdout="",
+            stderr=json.dumps({"error": {"code": "timeout"}}),
+        )
+        working = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "result": {
+                    "agent": {
+                        "agent_status": "working",
+                        "state_change_seq": 42,
+                    }
+                }
+            }),
+            stderr="",
+        )
+
+        with patch.object(
+            relay,
+            "run_herdr_result",
+            side_effect=[idle, timed_out, working],
+        ) as run_herdr:
+            self.assertEqual(relay.submit_agent_prompt("w0:p1", "continue"), "confirmed")
+
+        self.assertEqual(len(run_herdr.call_args_list), 3)
         self.assertFalse(any("send-keys" in call.args for call in run_herdr.call_args_list))
 
     def test_submit_agent_prompt_fails_if_enter_has_no_observed_effect(self):
@@ -355,7 +427,7 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 relay,
                 "run_herdr_result",
-                side_effect=[stalled, idle, entered, idle, idle],
+                side_effect=[idle, stalled, idle, entered, idle, idle],
             ),
         ):
             with self.assertRaisesRegex(RuntimeError, "did not start after Enter"):

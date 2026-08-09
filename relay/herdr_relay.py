@@ -409,8 +409,22 @@ def agent_state_advanced(before: dict, after: dict) -> bool:
     )
 
 
-def submit_agent_prompt(pane_id: str, text: str, remote=None) -> bool:
-    """Submit a prompt and verify that Herdr observed it starting."""
+def submit_agent_prompt(pane_id: str, text: str, remote=None) -> str:
+    """Submit a prompt and return confirmed or queued delivery semantics."""
+    before = get_agent_info(pane_id, remote=remote)
+    if str(before.get("agent_status", "unknown")).casefold() == "working":
+        # Herdr cannot attribute the next state transition to a prompt queued
+        # while an existing turn is working. Waiting here can falsely time out
+        # even though the semantic prompt API accepted the new task.
+        queued = run_herdr_result(
+            "agent", "prompt", pane_id, text,
+            remote=remote,
+            timeout=5,
+        )
+        if queued.returncode != 0:
+            raise RuntimeError("Herdr rejected the queued agent prompt")
+        return "queued"
+
     result = run_herdr_result(
         "agent", "prompt", pane_id, text,
         "--wait",
@@ -422,17 +436,18 @@ def submit_agent_prompt(pane_id: str, text: str, remote=None) -> bool:
         timeout=AGENT_PROMPT_PROCESS_TIMEOUT_SECONDS,
     )
     if result.returncode == 0:
-        return True
+        return "confirmed"
+
+    current = get_agent_info(pane_id, remote=remote)
+    if agent_state_advanced(before, current):
+        # Herdr may time out waiting for one of the requested settled states
+        # after already observing that submission changed the agent state.
+        return "confirmed"
     if herdr_error_code(result) != "agent_prompt_stalled":
         raise RuntimeError("Herdr rejected the agent prompt")
 
-    stalled = get_agent_info(pane_id, remote=remote)
-    status = str(stalled.get("agent_status", "unknown")).casefold()
-    if status == "working":
-        # The state changed just after Herdr's wait timed out. Do not press
-        # Enter again or a second empty submission could be queued.
-        return True
-    if status != "idle" or stalled.get("interactive_ready") is not True:
+    status = str(current.get("agent_status", "unknown")).casefold()
+    if status != "idle" or current.get("interactive_ready") is not True:
         raise RuntimeError("Agent prompt did not start")
 
     entered = run_herdr_result(
@@ -444,9 +459,9 @@ def submit_agent_prompt(pane_id: str, text: str, remote=None) -> bool:
         raise RuntimeError("Could not finish submitting the agent prompt")
 
     for attempt in range(AGENT_PROMPT_CONFIRM_ATTEMPTS):
-        current = get_agent_info(pane_id, remote=remote)
-        if agent_state_advanced(stalled, current):
-            return True
+        observed = get_agent_info(pane_id, remote=remote)
+        if agent_state_advanced(before, observed):
+            return "confirmed"
         if attempt + 1 < AGENT_PROMPT_CONFIRM_ATTEMPTS:
             time.sleep(AGENT_PROMPT_CONFIRM_INTERVAL_SECONDS)
     raise RuntimeError("Agent prompt did not start after Enter")
@@ -1100,13 +1115,19 @@ async def handle_client(ws):
                 log.info("Agent prompt from %s (%s): pane=%s chars=%d", ip, device, pane_id, len(text))
                 audit("agent_prompt", ip, device, pane_id, sensitive_detail(text))
                 try:
-                    await asyncio.to_thread(submit_agent_prompt, pane_id, text, remote)
+                    delivery = await asyncio.to_thread(submit_agent_prompt, pane_id, text, remote)
                 except Exception as e:
                     # Exception strings from subprocess may embed the full prompt command.
                     log.warning("agent_prompt command failed for pane %s (%s)", pane_id, type(e).__name__)
                     await ws.send(json.dumps({"type": "error", "message": "agent_prompt command failed"}))
                     continue
-                await ws.send(json.dumps({"type": "command_result", "command": "agent_prompt", "ok": True}))
+                log.info("Agent prompt accepted for pane %s: delivery=%s", pane_id, delivery)
+                await ws.send(json.dumps({
+                    "type": "command_result",
+                    "command": "agent_prompt",
+                    "ok": True,
+                    "delivery": delivery,
+                }))
             elif msg_type == "send_text":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:

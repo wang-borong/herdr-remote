@@ -6,6 +6,9 @@ CONFIG_DIR="${HERDR_CONFIG_DIR:-$HOME/.config/herdr-remote}"
 CONFIG_FILE="$CONFIG_DIR/config.env"
 WS_PORT="${HERDR_RELAY_PORT:-8375}"
 ALLOWED_USERS="${HERDR_TAILSCALE_ALLOWED_USERS:-}"
+TAILSCALE_PROXY="${HERDR_TAILSCALE_PROXY:-}"
+TAILSCALE_LOGIN_TIMEOUT="${HERDR_TAILSCALE_LOGIN_TIMEOUT:-3m}"
+TAILSCALE_PROXY_DROPIN="/etc/systemd/system/tailscaled.service.d/herdr-remote-proxy.conf"
 CONFIGURE_ONLY=false
 RESET_FUNNEL=false
 INSTALL_TEMP_DIR=""
@@ -14,12 +17,16 @@ usage() {
     cat <<'EOF'
 Usage: ./install-tailscale-web.sh [options]
 
-Install Tailscale on Arch Linux or Debian 13, authorize the Herdr web UI,
-and privately expose the localhost relay with Tailscale Serve.
+Install Tailscale on Arch Linux, Arch-compatible derivatives (including
+CachyOS), or Debian 13; authorize the Herdr web UI; and privately expose the
+localhost relay with Tailscale Serve.
 
 Options:
   --allowed-users LOGIN[,LOGIN...]  Tailscale login allowlist. Defaults to
                                     the currently logged-in Tailscale user.
+  --tailscale-proxy URL             Route tailscaled control traffic through a
+                                    loopback HTTP proxy. Clash ports 7897 and
+                                    7890 are auto-detected for fake-IP DNS.
   --configure-only                  Skip package installation.
   --reset-funnel                    Reset every Funnel route on this machine
                                     before configuring private Serve.
@@ -53,6 +60,11 @@ while [[ $# -gt 0 ]]; do
             CONFIGURE_ONLY=true
             shift
             ;;
+        --tailscale-proxy)
+            [[ $# -ge 2 ]] || die "--tailscale-proxy requires a value"
+            TAILSCALE_PROXY="$2"
+            shift 2
+            ;;
         --reset-funnel)
             RESET_FUNNEL=true
             shift
@@ -73,11 +85,12 @@ done
 # shellcheck disable=SC1091
 source /etc/os-release
 DISTRO_ID="${HERDR_INSTALL_DISTRO:-${ID:-unknown}}"
+DISTRO_ID_LIKE="${HERDR_INSTALL_ID_LIKE:-${ID_LIKE:-}}"
 DISTRO_VERSION="${HERDR_INSTALL_VERSION:-${VERSION_ID:-}}"
 
 is_arch=false
 is_debian=false
-if [[ "$DISTRO_ID" == "arch" ]]; then
+if [[ "$DISTRO_ID" == "arch" || "$DISTRO_ID" == "cachyos" || " $DISTRO_ID_LIKE " == *" arch "* ]]; then
     is_arch=true
 elif [[ "$DISTRO_ID" == "debian" ]]; then
     is_debian=true
@@ -87,13 +100,19 @@ if [[ "$is_debian" == true && "$DISTRO_VERSION" != "13" ]]; then
     die "Debian $DISTRO_VERSION is not covered by this script; Debian 13 (trixie) is supported"
 fi
 if [[ "$is_arch" == false && "$is_debian" == false ]]; then
-    die "unsupported distribution: $DISTRO_ID (supported: Arch Linux, Debian 13)"
+    die "unsupported distribution: $DISTRO_ID (supported: Arch Linux and compatible derivatives such as CachyOS, Debian 13)"
 fi
+
+ensure_install_temp_dir() {
+    if [[ -z "$INSTALL_TEMP_DIR" ]]; then
+        INSTALL_TEMP_DIR="$(mktemp -d -t herdr-tailscale.XXXXXX)"
+    fi
+}
 
 install_dependencies() {
     if [[ "$is_arch" == true ]]; then
-        command -v pacman >/dev/null 2>&1 || die "pacman is required on Arch Linux"
-        echo "Installing Tailscale and helper packages with pacman..."
+        command -v pacman >/dev/null 2>&1 || die "pacman is required on Arch Linux-compatible systems"
+        echo "Installing Tailscale and helper packages with pacman ($DISTRO_ID)..."
         sudo pacman -S --needed tailscale curl python
         return
     fi
@@ -103,7 +122,7 @@ install_dependencies() {
     sudo apt-get update
     sudo apt-get install -y ca-certificates curl python3
 
-    INSTALL_TEMP_DIR="$(mktemp -d -t herdr-tailscale.XXXXXX)"
+    ensure_install_temp_dir
     curl --fail --location --silent --show-error \
         --output "$INSTALL_TEMP_DIR/tailscale-archive-keyring.gpg" \
         https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg
@@ -128,15 +147,106 @@ command -v tailscale >/dev/null 2>&1 || die "tailscale is not installed; rerun w
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
 command -v systemctl >/dev/null 2>&1 || die "systemd is required"
 
+proxy_reaches_controlplane() {
+    curl --proxy "$1" --noproxy "" \
+        --connect-timeout 3 --max-time 10 --output /dev/null --silent \
+        https://controlplane.tailscale.com/ \
+        2>/dev/null
+}
+
+tailscale_control_ip() {
+    getent ahostsv4 controlplane.tailscale.com 2>/dev/null \
+        | awk 'NR == 1 { print $1; exit }'
+}
+
+is_fake_proxy_ip() {
+    [[ "$1" == 198.18.* || "$1" == 198.19.* ]]
+}
+
+CONTROL_IP="$(tailscale_control_ip || true)"
+if [[ -z "$TAILSCALE_PROXY" ]] && is_fake_proxy_ip "$CONTROL_IP"; then
+    for proxy_candidate in http://127.0.0.1:7897 http://127.0.0.1:7890; do
+        if proxy_reaches_controlplane "$proxy_candidate"; then
+            TAILSCALE_PROXY="$proxy_candidate"
+            echo "Detected Clash/Mihomo fake-IP DNS and a working local proxy at $TAILSCALE_PROXY."
+            break
+        fi
+    done
+fi
+
+configure_tailscale_proxy() {
+    [[ -n "$TAILSCALE_PROXY" ]] || return
+    TAILSCALE_PROXY="${TAILSCALE_PROXY%/}"
+    if [[ ! "$TAILSCALE_PROXY" =~ ^http://(127\.0\.0\.1|localhost):([0-9]{1,5})$ ]]; then
+        die "--tailscale-proxy must be a loopback HTTP URL such as http://127.0.0.1:7897"
+    fi
+    local proxy_port="${BASH_REMATCH[2]}"
+    if (( 10#$proxy_port < 1 || 10#$proxy_port > 65535 )); then
+        die "--tailscale-proxy contains an invalid port"
+    fi
+
+    echo "Checking the local Tailscale proxy..."
+    proxy_reaches_controlplane "$TAILSCALE_PROXY" \
+        || die "the proxy $TAILSCALE_PROXY cannot reach controlplane.tailscale.com"
+
+    ensure_install_temp_dir
+    local proxy_config="$INSTALL_TEMP_DIR/herdr-remote-proxy.conf"
+    printf '%s\n' \
+        '[Service]' \
+        "Environment=\"HTTP_PROXY=$TAILSCALE_PROXY\"" \
+        "Environment=\"HTTPS_PROXY=$TAILSCALE_PROXY\"" \
+        'Environment="NO_PROXY=localhost,127.0.0.1,::1"' \
+        > "$proxy_config"
+    echo "Configuring tailscaled to use $TAILSCALE_PROXY..."
+    sudo install -m 0755 -d "$(dirname "$TAILSCALE_PROXY_DROPIN")"
+    sudo install -m 0644 "$proxy_config" "$TAILSCALE_PROXY_DROPIN"
+    sudo systemctl daemon-reload
+}
+
+tailscale_backend_state() {
+    local status_json
+    status_json="$(tailscale status --json 2>/dev/null || true)"
+    [[ -n "$status_json" ]] || return
+    printf '%s' "$status_json" | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get("BackendState", ""))
+except Exception:
+    pass
+'
+}
+
+configure_tailscale_proxy
+
 echo "Enabling tailscaled..."
 sudo systemctl enable --now tailscaled.service
-
-if ! tailscale status >/dev/null 2>&1; then
-    echo "Tailscale needs to authenticate this machine."
-    echo "Follow the login URL printed by the next command, then return here."
-    sudo tailscale up
+if [[ -n "$TAILSCALE_PROXY" ]]; then
+    sudo systemctl restart tailscaled.service
 fi
-tailscale status >/dev/null 2>&1 || die "Tailscale is not connected"
+
+if [[ "$(tailscale_backend_state)" != "Running" ]]; then
+    if [[ -z "$TAILSCALE_PROXY" && ! -f "$TAILSCALE_PROXY_DROPIN" ]] \
+        && is_fake_proxy_ip "$CONTROL_IP"; then
+        echo "Error: controlplane.tailscale.com resolves to $CONTROL_IP, which is in" >&2
+        echo "Clash/Mihomo's common fake-IP range. tailscaled cannot reach that fake" >&2
+        echo "address on this host, so it cannot generate a login URL." >&2
+        echo "" >&2
+        echo "Rerun with Clash's HTTP/mixed port, for example:" >&2
+        echo "  $0 --tailscale-proxy http://127.0.0.1:7897" >&2
+        exit 1
+    fi
+    echo "Tailscale needs to authenticate this machine."
+    echo "Open the login URL printed below. This command exits automatically after"
+    echo "authentication and will stop after $TAILSCALE_LOGIN_TIMEOUT instead of waiting forever."
+    if ! sudo tailscale up --timeout="$TAILSCALE_LOGIN_TIMEOUT"; then
+        echo "Tailscale did not reach the Running state within $TAILSCALE_LOGIN_TIMEOUT." >&2
+        echo "Check: sudo journalctl -u tailscaled.service -n 50 --no-pager" >&2
+        [[ -n "$TAILSCALE_PROXY" ]] \
+            && echo "Also confirm that the local proxy remains available at $TAILSCALE_PROXY." >&2
+        exit 1
+    fi
+fi
+[[ "$(tailscale_backend_state)" == "Running" ]] || die "Tailscale is not connected"
 
 tailscale_identity() {
     tailscale status --json | python3 -c '

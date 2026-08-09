@@ -23,7 +23,11 @@ assert_eq "$?" "0" "inline deps present"
 
 echo "3. launch scripts executable"
 [ -x "$DIR/relay/start.sh" ] && [ -x "$DIR/relay/install-telegram-only.sh" ] && \
-  [ -x "$DIR/relay/install-tailscale-web.sh" ] && bash -n "$DIR/relay/install-tailscale-web.sh"
+  [ -x "$DIR/relay/install-tailscale-web.sh" ] && bash -n "$DIR/relay/install-tailscale-web.sh" && \
+  grep -q '"$DISTRO_ID" == "cachyos"' "$DIR/relay/install-tailscale-web.sh" && \
+  grep -q 'DISTRO_ID_LIKE' "$DIR/relay/install-tailscale-web.sh" && \
+  grep -q -- '--tailscale-proxy' "$DIR/relay/install-tailscale-web.sh" && \
+  grep -q -- '--timeout="$TAILSCALE_LOGIN_TIMEOUT"' "$DIR/relay/install-tailscale-web.sh"
 assert_eq "$?" "0" "relay installers are executable and parse"
 
 # --- Telegram ---
@@ -74,6 +78,7 @@ WEB="$DIR/web/index.html"
 WEB_JS="$DIR/web/app.js"
 [ -f "$DIR/web/app.css" ] && [ -f "$DIR/web/manifest.webmanifest" ] && \
   grep -q "WebSocket" "$WEB_JS" && grep -q "agent_prompt" "$WEB_JS" && \
+  grep -q 'message.delivery === "queued"' "$WEB_JS" && \
   grep -q "list_directories" "$WEB_JS" && grep -q "start_agent" "$WEB_JS" && \
   grep -q "C-c" "$WEB_JS" && node --check "$WEB_JS"
 assert_eq "$?" "0" "has responsive assets and complete Agent controls"
