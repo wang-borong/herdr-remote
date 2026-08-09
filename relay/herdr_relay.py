@@ -113,6 +113,10 @@ def configured_workspace_roots() -> list[Path]:
 
 WORKSPACE_ROOTS = configured_workspace_roots()
 WORKSPACE_ENTRY_LIMIT = 200
+AGENT_PROMPT_WAIT_TIMEOUT_MS = 8_000
+AGENT_PROMPT_PROCESS_TIMEOUT_SECONDS = 12
+AGENT_PROMPT_CONFIRM_ATTEMPTS = 15
+AGENT_PROMPT_CONFIRM_INTERVAL_SECONDS = 0.2
 
 TOOL_OPTIONS = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
 SUBAGENT_OPTIONS = ["approve all pending", "configure individually", "exit (cancel subagents)"]
@@ -338,13 +342,14 @@ def workspace_directory_listing(value: str | None = None) -> dict:
     entries = entries[:WORKSPACE_ENTRY_LIMIT]
 
     parent = directory.parent if path_within_workspace_roots(directory.parent) else None
+    git_root = git_root_for(directory)
     return {
         "path": str(directory),
         "display_path": display_workspace_path(directory),
         "parent": str(parent) if parent else None,
         "entries": entries,
-        "can_start_agent": git_root_for(directory) is not None,
-        "git_root": str(git_root_for(directory) or ""),
+        "can_start_agent": True,
+        "git_root": str(git_root or ""),
         "truncated": truncated,
     }
 
@@ -358,11 +363,97 @@ def parse_herdr_result(result: subprocess.CompletedProcess) -> dict:
         raise RuntimeError("Herdr returned an invalid response") from e
 
 
+def herdr_json_response(result: subprocess.CompletedProcess) -> dict:
+    """Decode a Herdr JSON response from stdout or stderr."""
+    for stream in (result.stdout, result.stderr):
+        if not isinstance(stream, str) or not stream.strip():
+            continue
+        candidates = [stream.strip(), *reversed(stream.splitlines())]
+        for candidate in candidates:
+            try:
+                response = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(response, dict):
+                return response
+    return {}
+
+
+def herdr_error_code(result: subprocess.CompletedProcess) -> str:
+    error = herdr_json_response(result).get("error") or {}
+    return str(error.get("code", "")) if isinstance(error, dict) else ""
+
+
+def get_agent_info(pane_id: str, remote=None) -> dict:
+    result = run_herdr_result("agent", "get", pane_id, remote=remote, timeout=5)
+    if result.returncode != 0:
+        raise RuntimeError("Could not inspect agent state")
+    response = herdr_json_response(result)
+    agent = (response.get("result") or {}).get("agent")
+    if not isinstance(agent, dict):
+        raise RuntimeError("Herdr returned an invalid agent state")
+    return agent
+
+
+def agent_state_advanced(before: dict, after: dict) -> bool:
+    if after.get("agent_status") != before.get("agent_status"):
+        return True
+    before_seq = before.get("state_change_seq")
+    after_seq = after.get("state_change_seq")
+    return (
+        isinstance(before_seq, int)
+        and not isinstance(before_seq, bool)
+        and isinstance(after_seq, int)
+        and not isinstance(after_seq, bool)
+        and after_seq > before_seq
+    )
+
+
+def submit_agent_prompt(pane_id: str, text: str, remote=None) -> bool:
+    """Submit a prompt and verify that Herdr observed it starting."""
+    result = run_herdr_result(
+        "agent", "prompt", pane_id, text,
+        "--wait",
+        "--until", "working",
+        "--until", "blocked",
+        "--until", "done",
+        "--timeout", str(AGENT_PROMPT_WAIT_TIMEOUT_MS),
+        remote=remote,
+        timeout=AGENT_PROMPT_PROCESS_TIMEOUT_SECONDS,
+    )
+    if result.returncode == 0:
+        return True
+    if herdr_error_code(result) != "agent_prompt_stalled":
+        raise RuntimeError("Herdr rejected the agent prompt")
+
+    stalled = get_agent_info(pane_id, remote=remote)
+    status = str(stalled.get("agent_status", "unknown")).casefold()
+    if status == "working":
+        # The state changed just after Herdr's wait timed out. Do not press
+        # Enter again or a second empty submission could be queued.
+        return True
+    if status != "idle" or stalled.get("interactive_ready") is not True:
+        raise RuntimeError("Agent prompt did not start")
+
+    entered = run_herdr_result(
+        "agent", "send-keys", pane_id, "Enter",
+        remote=remote,
+        timeout=5,
+    )
+    if entered.returncode != 0:
+        raise RuntimeError("Could not finish submitting the agent prompt")
+
+    for attempt in range(AGENT_PROMPT_CONFIRM_ATTEMPTS):
+        current = get_agent_info(pane_id, remote=remote)
+        if agent_state_advanced(stalled, current):
+            return True
+        if attempt + 1 < AGENT_PROMPT_CONFIRM_ATTEMPTS:
+            time.sleep(AGENT_PROMPT_CONFIRM_INTERVAL_SECONDS)
+    raise RuntimeError("Agent prompt did not start after Enter")
+
+
 def start_local_codex(cwd: str, prompt: str = "") -> dict:
     directory = resolve_workspace_path(cwd)
-    git_root = git_root_for(directory)
-    if git_root is None:
-        raise ValueError("Select a directory inside a Git repository before starting Codex")
     if not isinstance(prompt, str) or len(prompt) > 1000:
         raise ValueError("Prompt must contain at most 1000 characters")
 
@@ -400,17 +491,11 @@ def start_local_codex(cwd: str, prompt: str = "") -> dict:
         prompt_warning = ""
         if prompt:
             try:
-                prompt_result = run_herdr_result(
-                    "agent", "prompt", pane_id, prompt,
-                    timeout=15,
-                )
+                submit_agent_prompt(pane_id, prompt)
             except Exception:
                 prompt_warning = "Codex started, but the initial prompt was not accepted"
             else:
-                if prompt_result.returncode == 0:
-                    prompted = True
-                else:
-                    prompt_warning = "Codex started, but the initial prompt was not accepted"
+                prompted = True
 
         return {
             "pane_id": pane_id,
@@ -1015,14 +1100,10 @@ async def handle_client(ws):
                 log.info("Agent prompt from %s (%s): pane=%s chars=%d", ip, device, pane_id, len(text))
                 audit("agent_prompt", ip, device, pane_id, sensitive_detail(text))
                 try:
-                    result = run_herdr_result("agent", "prompt", pane_id, text, remote=remote)
+                    await asyncio.to_thread(submit_agent_prompt, pane_id, text, remote)
                 except Exception as e:
                     # Exception strings from subprocess may embed the full prompt command.
                     log.warning("agent_prompt command failed for pane %s (%s)", pane_id, type(e).__name__)
-                    await ws.send(json.dumps({"type": "error", "message": "agent_prompt command failed"}))
-                    continue
-                if result.returncode != 0:
-                    log.warning("agent_prompt command failed for pane %s with exit %s", pane_id, result.returncode)
                     await ws.send(json.dumps({"type": "error", "message": "agent_prompt command failed"}))
                     continue
                 await ws.send(json.dumps({"type": "command_result", "command": "agent_prompt", "ok": True}))

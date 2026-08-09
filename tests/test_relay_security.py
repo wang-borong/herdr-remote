@@ -205,15 +205,16 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         relay.known_panes.add(pane_id)
         relay.pane_remote_map[pane_id] = None
         ws = FakeWebSocket([{"type": "agent_prompt", "pane_id": pane_id, "text": prompt}])
-        result = subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
         with (
-            patch.object(relay, "run_herdr_result", return_value=result) as run_herdr,
+            patch.object(relay, "submit_agent_prompt") as submit_prompt,
+            patch.object(relay.asyncio, "to_thread", new=AsyncMock(return_value=True)) as to_thread,
             patch.object(relay, "audit") as audit,
         ):
             await relay.handle_client(ws)
 
-        run_herdr.assert_called_once_with("agent", "prompt", pane_id, prompt, remote=None)
+        to_thread.assert_awaited_once_with(submit_prompt, pane_id, prompt, None)
+        submit_prompt.assert_not_called()
         self.assertIn(
             {"type": "command_result", "command": "agent_prompt", "ok": True},
             ws.sent,
@@ -221,6 +222,146 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         detail = audit.call_args.args[4]
         self.assertIn(f"chars={len(prompt)}", detail)
         self.assertNotIn("secret-token-123", detail)
+
+    def test_submit_agent_prompt_waits_for_observed_state_change(self):
+        prompt = "run the tests"
+        accepted = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({"result": {"agent": {"agent_status": "working"}}}),
+            stderr="",
+        )
+
+        with patch.object(relay, "run_herdr_result", return_value=accepted) as run_herdr:
+            self.assertTrue(relay.submit_agent_prompt("w0:p1", prompt))
+
+        run_herdr.assert_called_once_with(
+            "agent", "prompt", "w0:p1", prompt,
+            "--wait",
+            "--until", "working",
+            "--until", "blocked",
+            "--until", "done",
+            "--timeout", "8000",
+            remote=None,
+            timeout=12,
+        )
+
+    def test_submit_agent_prompt_safely_retries_enter_after_stall(self):
+        stalled = subprocess.CompletedProcess(
+            [], 1,
+            stdout="",
+            stderr=json.dumps({
+                "error": {
+                    "code": "agent_prompt_stalled",
+                    "message": "no observed state change",
+                }
+            }),
+        )
+        idle = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "result": {
+                    "agent": {
+                        "agent_status": "idle",
+                        "interactive_ready": True,
+                        "state_change_seq": 41,
+                    }
+                }
+            }),
+            stderr="",
+        )
+        entered = subprocess.CompletedProcess([], 0, stdout='{"result":{}}', stderr="")
+        working = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "result": {
+                    "agent": {
+                        "agent_status": "working",
+                        "interactive_ready": True,
+                        "state_change_seq": 42,
+                    }
+                }
+            }),
+            stderr="",
+        )
+
+        with patch.object(
+            relay,
+            "run_herdr_result",
+            side_effect=[stalled, idle, entered, working],
+        ) as run_herdr:
+            self.assertTrue(relay.submit_agent_prompt("w0:p1", "continue"))
+
+        self.assertEqual(
+            run_herdr.call_args_list[2],
+            unittest.mock.call(
+                "agent", "send-keys", "w0:p1", "Enter", remote=None, timeout=5,
+            ),
+        )
+
+    def test_submit_agent_prompt_does_not_press_enter_if_agent_is_working(self):
+        stalled = subprocess.CompletedProcess(
+            [], 1,
+            stdout="",
+            stderr=json.dumps({"error": {"code": "agent_prompt_stalled"}}),
+        )
+        working = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "result": {
+                    "agent": {
+                        "agent_status": "working",
+                        "interactive_ready": True,
+                        "state_change_seq": 42,
+                    }
+                }
+            }),
+            stderr="",
+        )
+
+        with patch.object(
+            relay,
+            "run_herdr_result",
+            side_effect=[stalled, working],
+        ) as run_herdr:
+            self.assertTrue(relay.submit_agent_prompt("w0:p1", "continue"))
+
+        self.assertEqual(len(run_herdr.call_args_list), 2)
+        self.assertFalse(any("send-keys" in call.args for call in run_herdr.call_args_list))
+
+    def test_submit_agent_prompt_fails_if_enter_has_no_observed_effect(self):
+        stalled = subprocess.CompletedProcess(
+            [], 1,
+            stdout="",
+            stderr=json.dumps({"error": {"code": "agent_prompt_stalled"}}),
+        )
+        idle = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "result": {
+                    "agent": {
+                        "agent_status": "idle",
+                        "interactive_ready": True,
+                        "state_change_seq": 41,
+                    }
+                }
+            }),
+            stderr="",
+        )
+        entered = subprocess.CompletedProcess([], 0, stdout='{"result":{}}', stderr="")
+
+        with (
+            patch.object(relay, "AGENT_PROMPT_CONFIRM_ATTEMPTS", 2),
+            patch.object(relay.time, "sleep") as sleep,
+            patch.object(
+                relay,
+                "run_herdr_result",
+                side_effect=[stalled, idle, entered, idle, idle],
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "did not start after Enter"):
+                relay.submit_agent_prompt("w0:p1", "continue")
+
+        sleep.assert_called_once_with(relay.AGENT_PROMPT_CONFIRM_INTERVAL_SECONDS)
 
     async def test_pane_read_line_count_is_bounded(self):
         pane_id = "w0:p1"
@@ -250,8 +391,10 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temp_dir) / "Workspace"
             outside = Path(temp_dir) / "outside"
             repo = root / "repo"
+            ordinary = root / "ordinary"
             repo.mkdir(parents=True)
             (repo / ".git").mkdir()
+            ordinary.mkdir()
             outside.mkdir()
             (root / "escape").symlink_to(outside, target_is_directory=True)
 
@@ -260,15 +403,18 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 repo_entry = next(entry for entry in listing["entries"] if entry["name"] == "repo")
                 self.assertTrue(repo_entry["is_repo"])
                 self.assertNotIn("escape", [entry["name"] for entry in listing["entries"]])
+                self.assertTrue(listing["can_start_agent"])
                 self.assertTrue(relay.workspace_directory_listing(str(repo))["can_start_agent"])
+                ordinary_listing = relay.workspace_directory_listing(str(ordinary))
+                self.assertTrue(ordinary_listing["can_start_agent"])
+                self.assertEqual(ordinary_listing["git_root"], "")
                 with self.assertRaisesRegex(ValueError, "outside the configured roots"):
                     relay.resolve_workspace_path(str(outside))
 
-    def test_codex_start_uses_structured_herdr_arguments(self):
+    def test_codex_start_allows_an_ordinary_directory_and_uses_structured_arguments(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            repo = Path(temp_dir) / "repo"
-            repo.mkdir()
-            (repo / ".git").mkdir()
+            directory = Path(temp_dir) / "ordinary"
+            directory.mkdir()
             created = subprocess.CompletedProcess(
                 [], 0,
                 stdout=json.dumps({
@@ -288,20 +434,20 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 }),
                 stderr="",
             )
-            prompted = subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
             with (
-                patch.object(relay, "WORKSPACE_ROOTS", [repo.parent.resolve()]),
-                patch.object(relay, "run_herdr_result", side_effect=[created, started, prompted]) as run_herdr,
+                patch.object(relay, "WORKSPACE_ROOTS", [directory.parent.resolve()]),
+                patch.object(relay, "run_herdr_result", side_effect=[created, started]) as run_herdr,
+                patch.object(relay, "submit_agent_prompt", return_value=True) as submit_prompt,
             ):
-                result = relay.start_local_codex(str(repo), "inspect; do not run a shell")
+                result = relay.start_local_codex(str(directory), "inspect; do not run a shell")
 
             self.assertEqual(result["pane_id"], "w9:p1")
             self.assertTrue(result["prompted"])
             self.assertEqual(
                 run_herdr.call_args_list[0],
                 unittest.mock.call(
-                    "workspace", "create", "--cwd", str(repo), "--label", "repo", "--no-focus",
+                    "workspace", "create", "--cwd", str(directory), "--label", "ordinary", "--no-focus",
                     timeout=20,
                 ),
             )
@@ -312,18 +458,12 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                     "--timeout", "60000", timeout=75,
                 ),
             )
-            self.assertEqual(
-                run_herdr.call_args_list[2],
-                unittest.mock.call(
-                    "agent", "prompt", "w9:p1", "inspect; do not run a shell", timeout=15,
-                ),
-            )
+            submit_prompt.assert_called_once_with("w9:p1", "inspect; do not run a shell")
 
     async def test_start_agent_message_redacts_prompt_and_broadcasts_new_agent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir) / "repo"
             repo.mkdir()
-            (repo / ".git").mkdir()
             prompt = "use private-token-456 to inspect the project"
             ws = FakeWebSocket([{
                 "type": "start_agent",

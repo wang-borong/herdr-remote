@@ -68,7 +68,7 @@ cd herdr-remote/relay
 | `/send` | 直接提交新 Prompt |
 | `/interrupt` | 向活动 Agent 发送 Ctrl+C |
 | `/digest` | 查看当天活动摘要 |
-| `/browse [目录]` | 浏览允许的本地仓库目录 |
+| `/browse [目录]` | 浏览允许的本地工作目录 |
 | `/cd [目录]` | 选择新 Agent 的工作目录 |
 | `/cwd` | 查看当前选择的目录 |
 | `/codex [Prompt]` | 在所选目录启动 Codex，可同时提交首条 Prompt |
@@ -82,7 +82,7 @@ Agent 阻塞时，Bot 会提供一次性允许、拒绝和“打开输出并回�
 
 推荐使用按钮流程：
 
-1. 发送 `/start`，点击 **Repositories**。
+1. 发送 `/start`，点击 **Workspaces**。
 2. 逐层打开目录，点击 **Select here** 选择工作目录。
 3. 点击 **Codex here** 或控制面板中的 **New Codex**。
 4. Codex 就绪后，直接回复 Bot 的 ForceReply 消息提交第一项任务。
@@ -101,7 +101,7 @@ Relay 默认只允许访问 `~/Workspace`。可在 `~/.config/herdr-remote/confi
 HERDR_WORKSPACE_ROOTS=/home/user/Workspace:/srv/repos
 ```
 
-修改后重启 Relay。目录会解析为真实路径，越过白名单的 `..` 路径会被拒绝，目录符号链接不会出现在浏览列表中。启动 Codex 前还会确认所选目录位于 Git 仓库内；Relay 始终使用结构化参数调用 Herdr，不提供任意 shell 命令入口。
+修改后重启 Relay。目录会解析为真实路径，越过白名单的 `..` 路径会被拒绝，目录符号链接不会出现在浏览列表中。白名单内的普通目录和 Git 仓库都可以启动 Codex；Git 标记只用于帮助识别仓库。Relay 始终使用结构化参数调用 Herdr，不提供任意 shell 命令入口。
 
 Pane 输出默认读取最近 60 行，使用 Telegram HTML 的粗体标题和等宽正文显示；内容较长时会自动拆成多条消息，最多保留约 12000 个字符。Codex 完成后的界面页脚会被整理为单独的 `Worked for ...`，后面的下一条 Prompt、模型和路径信息不会发送。
 

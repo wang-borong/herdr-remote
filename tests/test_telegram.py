@@ -386,7 +386,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
 
         browse.assert_awaited_once_with("~/Workspace/others")
         text, kwargs, _ = update.message.replies[0]
-        self.assertIn("Repository browser", text)
+        self.assertIn("Workspace browser", text)
         self.assertEqual(kwargs["parse_mode"], "HTML")
         first_button = kwargs["reply_markup"].inline_keyboard[0][0]
         callback = json.loads(first_button.callback_data)
@@ -414,7 +414,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         buttons = update.message.replies[0][1]["reply_markup"].inline_keyboard[0]
         self.assertEqual([button.text for button in buttons], ["🚀 Start Codex", "📂 Browse"])
 
-    async def test_codex_starts_in_selected_repository_and_prompts_for_first_task(self):
+    async def test_codex_starts_in_selected_directory_and_prompts_for_first_task(self):
         selected = "/home/wbr/Workspace/others/herdr-remote"
         tg.selected_workspace_dirs[42] = selected
         update = make_update()
@@ -806,6 +806,19 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         with patch("websockets.connect", return_value=rejected):
             with self.assertRaisesRegex(RuntimeError, "agent_prompt"):
                 await tg.send_agent_prompt_to_relay("w0:p1", "run the tests")
+
+        response = {"type": "command_result", "command": "agent_prompt", "ok": True}
+        with patch.object(tg, "relay_request", new=AsyncMock(return_value=response)) as request:
+            await tg.send_agent_prompt_to_relay("w0:p1", "run the tests")
+        request.assert_awaited_once_with(
+            {
+                "type": "agent_prompt",
+                "pane_id": "w0:p1",
+                "text": "run the tests",
+            },
+            "command_result",
+            timeout=20,
+        )
 
     def test_relay_allows_numeric_approval_keys_and_acknowledges_them(self):
         relay_path = ROOT / "relay" / "herdr_relay.py"

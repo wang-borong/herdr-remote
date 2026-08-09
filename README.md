@@ -53,7 +53,7 @@ cd relay
 ./install-tailscale-web.sh
 ```
 
-The web console includes the Agent Dashboard, live pane output, semantic Prompt submission, confirmed Interrupt, safe repository browsing, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
+The web console includes the Agent Dashboard, live pane output, semantic Prompt submission, confirmed Interrupt, safe workspace-directory browsing, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
 
 ## Telegram Bot
 
@@ -170,4 +170,4 @@ The relay listens on `127.0.0.1` by default. Remote binding requires the explici
 
 ### v0.5.0
 
-Telegram bot (`/start /agents /status /read /send /reply /interrupt /digest /browse /cd /cwd /codex /help`) with scoped command completion, repository browsing, safe Codex startup, and shortcut buttons; demo bot and Linux setup script.
+Telegram bot (`/start /agents /status /read /send /reply /interrupt /digest /browse /cd /cwd /codex /help`) with scoped command completion, allowlisted directory browsing, safe Codex startup, and shortcut buttons; demo bot and Linux setup script.

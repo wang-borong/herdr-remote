@@ -482,7 +482,7 @@ function createAgentListEmpty() {
   const detail = document.createElement("span");
   if (!state.agents.length) {
     title.textContent = "尚未发现 Agent";
-    detail.textContent = state.connection === "online" ? "你可以在任意仓库中启动一个新的 Codex。" : "连接恢复后会自动显示本机 Agents。";
+    detail.textContent = state.connection === "online" ? "你可以在允许的工作目录中启动一个新的 Codex。" : "连接恢复后会自动显示本机 Agents。";
   } else {
     title.textContent = "没有匹配结果";
     detail.textContent = "尝试更换筛选条件或搜索关键词。";
@@ -670,7 +670,7 @@ function setFilter(filter) {
 
 function openNewAgentDialog() {
   if (!socketReady()) {
-    showToast("Relay 尚未连接", "连接恢复后才能浏览仓库和启动 Agent。", "error");
+    showToast("Relay 尚未连接", "连接恢复后才能浏览目录和启动 Agent。", "error");
     return;
   }
   state.directory = null;

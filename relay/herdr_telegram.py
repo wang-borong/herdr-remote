@@ -124,7 +124,7 @@ BOT_COMMAND_DEFINITIONS = [
     ("send", "向 Agent 发送新 Prompt"),
     ("interrupt", "中断正在运行的 Agent"),
     ("digest", "查看今日活动摘要"),
-    ("browse", "浏览允许的本地仓库目录"),
+    ("browse", "浏览允许的本地工作目录"),
     ("cd", "选择 Codex 工作目录"),
     ("cwd", "查看当前选择的目录"),
     ("codex", "在所选目录启动 Codex"),
@@ -220,19 +220,13 @@ async def send_agent_prompt_to_relay(pane_id: str, text: str):
     """Submit a prompt through herdr's semantic agent API."""
     if not text or len(text) > 1000:
         raise ValueError("text must contain 1-1000 characters")
-    import websockets
-    async with websockets.connect(RELAY_WS) as ws:
-        await ws.send(json.dumps({"type": "agent_prompt", "pane_id": pane_id, "text": text}))
-        for _ in range(5):
-            raw = await asyncio.wait_for(ws.recv(), timeout=5)
-            response = json.loads(raw)
-            if response.get("type") == "error":
-                raise RuntimeError(response.get("message", "relay rejected prompt"))
-            if response.get("type") == "command_result" and response.get("command") == "agent_prompt":
-                if not response.get("ok"):
-                    raise RuntimeError(response.get("message", "relay rejected prompt"))
-                return
-        raise RuntimeError("relay did not acknowledge prompt")
+    response = await relay_request(
+        {"type": "agent_prompt", "pane_id": pane_id, "text": text},
+        "command_result",
+        timeout=20,
+    )
+    if response.get("command") != "agent_prompt" or not response.get("ok"):
+        raise RuntimeError(response.get("message", "relay rejected prompt"))
 
 
 # --- Auth guard ---
@@ -571,7 +565,7 @@ def directory_browser_text(listing: dict, chat_id: int) -> str:
     entries = listing.get("entries", [])
     selected = selected_workspace_dirs.get(int(chat_id))
     lines = [
-        "<b>Repository browser</b>",
+        "<b>Workspace browser</b>",
         f"<code>{html.escape(listing.get('display_path') or 'Configured workspace roots')}</code>",
         "",
         f"Folders: {len(entries)}" + ("+" if listing.get("truncated") else ""),
@@ -725,7 +719,7 @@ def dashboard_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("❓ Help", callback_data=simple_callback_data("help")),
         ],
         [
-            InlineKeyboardButton("📂 Repositories", callback_data=simple_callback_data("browse")),
+            InlineKeyboardButton("📂 Workspaces", callback_data=simple_callback_data("browse")),
             InlineKeyboardButton("🆕 New Codex", callback_data=simple_callback_data("new_codex")),
         ],
     ]
@@ -751,7 +745,7 @@ def help_text() -> str:
         "/send — 发送新 Prompt\n"
         "/interrupt — 发送 Ctrl+C\n"
         "/digest — 查看今日摘要\n\n"
-        "/browse — 浏览允许的仓库目录\n"
+        "/browse — 浏览允许的工作目录\n"
         "/cd — 选择 Codex 工作目录\n"
         "/cwd — 查看当前目录\n"
         "/codex — 在当前目录启动 Codex\n\n"
@@ -873,7 +867,7 @@ async def cmd_codex(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     selected = selected_workspace_dirs.get(int(update.effective_chat.id))
     if not selected:
-        await update.message.reply_text("Select a repository before starting Codex.")
+        await update.message.reply_text("Select a workspace directory before starting Codex.")
         await send_directory_browser(update.message, update.effective_chat)
         return
     prompt = " ".join(ctx.args).strip()
@@ -1168,7 +1162,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if action == "new_codex":
         selected = selected_workspace_dirs.get(int(update.effective_chat.id))
         if not selected:
-            await query.message.reply_text("Select a repository before starting Codex.")
+            await query.message.reply_text("Select a workspace directory before starting Codex.")
             await send_directory_browser(query.message, update.effective_chat)
             return
         await query.message.reply_text(
