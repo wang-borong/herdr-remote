@@ -566,6 +566,26 @@ def submit_agent_prompt(pane_id: str, text: str, remote=None) -> str:
     raise RuntimeError("Agent prompt did not start after Enter")
 
 
+def cache_agent_prompt_with_tab(pane_id: str, text: str, remote=None) -> str:
+    """Type a prompt and press Tab so Codex queues it after the active turn."""
+    agent = get_agent_info(pane_id, remote=remote)
+    if str(agent.get("agent", "")).casefold() != "codex":
+        raise ValueError("Tab cache is only available for Codex agents")
+    if str(agent.get("agent_status", "unknown")).casefold() != "working":
+        raise ValueError("Agent is no longer working; use Send Prompt instead")
+
+    # Keep the text and Tab in one terminal write so another controller cannot
+    # interleave input between them. Herdr send-text preserves the Tab byte.
+    result = run_herdr_result(
+        "pane", "send-text", pane_id, text + "\t",
+        remote=remote,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Could not cache the agent prompt")
+    return "cached"
+
+
 def start_local_codex(cwd: str, prompt: str = "") -> dict:
     directory = resolve_workspace_path(cwd)
     if not isinstance(prompt, str) or len(prompt) > 1000:
@@ -1436,6 +1456,46 @@ async def handle_client(ws):
                 await ws.send(json.dumps({
                     "type": "command_result",
                     "command": "agent_prompt",
+                    "ok": True,
+                    "delivery": delivery,
+                }))
+            elif msg_type == "agent_prompt_queue":
+                pane_id = msg["pane_id"]
+                if pane_id not in known_panes:
+                    await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
+                    continue
+                text = msg.get("text", "")
+                if not isinstance(text, str) or not text or len(text) > 1000:
+                    await ws.send(json.dumps({"type": "error", "message": "text empty or too long"}))
+                    continue
+                remote = pane_remote_map.get(pane_id)
+                log.info("Agent prompt cache from %s (%s): pane=%s chars=%d", ip, device, pane_id, len(text))
+                audit("agent_prompt_queue", ip, device, pane_id, sensitive_detail(text))
+                try:
+                    delivery = await asyncio.to_thread(
+                        cache_agent_prompt_with_tab,
+                        pane_id,
+                        text,
+                        remote,
+                    )
+                except ValueError as e:
+                    await ws.send(json.dumps({"type": "error", "message": str(e)}))
+                    continue
+                except Exception as e:
+                    log.warning(
+                        "agent_prompt_queue command failed for pane %s (%s)",
+                        pane_id,
+                        type(e).__name__,
+                    )
+                    await ws.send(json.dumps({
+                        "type": "error",
+                        "message": "agent_prompt_queue command failed",
+                    }))
+                    continue
+                log.info("Agent prompt cached for pane %s", pane_id)
+                await ws.send(json.dumps({
+                    "type": "command_result",
+                    "command": "agent_prompt_queue",
                     "ok": True,
                     "delivery": delivery,
                 }))

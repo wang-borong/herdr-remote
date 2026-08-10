@@ -431,6 +431,43 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"chars={len(prompt)}", detail)
         self.assertNotIn("secret-token-123", detail)
 
+    async def test_agent_prompt_queue_uses_tab_cache_and_redacts_audit_content(self):
+        pane_id = "w0:p1"
+        prompt = "queue secret-token-789 after the current task"
+        relay.known_panes.add(pane_id)
+        relay.pane_remote_map[pane_id] = None
+        ws = FakeWebSocket([{
+            "type": "agent_prompt_queue",
+            "pane_id": pane_id,
+            "text": prompt,
+        }])
+
+        with (
+            patch.object(relay, "cache_agent_prompt_with_tab") as cache_prompt,
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                new=AsyncMock(return_value="cached"),
+            ) as to_thread,
+            patch.object(relay, "audit") as audit,
+        ):
+            await relay.handle_client(ws)
+
+        to_thread.assert_awaited_once_with(cache_prompt, pane_id, prompt, None)
+        cache_prompt.assert_not_called()
+        self.assertIn(
+            {
+                "type": "command_result",
+                "command": "agent_prompt_queue",
+                "ok": True,
+                "delivery": "cached",
+            },
+            ws.sent,
+        )
+        detail = audit.call_args.args[4]
+        self.assertIn(f"chars={len(prompt)}", detail)
+        self.assertNotIn("secret-token-789", detail)
+
     def test_submit_agent_prompt_waits_for_observed_state_change(self):
         prompt = "run the tests"
         idle = subprocess.CompletedProcess(
@@ -556,6 +593,60 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 "agent", "prompt", "w0:p1", "continue", remote=None, timeout=5,
             ),
         )
+
+    def test_cache_agent_prompt_appends_literal_tab_in_one_terminal_write(self):
+        working = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "result": {
+                    "agent": {
+                        "agent": "codex",
+                        "agent_status": "working",
+                        "state_change_seq": 42,
+                    }
+                }
+            }),
+            stderr="",
+        )
+        accepted = subprocess.CompletedProcess([], 0, stdout='{"result":{}}', stderr="")
+
+        with patch.object(
+            relay,
+            "run_herdr_result",
+            side_effect=[working, accepted],
+        ) as run_herdr:
+            self.assertEqual(
+                relay.cache_agent_prompt_with_tab("w0:p1", "continue"),
+                "cached",
+            )
+
+        self.assertEqual(
+            run_herdr.call_args_list[1],
+            unittest.mock.call(
+                "pane", "send-text", "w0:p1", "continue\t", remote=None, timeout=5,
+            ),
+        )
+
+    def test_cache_agent_prompt_rejects_an_agent_that_is_no_longer_working(self):
+        idle = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "result": {
+                    "agent": {
+                        "agent": "codex",
+                        "agent_status": "idle",
+                        "state_change_seq": 43,
+                    }
+                }
+            }),
+            stderr="",
+        )
+
+        with patch.object(relay, "run_herdr_result", return_value=idle) as run_herdr:
+            with self.assertRaisesRegex(ValueError, "no longer working"):
+                relay.cache_agent_prompt_with_tab("w0:p1", "continue")
+
+        run_herdr.assert_called_once_with("agent", "get", "w0:p1", remote=None, timeout=5)
 
     def test_submit_agent_prompt_accepts_timeout_after_state_advanced(self):
         idle = subprocess.CompletedProcess(

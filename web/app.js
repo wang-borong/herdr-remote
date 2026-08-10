@@ -39,6 +39,7 @@ const elements = {
   promptForm: byId("prompt-form"),
   promptInput: byId("prompt-input"),
   promptCount: byId("prompt-count"),
+  queuePromptButton: byId("queue-prompt-button"),
   sendPromptButton: byId("send-prompt-button"),
   newAgentDialog: byId("new-agent-dialog"),
   pathJumpForm: byId("path-jump-form"),
@@ -92,6 +93,9 @@ const elements = {
   terminalOverlayTitle: byId("terminal-overlay-title"),
   terminalOverlayCopy: byId("terminal-overlay-copy"),
   terminalPasteButton: byId("terminal-paste-button"),
+  terminalCtrlButton: byId("terminal-ctrl-button"),
+  terminalKeybar: document.querySelector(".mobile-keybar"),
+  tmuxKeybar: byId("tmux-keybar"),
   sshHostDialog: byId("ssh-host-dialog"),
   sshHostForm: byId("ssh-host-form"),
   sshHostTitle: byId("ssh-host-title"),
@@ -122,12 +126,39 @@ const TERMINAL_KEY_SEQUENCES = {
   tab: "\t",
   "ctrl-c": "\x03",
   "ctrl-l": "\x0c",
+  left: "\x1b[D",
   up: "\x1b[A",
   down: "\x1b[B",
+  right: "\x1b[C",
+  "page-up": "\x1b[5~",
+  "page-down": "\x1b[6~",
+};
+
+const TERMINAL_CTRL_KEY_SEQUENCES = {
+  left: "\x1b[1;5D",
+  up: "\x1b[1;5A",
+  down: "\x1b[1;5B",
+  right: "\x1b[1;5C",
+  "page-up": "\x1b[5;5~",
+  "page-down": "\x1b[6;5~",
+};
+
+const TMUX_PREFIX_SEQUENCE = "\x18";
+const TMUX_ACTION_SEQUENCES = {
+  prefix: TMUX_PREFIX_SEQUENCE,
+  "new-window": `${TMUX_PREFIX_SEQUENCE}c`,
+  "previous-window": `${TMUX_PREFIX_SEQUENCE}p`,
+  "next-window": `${TMUX_PREFIX_SEQUENCE}n`,
+  "window-list": `${TMUX_PREFIX_SEQUENCE}w`,
+  "split-horizontal": `${TMUX_PREFIX_SEQUENCE}|`,
+  "split-vertical": `${TMUX_PREFIX_SEQUENCE}_`,
+  zoom: `${TMUX_PREFIX_SEQUENCE}z`,
 };
 
 const TERMINAL_FALLBACK_FONT_FAMILY = '"SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", monospace';
 const TERMINAL_FONT_FAMILY = '"Herdr FiraCode Nerd", "FiraCode Nerd Font Mono", "MesloLGS Nerd Font Mono", "SFMono-Regular", Consolas, monospace';
+const TERMINAL_KEYBAR_PREFERRED_HEIGHT = 42;
+const TERMINAL_KEYBAR_MIN_HEIGHT = 35;
 const terminalFontReady = document.fonts && typeof document.fonts.load === "function"
   ? document.fonts.load('400 13px "Herdr FiraCode Nerd"').catch(() => [])
   : Promise.resolve([]);
@@ -153,6 +184,7 @@ const state = {
   directoryPending: false,
   promptPending: false,
   pendingPromptText: "",
+  pendingPromptMode: "",
   interruptPending: false,
   startPending: false,
   pushSubscription: null,
@@ -166,6 +198,8 @@ const state = {
   terminalSessionId: null,
   terminalPending: false,
   terminalConnected: false,
+  terminalPersistent: false,
+  terminalCtrlPending: false,
   terminalShouldReconnect: false,
   terminalInstance: null,
   terminalFitAddon: null,
@@ -317,6 +351,7 @@ function connect() {
     state.ws = null;
     state.promptPending = false;
     state.pendingPromptText = "";
+    state.pendingPromptMode = "";
     state.interruptPending = false;
     state.startPending = false;
     state.directoryPending = false;
@@ -324,6 +359,7 @@ function connect() {
     state.terminalSessionId = null;
     state.terminalPending = false;
     state.terminalConnected = false;
+    state.terminalPersistent = false;
     renderDirectoryBrowser();
     renderRemoteAccess();
     renderTerminalConnection();
@@ -603,7 +639,7 @@ function ensureWebTerminal() {
   const fitAddon = new window.FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.open(elements.webTerminal);
-  terminal.onData((data) => sendTerminalText(data));
+  terminal.onData((data) => sendTerminalText(applyTerminalCtrlToInput(data)));
   state.terminalInstance = terminal;
   state.terminalFitAddon = fitAddon;
 
@@ -627,6 +663,8 @@ function fitWebTerminal() {
   if (elements.webTerminal.clientWidth < 80 || elements.webTerminal.clientHeight < 80) return;
   try {
     state.terminalFitAddon.fit();
+    alignWebTerminalGrid();
+    state.terminalFitAddon.fit();
   } catch (_) {
     return;
   }
@@ -638,6 +676,29 @@ function fitWebTerminal() {
       rows: state.terminalInstance.rows,
     });
   }
+}
+
+function alignWebTerminalGrid() {
+  const cellHeight = state.terminalInstance?._core?._renderService?.dimensions?.css?.cell?.height;
+  const terminalFrame = elements.webTerminal.parentElement;
+  if (!terminalFrame || !elements.terminalKeybar || !Number.isFinite(cellHeight) || cellHeight <= 0) return;
+
+  // FitAddon floors the available height to whole rows. Give the sub-row
+  // remainder to the shortcut bar so the terminal itself has no blank edge.
+  const availableHeight = terminalFrame.getBoundingClientRect().height
+    + elements.terminalKeybar.getBoundingClientRect().height;
+  let rows = Math.max(1, Math.round(
+    (availableHeight - TERMINAL_KEYBAR_PREFERRED_HEIGHT) / cellHeight,
+  ));
+  let keybarHeight = availableHeight - Math.ceil(rows * cellHeight);
+  if (keybarHeight < TERMINAL_KEYBAR_MIN_HEIGHT && rows > 1) {
+    rows -= 1;
+    keybarHeight = availableHeight - Math.ceil(rows * cellHeight);
+  }
+  const normalizedHeight = Math.max(TERMINAL_KEYBAR_MIN_HEIGHT, keybarHeight);
+  const cssHeight = `${Math.round(normalizedHeight * 100) / 100}px`;
+  if (elements.terminalKeybar.style.getPropertyValue("--terminal-keybar-height") === cssHeight) return;
+  elements.terminalKeybar.style.setProperty("--terminal-keybar-height", cssHeight);
 }
 
 function openTerminalProfile(profileId) {
@@ -656,6 +717,7 @@ function openTerminalProfile(profileId) {
   state.terminalShouldReconnect = true;
   state.terminalPending = true;
   state.terminalConnected = false;
+  state.terminalPersistent = false;
   state.terminalSessionId = null;
   document.body.classList.add("shell-open");
   setAppView("terminal");
@@ -687,6 +749,7 @@ function handleTerminalOpened(message) {
   state.terminalSessionId = message.session_id;
   state.terminalPending = false;
   state.terminalConnected = true;
+  state.terminalPersistent = message.persistent === true;
   state.terminalShouldReconnect = true;
   if (!terminalProfileById(message.profile.id)) state.terminalProfiles.unshift(message.profile);
   ensureWebTerminal();
@@ -716,6 +779,7 @@ function handleTerminalExit(message) {
   state.terminalSessionId = null;
   state.terminalPending = false;
   state.terminalConnected = false;
+  state.terminalPersistent = false;
   state.terminalShouldReconnect = false;
   state.terminalInstance?.write(`\r\n\x1b[38;5;245m[会话已结束${Number.isInteger(message.exit_code) ? `，退出码 ${message.exit_code}` : ""}]\x1b[0m\r\n`);
   renderTerminalConnection();
@@ -730,6 +794,7 @@ function handleTerminalError(message) {
     state.terminalSessionId = null;
     state.terminalPending = false;
     state.terminalConnected = false;
+    state.terminalPersistent = false;
     state.terminalShouldReconnect = false;
     renderTerminalConnection();
   }
@@ -755,6 +820,36 @@ function sendTerminalText(text) {
   }
 }
 
+function setTerminalCtrlPending(pending) {
+  const active = pending === true && state.terminalConnected;
+  state.terminalCtrlPending = active;
+  elements.terminalCtrlButton.classList.toggle("is-active", active);
+  elements.terminalCtrlButton.setAttribute("aria-pressed", String(active));
+  elements.terminalCtrlButton.title = active
+    ? "Ctrl 已启用；下一次终端输入将使用 Ctrl 组合"
+    : "作用于下一次终端输入";
+}
+
+function terminalSequenceWithPendingCtrl(key, sequence) {
+  if (!state.terminalCtrlPending) return sequence;
+  setTerminalCtrlPending(false);
+  return TERMINAL_CTRL_KEY_SEQUENCES[key] || sequence;
+}
+
+function applyTerminalCtrlToInput(input) {
+  if (!state.terminalCtrlPending) return input;
+  setTerminalCtrlPending(false);
+  const modifiedSequence = Object.entries(TERMINAL_KEY_SEQUENCES)
+    .find(([key, sequence]) => sequence === input && TERMINAL_CTRL_KEY_SEQUENCES[key]);
+  if (modifiedSequence) return TERMINAL_CTRL_KEY_SEQUENCES[modifiedSequence[0]];
+  if (input === " ") return "\x00";
+  if (input === "?") return "\x7f";
+  if (input.length !== 1) return input;
+  let code = input.charCodeAt(0);
+  if (code >= 97 && code <= 122) code -= 32;
+  return code >= 64 && code <= 95 ? String.fromCharCode(code - 64) : input;
+}
+
 function closeTerminalSelection() {
   if (state.terminalSessionId && socketReady()) {
     send({type: "terminal_close", session_id: state.terminalSessionId});
@@ -762,6 +857,7 @@ function closeTerminalSelection() {
   state.terminalSessionId = null;
   state.terminalPending = false;
   state.terminalConnected = false;
+  state.terminalPersistent = false;
   state.terminalShouldReconnect = false;
   state.activeTerminalProfile = null;
   document.body.classList.remove("shell-open");
@@ -778,6 +874,7 @@ function renderRemoteAccess() {
     state.activeTerminalProfile = null;
     state.terminalSessionId = null;
     state.terminalConnected = false;
+    state.terminalPersistent = false;
     state.terminalPending = false;
     document.body.classList.remove("shell-open");
     updateAppUrl();
@@ -882,6 +979,12 @@ function createTerminalProfileCard(profile) {
 
 function renderTerminalConnection() {
   const profile = terminalProfileById(state.activeTerminalProfile);
+  if (!state.terminalConnected) setTerminalCtrlPending(false);
+  elements.terminalCtrlButton.disabled = !state.terminalConnected;
+  elements.tmuxKeybar.hidden = !state.terminalPersistent;
+  elements.tmuxKeybar.querySelectorAll("button").forEach((button) => {
+    button.disabled = !state.terminalConnected;
+  });
   if (!profile) return;
   elements.terminalProfileAvatar.className = `machine-avatar is-${profile.color || "cyan"}`;
   elements.terminalProfileAvatar.textContent = profile.kind === "local" ? ">_" : (profile.label.trim().charAt(0) || "S");
@@ -995,6 +1098,7 @@ async function copyText(text, title, detail) {
 
 async function pasteIntoTerminal() {
   if (!state.terminalConnected) return;
+  setTerminalCtrlPending(false);
   try {
     const text = await navigator.clipboard.readText();
     if (text) sendTerminalText(text);
@@ -1006,18 +1110,22 @@ async function pasteIntoTerminal() {
 
 function handleCommandResult(message) {
   if (!message.ok) return;
-  if (message.command === "agent_prompt") {
+  if (message.command === "agent_prompt" || message.command === "agent_prompt_queue") {
     state.promptPending = false;
     if (elements.promptInput.value.trim() === state.pendingPromptText) {
       elements.promptInput.value = "";
       updateCounter(elements.promptInput, elements.promptCount);
     }
     state.pendingPromptText = "";
+    state.pendingPromptMode = "";
     renderPromptState();
+    const cached = message.command === "agent_prompt_queue" || message.delivery === "cached";
     const queued = message.delivery === "queued";
     showToast(
-      queued ? "Prompt 已排队" : "Prompt 已发送",
-      queued ? "Agent 正在工作，新任务已提交并将在当前任务后处理。" : "Agent 已收到新的任务。",
+      cached ? "Prompt 已缓存" : (queued ? "Prompt 已排队" : "Prompt 已发送"),
+      cached
+        ? "已通过 Tab 加入 Codex 队列，将在当前任务完成后处理。"
+        : (queued ? "Agent 正在工作，新任务已提交并将在当前任务后处理。" : "Agent 已收到新的任务。"),
       "success",
     );
     window.setTimeout(refreshOutput, 500);
@@ -1050,6 +1158,7 @@ function handleCommandResult(message) {
 
 function handleRelayError(message) {
   state.promptPending = false;
+  state.pendingPromptMode = "";
   state.interruptPending = false;
   state.startPending = false;
   state.directoryPending = false;
@@ -1286,18 +1395,45 @@ function refreshOutput() {
 }
 
 function renderPromptState() {
-  const ready = Boolean(activeAgent()) && socketReady() && !state.promptPending;
-  elements.promptInput.disabled = !Boolean(activeAgent()) || state.promptPending;
-  elements.sendPromptButton.disabled = !ready || !elements.promptInput.value.trim();
-  elements.sendPromptButton.querySelector("span").textContent = state.promptPending ? "正在发送…" : "发送 Prompt";
+  const agent = activeAgent();
+  const ready = Boolean(agent) && socketReady() && !state.promptPending;
+  const hasText = Boolean(elements.promptInput.value.trim());
+  const isCodex = String(agent?.agent || "").toLowerCase() === "codex";
+  const canCache = ready && isCodex && normalizedStatus(agent) === "working" && hasText;
+  elements.promptInput.disabled = !Boolean(agent) || state.promptPending;
+  elements.sendPromptButton.disabled = !ready || !hasText;
+  elements.queuePromptButton.disabled = !canCache;
+  elements.sendPromptButton.querySelector("span").textContent = state.promptPending && state.pendingPromptMode === "send"
+    ? "正在发送…"
+    : "发送 Prompt";
+  elements.queuePromptButton.querySelector("span").textContent = state.promptPending && state.pendingPromptMode === "queue"
+    ? "正在缓存…"
+    : "Tab 缓存";
+  elements.queuePromptButton.title = !isCodex
+    ? "Tab 缓存仅适用于 Codex Agent"
+    : (normalizedStatus(agent) === "working"
+      ? "通过 Tab 缓存到 Codex 队列"
+      : "仅在 Agent 工作中可用");
 }
 
-function submitPrompt() {
+function submitPrompt(mode = "send") {
   const text = elements.promptInput.value.trim();
   if (!text || !state.activePane || state.promptPending) return;
-  if (!send({ type: "agent_prompt", pane_id: state.activePane, text })) return;
+  const queue = mode === "queue";
+  const agent = activeAgent();
+  if (queue && String(agent?.agent || "").toLowerCase() !== "codex") {
+    showToast("暂时无法缓存", "Tab 缓存仅适用于 Codex Agent。", "error");
+    return;
+  }
+  if (queue && normalizedStatus(agent) !== "working") {
+    showToast("暂时无法缓存", "Agent 当前不在工作中，请使用发送 Prompt。", "error");
+    return;
+  }
+  const type = queue ? "agent_prompt_queue" : "agent_prompt";
+  if (!send({ type, pane_id: state.activePane, text })) return;
   state.promptPending = true;
   state.pendingPromptText = text;
+  state.pendingPromptMode = mode;
   renderPromptState();
 }
 
@@ -1634,6 +1770,7 @@ function bindEvents() {
     event.preventDefault();
     submitPrompt();
   });
+  elements.queuePromptButton.addEventListener("click", () => submitPrompt("queue"));
   document.querySelectorAll("[data-prompt]").forEach((button) => {
     button.addEventListener("click", () => {
       elements.promptInput.value = button.dataset.prompt;
@@ -1697,12 +1834,26 @@ function bindEvents() {
   });
   document.querySelectorAll("[data-terminal-key]").forEach((button) => {
     button.addEventListener("click", () => {
-      sendTerminalText(TERMINAL_KEY_SEQUENCES[button.dataset.terminalKey] || "");
+      const key = button.dataset.terminalKey;
+      const sequence = TERMINAL_KEY_SEQUENCES[key] || "";
+      sendTerminalText(terminalSequenceWithPendingCtrl(key, sequence));
+      state.terminalInstance?.focus();
+    });
+  });
+  elements.terminalCtrlButton.addEventListener("click", () => {
+    setTerminalCtrlPending(!state.terminalCtrlPending);
+    state.terminalInstance?.focus();
+  });
+  document.querySelectorAll("[data-tmux-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setTerminalCtrlPending(false);
+      sendTerminalText(TMUX_ACTION_SEQUENCES[button.dataset.tmuxAction] || "");
       state.terminalInstance?.focus();
     });
   });
   document.querySelectorAll("[data-terminal-command]").forEach((button) => {
     button.addEventListener("click", () => {
+      setTerminalCtrlPending(false);
       sendTerminalText(`${button.dataset.terminalCommand}\r`);
       state.terminalInstance?.focus();
     });

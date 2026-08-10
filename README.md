@@ -53,7 +53,7 @@ cd relay
 ./install-tailscale-web.sh
 ```
 
-The web console includes the Agent Dashboard, live pane output, semantic Prompt submission, confirmed Interrupt, safe workspace-directory browsing, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
+The web console includes the Agent Dashboard, live pane output, semantic Prompt submission, Tab-to-queue for a working Codex agent, confirmed Interrupt, safe workspace-directory browsing, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
 
 For full workstation maintenance, enable official Tailscale SSH plus the responsive Web Terminal:
 
@@ -62,7 +62,7 @@ cd relay
 ./install-tailscale-web.sh --remote-shell
 ```
 
-Remote Shell provides a real PTY with xterm.js, persistent tmux sessions, Git/system maintenance, mobile shortcut keys, and allowlisted SSH profiles for LAN servers. Native SSH, ProxyJump, and optional subnet-router workflows remain available even when the browser console is offline. See [Remote Shell and LAN access](REMOTE_SHELL.md).
+Remote Shell provides a real PTY with xterm.js, persistent tmux sessions, Git/system maintenance, mobile shortcut keys including Ctrl+X window/split controls, and allowlisted SSH profiles for LAN servers. Native SSH, ProxyJump, and optional subnet-router workflows remain available even when the browser console is offline. See [Remote Shell and LAN access](REMOTE_SHELL.md).
 
 ## Telegram Bot
 

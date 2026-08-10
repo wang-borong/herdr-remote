@@ -1275,6 +1275,16 @@ textarea:focus {
   font-size: 9px;
 }
 
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.queue-prompt-button {
+  min-width: 104px;
+}
+
 kbd,
 code {
   font-family: "SFMono-Regular", Consolas, monospace;
@@ -2493,11 +2503,12 @@ dialog {
 .web-terminal {
   width: 100%;
   height: 100%;
-  padding: 12px 12px 8px;
+  padding: 0;
 }
 
 .web-terminal .xterm {
   height: 100%;
+  padding: 0;
 }
 
 .web-terminal .xterm-viewport {
@@ -2548,12 +2559,14 @@ dialog {
 }
 
 .mobile-keybar {
-  min-height: 42px;
+  height: var(--terminal-keybar-height, 42px);
+  min-height: 35px;
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 5px 8px;
+  padding: max(2px, calc((var(--terminal-keybar-height, 42px) - 32px) / 2)) 8px;
   overflow-x: auto;
+  overflow-y: hidden;
   background: #0d1220;
   border-top: 1px solid rgba(148, 163, 184, 0.13);
   scrollbar-width: none;
@@ -2581,6 +2594,46 @@ dialog {
 .mobile-keybar button:active {
   transform: translateY(1px);
   background: rgba(139, 124, 255, 0.18);
+}
+
+.mobile-keybar button.is-active {
+  color: #f2efff;
+  background: rgba(139, 124, 255, 0.3);
+  border-color: rgba(166, 155, 255, 0.72);
+  box-shadow: 0 0 0 1px rgba(139, 124, 255, 0.16);
+}
+
+/* Keep tmux controls in this existing row so revealing them cannot resize xterm. */
+.tmux-keybar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  margin-left: 3px;
+}
+
+.tmux-keybar::before {
+  width: 1px;
+  height: 22px;
+  flex: 0 0 auto;
+  margin-right: 3px;
+  content: "";
+  background: rgba(148, 163, 184, 0.2);
+}
+
+.tmux-keybar > span {
+  flex: 0 0 auto;
+  padding: 0 3px 0 1px;
+  color: #7ce7ec;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.03em;
+}
+
+.tmux-keybar button {
+  min-width: auto;
+  color: #c3cbda;
 }
 
 .terminal-utilities {
@@ -3023,10 +3076,6 @@ dialog {
     display: none;
   }
 
-  .web-terminal {
-    padding: 9px 7px 5px;
-  }
-
   .terminal-utilities > p {
     display: none;
   }
@@ -3094,8 +3143,18 @@ dialog {
     display: none;
   }
 
-  .send-button {
+  .composer-actions {
     width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  }
+
+  .send-button,
+  .queue-prompt-button {
+    width: 100%;
+    min-width: 0;
+    padding-right: 10px;
+    padding-left: 10px;
   }
 
   .modal-header,

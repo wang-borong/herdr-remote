@@ -17,7 +17,7 @@
 - 响应式 Agent Dashboard，兼容桌面和手机浏览器。
 - 按状态筛选和搜索本机 Agent。
 - 查看最近 60、120 或 200 行 Pane 输出，并可自动刷新。
-- 通过 `herdr agent prompt` 提交 Prompt；Agent 已在工作时显示为安全排队，而不会因等待下一次状态变化误报失败。
+- 通过 `herdr agent prompt` 提交 Prompt；Agent 工作中还可用 **Tab 缓存**，把下一条任务明确加入 Codex 队列。
 - 二次确认后发送规范的 `C-c` Interrupt。
 - 在配置的 Workspace 白名单中浏览目录。
 - 在白名单内的普通目录、Git 仓库或其子目录中安全创建新的 Codex Agent。
@@ -91,7 +91,7 @@ cd relay
 ./install-tailscale-web.sh --remote-shell
 ```
 
-该模式会安装 OpenSSH Client 和 tmux、开启官方 Tailscale SSH，并在 Dashboard 中增加响应式 Remote Shell 页面。手机端提供 Esc、Tab、Ctrl+C、方向键和粘贴按钮；PC 端提供服务器列表与大尺寸终端双栏布局。
+该模式会安装 OpenSSH Client 和 tmux、开启官方 Tailscale SSH，并在 Dashboard 中增加响应式 Remote Shell 页面。手机端提供 Esc、Tab、一次性 Ctrl、Ctrl+C、四向方向键、PgUp、PgDn、粘贴，以及 Ctrl+X 新建/切换窗口、分屏和缩放等 tmux 快捷按钮；PC 端提供服务器列表与大尺寸终端双栏布局。
 
 局域网服务器可以直接在网页中添加，Herdr 只保存 SSH Target 和端口，不保存密码或私钥。更完整的使用方式、ProxyJump 和可选子网路由见 [Remote Shell 文档](REMOTE_SHELL.md)。
 
@@ -157,7 +157,7 @@ Clash mixed 端口不同，请替换 `7897`。也可以设置
 3. 用手机浏览器打开安装器输出的 `https://...ts.net` 地址。
 4. 可通过浏览器菜单“添加到主屏幕”，获得接近原生 App 的全屏体验。
 
-手机页面先显示 Agent 列表；点击 Agent 后进入输出与 Prompt 页面。左上角返回按钮回到 Dashboard。新建 Agent 按钮在顶栏始终可用。
+手机页面先显示 Agent 列表；点击 Agent 后进入输出与 Prompt 页面。普通发送会立即提交 Prompt；当 Agent 正在工作时，**Tab 缓存**按钮会将内容放入 Codex 队列，等待当前任务完成后处理。左上角返回按钮回到 Dashboard。新建 Agent 按钮在顶栏始终可用。
 
 ## 配置
 

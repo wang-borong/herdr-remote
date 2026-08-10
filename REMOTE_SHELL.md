@@ -62,9 +62,12 @@ ssh 本机用户名@cachyos-wpc
 - **本机终端**：当前 Linux 用户的完整登录 Shell。
 - **SSH 服务器**：由本机作为网关，连接配置好的局域网 SSH 目标。
 - **tmux 持久会话**：浏览器断线、手机切后台或 Relay 重连后，可重新附着到原会话。
-- **移动快捷键**：Esc、Tab、Ctrl+C、Ctrl+L、上下方向键和剪贴板粘贴。
+- **移动快捷键**：Esc、Tab、一次性 Ctrl、Ctrl+C、Ctrl+L、四向方向键、PgUp、PgDn 和剪贴板粘贴。
+- **tmux 快捷栏**：支持单独发送 Ctrl+X Prefix，以及新建/切换窗口、窗口列表、左右/上下分屏和 Pane 缩放。
 - **快捷命令**：`pwd`、`ls -la`、`git status`、`git diff --stat`、`htop`。
 - **终端字体**：网页本地提供 FiraCode Nerd Font Mono，Powerline、Starship 与 Nerd Font 图标不依赖手机或电脑预装字体。
+
+点按单独的 **Ctrl** 后，按钮会保持高亮，并把下一次字母、方向键或 PgUp/PgDn 作为 Ctrl 组合发送；再次点按可取消。
 
 每个入口使用独立的 tmux Session，并使用专用 socket：
 
@@ -74,6 +77,16 @@ tmux -L herdr-web attach -t herdr-local
 ```
 
 会话可以跨浏览器断线和 Relay 重启保留，但系统重启后需要重新创建。
+
+网页 tmux 快捷栏按当前工作机的 `Ctrl+X` Prefix 配置发送以下组合：
+
+```text
+Ctrl+X c    新建窗口
+Ctrl+X p/n  上一个 / 下一个窗口
+Ctrl+X w    窗口列表
+Ctrl+X |/_  左右 / 上下分屏
+Ctrl+X z    缩放当前 Pane
+```
 
 ## 添加局域网服务器
 

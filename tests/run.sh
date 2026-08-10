@@ -85,11 +85,16 @@ WEB="$DIR/web/index.html"
 WEB_JS="$DIR/web/app.js"
 [ -f "$DIR/web/app.css" ] && [ -f "$DIR/web/manifest.webmanifest" ] && \
   grep -q "WebSocket" "$WEB_JS" && grep -q "agent_prompt" "$WEB_JS" && \
+  grep -q "agent_prompt_queue" "$WEB_JS" && grep -q "queue-prompt-button" "$WEB" && \
   grep -q 'message.delivery === "queued"' "$WEB_JS" && \
   grep -q "list_directories" "$WEB_JS" && grep -q "start_agent" "$WEB_JS" && \
   grep -q "C-c" "$WEB_JS" && grep -q "terminal_open" "$WEB_JS" && \
   grep -q "ssh_profile_save" "$WEB_JS" && grep -q "Herdr FiraCode Nerd" "$WEB_JS" && \
-  grep -q "mobile-keybar" "$WEB" && \
+  grep -q "mobile-keybar" "$WEB" && grep -q "tmux-keybar" "$WEB" && \
+  grep -q 'data-terminal-key="left"' "$WEB" && grep -q 'data-terminal-key="right"' "$WEB" && \
+  grep -q 'data-terminal-key="page-up"' "$WEB" && grep -q 'data-terminal-key="page-down"' "$WEB" && \
+  grep -q "terminal-ctrl-button" "$WEB" && grep -q "TERMINAL_CTRL_KEY_SEQUENCES" "$WEB_JS" && \
+  grep -q "TMUX_ACTION_SEQUENCES" "$WEB_JS" && \
   [ -f "$DIR/web/vendor/xterm/xterm.js" ] && \
   [ -f "$DIR/web/vendor/xterm/xterm.css" ] && \
   [ -f "$DIR/web/vendor/xterm/addon-fit.js" ] && \
