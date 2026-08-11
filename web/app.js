@@ -29,7 +29,8 @@ const elements = {
   blockedBanner: byId("blocked-banner"),
   blockedPrompt: byId("blocked-prompt"),
   approvalActions: byId("approval-actions"),
-  terminalOutput: byId("terminal-output"),
+  agentOutputTerminal: byId("agent-output-terminal"),
+  terminalOutputFallback: byId("terminal-output-fallback"),
   lastUpdated: byId("last-updated"),
   lineCount: byId("line-count"),
   autoRefreshButton: byId("auto-refresh-button"),
@@ -184,8 +185,15 @@ const state = {
   filter: "all",
   query: "",
   outputs: new Map(),
+  ansiOutputs: new Map(),
   outputUpdatedAt: new Map(),
   userScrolledUp: false,
+  outputTerminalInstance: null,
+  outputTerminalFitAddon: null,
+  outputTerminalResizeObserver: null,
+  outputRenderedPane: null,
+  outputRenderedSnapshot: null,
+  outputRenderId: 0,
   autoRefresh: true,
   lines: 120,
   session: null,
@@ -270,6 +278,9 @@ function terminalTheme() {
 
 function applyTerminalTheme() {
   if (state.terminalInstance) state.terminalInstance.options.theme = terminalTheme();
+  if (state.outputTerminalInstance) {
+    state.outputTerminalInstance.options.theme = terminalTheme();
+  }
 }
 
 function normalizedStatus(agent) {
@@ -508,6 +519,10 @@ function handleBlocked(message) {
 function handlePaneContent(message) {
   if (!message.pane_id) return;
   state.outputs.set(message.pane_id, String(message.content || ""));
+  state.ansiOutputs.set(
+    message.pane_id,
+    typeof message.ansi_content === "string" ? message.ansi_content : "",
+  );
   state.outputUpdatedAt.set(message.pane_id, new Date());
   if (message.pane_id === state.activePane) renderOutput();
 }
@@ -724,6 +739,79 @@ function ensureWebTerminal() {
   }
   window.requestAnimationFrame(fitWebTerminal);
   return true;
+}
+
+function ensureAgentOutputTerminal() {
+  if (state.outputTerminalInstance) return true;
+  if (typeof window.Terminal !== "function" || typeof window.FitAddon?.FitAddon !== "function") {
+    return false;
+  }
+
+  let terminal;
+  try {
+    terminal = new window.Terminal({
+      convertEol: true,
+      cursorBlink: false,
+      cursorInactiveStyle: "none",
+      disableStdin: true,
+      fontFamily: document.fonts?.check('400 13px "Herdr FiraCode Nerd"')
+        ? TERMINAL_FONT_FAMILY
+        : TERMINAL_FALLBACK_FONT_FAMILY,
+      fontSize: isDesktop() ? 13 : 11,
+      lineHeight: 1.35,
+      scrollback: 1000,
+      screenReaderMode: true,
+      theme: terminalTheme(),
+      allowTransparency: false,
+    });
+    const fitAddon = new window.FitAddon.FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(elements.agentOutputTerminal);
+    if (terminal.textarea) {
+      terminal.textarea.setAttribute("aria-label", "Agent 最近输出（只读）");
+      terminal.textarea.setAttribute("aria-readonly", "true");
+    }
+    terminal.element?.querySelector(".live-region")?.setAttribute("aria-live", "off");
+    terminal.onScroll((position) => {
+      state.userScrolledUp = terminal.buffer.active.baseY - position > 2;
+    });
+    state.outputTerminalInstance = terminal;
+    state.outputTerminalFitAddon = fitAddon;
+    elements.agentOutputTerminal.hidden = false;
+    elements.terminalOutputFallback.hidden = true;
+
+    terminalFontReady.then(() => {
+      if (state.outputTerminalInstance !== terminal) return;
+      terminal.options.fontFamily = TERMINAL_FONT_FAMILY;
+      terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      window.requestAnimationFrame(fitAgentOutputTerminal);
+    });
+
+    if ("ResizeObserver" in window) {
+      state.outputTerminalResizeObserver = new ResizeObserver(() => fitAgentOutputTerminal());
+      state.outputTerminalResizeObserver.observe(elements.agentOutputTerminal);
+    }
+    window.requestAnimationFrame(fitAgentOutputTerminal);
+    return true;
+  } catch (_) {
+    terminal?.dispose();
+    elements.agentOutputTerminal.hidden = true;
+    elements.terminalOutputFallback.hidden = false;
+    return false;
+  }
+}
+
+function fitAgentOutputTerminal() {
+  const terminal = state.outputTerminalInstance;
+  if (!terminal || !state.outputTerminalFitAddon || elements.agentOutputTerminal.hidden) return;
+  if (elements.agentOutputTerminal.clientWidth < 80 || elements.agentOutputTerminal.clientHeight < 80) return;
+  const fontSize = isDesktop() ? 13 : 11;
+  if (terminal.options.fontSize !== fontSize) terminal.options.fontSize = fontSize;
+  try {
+    state.outputTerminalFitAddon.fit();
+  } catch (_) {
+    return;
+  }
 }
 
 function fitWebTerminal() {
@@ -1500,18 +1588,51 @@ function respondToBlocked(text) {
 function renderOutput() {
   if (!state.activePane) return;
   const content = state.outputs.get(state.activePane);
-  elements.terminalOutput.textContent = content === undefined
+  const displayContent = content === undefined
     ? "正在读取 Agent 输出…"
     : (content || "当前 Pane 暂无输出。 ");
+  const ansiContent = state.ansiOutputs.get(state.activePane) || "";
+  const snapshot = ansiContent || displayContent;
+
+  if (ensureAgentOutputTerminal()) {
+    const terminal = state.outputTerminalInstance;
+    const unchanged = state.outputRenderedPane === state.activePane
+      && state.outputRenderedSnapshot === snapshot;
+    if (!unchanged) {
+      const preserveScroll = state.userScrolledUp;
+      const distanceFromBottom = Math.max(
+        0,
+        terminal.buffer.active.baseY - terminal.buffer.active.viewportY,
+      );
+      const renderId = ++state.outputRenderId;
+      state.outputRenderedPane = state.activePane;
+      state.outputRenderedSnapshot = snapshot;
+      window.requestAnimationFrame(() => {
+        if (renderId !== state.outputRenderId) return;
+        fitAgentOutputTerminal();
+        terminal.write(`\x1bc${snapshot}`, () => {
+          if (renderId !== state.outputRenderId) return;
+          if (preserveScroll && distanceFromBottom > 0) {
+            terminal.scrollToLine(Math.max(0, terminal.buffer.active.baseY - distanceFromBottom));
+            return;
+          }
+          terminal.scrollToBottom();
+        });
+      });
+    }
+  } else {
+    elements.terminalOutputFallback.hidden = false;
+    elements.terminalOutputFallback.textContent = displayContent;
+    if (!state.userScrolledUp) {
+      window.requestAnimationFrame(() => {
+        elements.terminalOutputFallback.scrollTop = elements.terminalOutputFallback.scrollHeight;
+      });
+    }
+  }
   const updatedAt = state.outputUpdatedAt.get(state.activePane);
   elements.lastUpdated.textContent = updatedAt
     ? `更新于 ${updatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
     : "等待数据";
-  if (!state.userScrolledUp) {
-    window.requestAnimationFrame(() => {
-      elements.terminalOutput.scrollTop = elements.terminalOutput.scrollHeight;
-    });
-  }
 }
 
 function refreshOutput() {
@@ -1892,8 +2013,8 @@ function bindEvents() {
   });
   elements.refreshOutputButton.addEventListener("click", refreshOutput);
   elements.copyOutputButton.addEventListener("click", copyOutput);
-  elements.terminalOutput.addEventListener("scroll", () => {
-    const output = elements.terminalOutput;
+  elements.terminalOutputFallback.addEventListener("scroll", () => {
+    const output = elements.terminalOutputFallback;
     state.userScrolledUp = output.scrollHeight - output.scrollTop - output.clientHeight > 80;
   });
 
@@ -2042,7 +2163,10 @@ function bindEvents() {
     if (!document.hidden && state.autoRefresh) refreshOutput();
   });
   window.addEventListener("online", connect);
-  window.addEventListener("resize", fitWebTerminal);
+  window.addEventListener("resize", () => {
+    fitWebTerminal();
+    fitAgentOutputTerminal();
+  });
   window.addEventListener("popstate", () => {
     const url = new URL(window.location.href);
     const view = url.searchParams.get("view") === "terminal" ? "terminal" : "agents";

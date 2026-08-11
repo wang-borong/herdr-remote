@@ -92,6 +92,8 @@ WEB_JS="$DIR/web/app.js"
   grep -q 'message.delivery === "queued"' "$WEB_JS" && \
   grep -q "list_directories" "$WEB_JS" && grep -q "start_agent" "$WEB_JS" && \
   grep -q "C-c" "$WEB_JS" && grep -q "terminal_open" "$WEB_JS" && \
+  grep -q 'id="agent-output-terminal"' "$WEB" && grep -q "ansi_content" "$WEB_JS" && \
+  grep -q "ensureAgentOutputTerminal" "$WEB_JS" && \
   grep -q "ssh_profile_save" "$WEB_JS" && grep -q "Herdr FiraCode Nerd" "$WEB_JS" && \
   grep -q "mobile-keybar" "$WEB" && grep -q "tmux-keybar" "$WEB" && \
   grep -q 'data-terminal-key="left"' "$WEB" && grep -q 'data-terminal-key="right"' "$WEB" && \

@@ -834,13 +834,139 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         relay.known_panes.add(pane_id)
         relay.pane_remote_map[pane_id] = None
         ws = FakeWebSocket([{"type": "read_pane", "pane_id": pane_id, "lines": 999999}])
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="\x1b[31moutput\x1b[0m",
+            stderr="",
+        )
 
-        with patch.object(relay, "run_herdr", return_value="output") as run_herdr:
+        with patch.object(relay, "run_herdr_result", return_value=completed) as run_herdr:
             await relay.handle_client(ws)
 
         run_herdr.assert_called_once_with(
-            "pane", "read", pane_id, "--lines", "200", "--source", "recent", remote=None
+            "pane",
+            "read",
+            pane_id,
+            "--lines",
+            "200",
+            "--source",
+            "recent",
+            "--format",
+            "ansi",
+            remote=None,
         )
+        self.assertIn(
+            {
+                "type": "pane_content",
+                "pane_id": pane_id,
+                "content": "output",
+                "ansi_content": "\x1b[31moutput\x1b[0m",
+            },
+            ws.sent,
+        )
+
+    async def test_pane_read_falls_back_for_herdr_without_ansi_snapshots(self):
+        pane_id = "w0:p1"
+        relay.known_panes.add(pane_id)
+        relay.pane_remote_map[pane_id] = None
+        ws = FakeWebSocket([{"type": "read_pane", "pane_id": pane_id, "lines": 60}])
+        unsupported = subprocess.CompletedProcess([], 2, stdout="", stderr="unknown option")
+
+        with (
+            patch.object(relay, "run_herdr_result", return_value=unsupported),
+            patch.object(relay, "run_herdr", return_value="plain output") as run_herdr,
+        ):
+            await relay.handle_client(ws)
+
+        run_herdr.assert_called_once_with(
+            "pane", "read", pane_id, "--lines", "60", "--source", "recent", remote=None
+        )
+        self.assertIn(
+            {
+                "type": "pane_content",
+                "pane_id": pane_id,
+                "content": "plain output",
+                "ansi_content": "",
+            },
+            ws.sent,
+        )
+
+    def test_plain_terminal_output_removes_ansi_and_control_bytes(self):
+        content = "\x1b[1;31mred\x1b[0m\r\n\x1b]8;;https://example.com\x07link\x1b]8;;\x07\x00"
+
+        self.assertEqual(relay.plain_terminal_output(content), "red\nlink")
+
+    def test_codex_snapshot_replaces_trailing_prompt_box_with_compact_metadata(self):
+        background = "\x1b[48;2;55;64;68m"
+        content = "\r\n".join([
+            "\x1b[32mAgent response\x1b[0m",
+            "",
+            "\x1b[2m─ Worked for 38m 40s ───────────────────\x1b[0m",
+            "1 background terminal running · /ps to view · /stop to close",
+            "",
+            f"{background}                                      \x1b[0m",
+            f"{background}› Use /skills to list available skills\x1b[0m",
+            f"{background}                                      \x1b[0m",
+            "  \x1b[33mgpt-5.6-sol max\x1b[0m\x1b[2m · \x1b[0m\x1b[32m~/Workspace/project\x1b[0m",
+        ])
+
+        simplified = relay.simplify_codex_terminal_snapshot(content)
+
+        self.assertEqual(
+            relay.plain_terminal_output(simplified),
+            "Agent response\n\nWorked for 38m 40s\n"
+            "1 background terminal running\n"
+            "gpt-5.6-sol max · ~/Workspace/project",
+        )
+        self.assertNotIn("Use /skills", simplified)
+        self.assertNotIn("/ps to view", simplified)
+
+    def test_codex_snapshot_preserves_earlier_user_message_background(self):
+        background = "\x1b[48;2;55;64;68m"
+        content = "\r\n".join([
+            f"{background}› Earlier user prompt\x1b[0m",
+            "",
+            "\x1b[2m• Agent response\x1b[0m",
+            "",
+            "\x1b[1m• Working \x1b[0m\x1b[2m(13s • esc to interrupt) "
+            "· 2 background terminals running · /ps to view · /stop to close\x1b[0m",
+            "",
+            f"{background}                                      \x1b[0m",
+            f"{background}› Find and fix a bug in @filename\x1b[0m",
+            f"{background}                                      \x1b[0m",
+            "  gpt-5.6-sol max · ~/Workspace/project",
+        ])
+
+        simplified = relay.simplify_codex_terminal_snapshot(content)
+        plain = relay.plain_terminal_output(simplified)
+
+        self.assertIn("Earlier user prompt", plain)
+        self.assertIn("Agent response", plain)
+        self.assertIn("Working\ngpt-5.6-sol max · ~/Workspace/project", plain)
+        self.assertNotIn("Find and fix a bug", plain)
+        self.assertNotIn("esc to interrupt", plain)
+        self.assertNotIn("background terminals running", plain)
+        self.assertNotIn("/ps to view", plain)
+        self.assertNotIn("/stop to close", plain)
+
+    def test_codex_snapshot_uses_agent_status_when_working_line_is_transiently_missing(self):
+        background = "\x1b[48;2;55;64;68m"
+        content = "\r\n".join([
+            "\x1b[2m• Agent response\x1b[0m",
+            "",
+            f"{background}                                      \x1b[0m",
+            f"{background}› Find and fix a bug in @filename\x1b[0m",
+            f"{background}                                      \x1b[0m",
+            "  gpt-5.6-sol max · ~/Workspace/project",
+        ])
+
+        simplified = relay.simplify_codex_terminal_snapshot(content, agent_status="working")
+        plain = relay.plain_terminal_output(simplified)
+
+        self.assertIn("Agent response", plain)
+        self.assertIn("Working\ngpt-5.6-sol max · ~/Workspace/project", plain)
+        self.assertNotIn("Find and fix a bug", plain)
 
     def test_remote_herdr_arguments_are_shell_quoted(self):
         prompt = "hello; touch /tmp/should-not-run"
@@ -896,15 +1022,35 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         relay.pane_raw_map[pane_id] = "w0:p1"
         relay.pane_remote_map[pane_id] = source
         ws = FakeWebSocket([{"type": "read_pane", "pane_id": pane_id, "lines": 40}])
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="\x1b[36mremote output\x1b[0m",
+            stderr="",
+        )
 
-        with patch.object(relay, "run_herdr", return_value="remote output") as run_herdr:
+        with patch.object(relay, "run_herdr_result", return_value=completed) as run_herdr:
             await relay.handle_client(ws)
 
         run_herdr.assert_called_once_with(
-            "pane", "read", "w0:p1", "--lines", "40", "--source", "recent", remote=source
+            "pane",
+            "read",
+            "w0:p1",
+            "--lines",
+            "40",
+            "--source",
+            "recent",
+            "--format",
+            "ansi",
+            remote=source,
         )
         self.assertIn(
-            {"type": "pane_content", "pane_id": pane_id, "content": "remote output"},
+            {
+                "type": "pane_content",
+                "pane_id": pane_id,
+                "content": "remote output",
+                "ansi_content": "\x1b[36mremote output\x1b[0m",
+            },
             ws.sent,
         )
 

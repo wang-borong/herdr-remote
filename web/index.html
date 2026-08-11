@@ -188,7 +188,10 @@
                 </button>
               </div>
             </div>
-            <pre class="terminal-output" id="terminal-output" tabindex="0" aria-label="Agent 最近输出">正在读取 Agent 输出…</pre>
+            <div class="terminal-output" id="terminal-output" role="region" aria-label="Agent 最近输出">
+              <div class="agent-output-terminal" id="agent-output-terminal" hidden></div>
+              <pre class="terminal-output-fallback" id="terminal-output-fallback" tabindex="0">正在读取 Agent 输出…</pre>
+            </div>
           </section>
 
           <section class="composer-card" aria-labelledby="composer-title">

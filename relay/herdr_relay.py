@@ -81,6 +81,26 @@ def env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+ANSI_ESCAPE_RE = re.compile(
+    r"\x1B(?:\][^\x07]*(?:\x07|\x1B\\)|[@-_][0-?]*[ -/]*[@-~])"
+)
+ANSI_BACKGROUND_RE = re.compile(
+    r"\x1B\[(?:[0-9]+;)*(?:4[0-8]|10[0-7])(?:;[0-9]+)*m"
+)
+CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+MODEL_PATH_RE = re.compile(r"^[^·]+?\s*·\s*(?:~|/).+$")
+WORKED_FOR_RE = re.compile(
+    r"Worked for\s+(?P<duration>(?:<?\d+(?:\.\d+)?[dhms]\s*)+)",
+    re.IGNORECASE,
+)
+WORKING_RE = re.compile(r"(?:^|\s)Working\s*(?:\((?P<details>[^)]*)\))?", re.IGNORECASE)
+BACKGROUND_TERMINAL_RE = re.compile(
+    r"(?P<count>\d+)\s+background terminals? running",
+    re.IGNORECASE,
+)
+DIVIDER_LINE_RE = re.compile(r"^[─━═—–_\-=]+$")
+
+
 HERDR = os.environ.get("HERDR_BIN") or shutil.which("herdr") or "/opt/homebrew/bin/herdr"
 RELAY_HOST = os.environ.get("HERDR_RELAY_HOST", "127.0.0.1").strip() or "127.0.0.1"
 WS_PORT = int(os.environ.get("HERDR_RELAY_PORT", "8375"))
@@ -391,6 +411,123 @@ def run_herdr(*args, remote=None):
         return run_herdr_result(*args, remote=remote).stdout.strip()
     except Exception:
         return ""
+
+
+def plain_terminal_output(content: str) -> str:
+    cleaned = ANSI_ESCAPE_RE.sub("", str(content or ""))
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    return CONTROL_CHARACTER_RE.sub("", cleaned).strip()
+
+
+def simplify_codex_terminal_snapshot(content: str, agent_status: str = "") -> str:
+    raw = str(content or "")
+    if not raw:
+        return ""
+
+    lines = re.split(r"\r\n|\r|\n", raw)
+    plain_lines = [plain_terminal_output(line) for line in lines]
+    model_index = next(
+        (index for index in range(len(lines) - 1, -1, -1) if plain_lines[index]),
+        None,
+    )
+    if model_index is None or not MODEL_PATH_RE.match(plain_lines[model_index]):
+        return raw
+
+    prompt_window_start = max(0, model_index - 8)
+    if not any(
+        ANSI_BACKGROUND_RE.search(lines[index])
+        for index in range(prompt_window_start, model_index)
+    ):
+        return raw
+
+    input_start = model_index
+    while input_start > 0:
+        previous = input_start - 1
+        if not plain_lines[previous] or ANSI_BACKGROUND_RE.search(lines[previous]):
+            input_start -= 1
+            continue
+        break
+
+    worked_duration = ""
+    is_working = False
+    background_count = ""
+    summary_indexes = []
+    index = input_start - 1
+    while index >= 0:
+        plain = plain_lines[index]
+        if not plain or DIVIDER_LINE_RE.match(plain):
+            index -= 1
+            continue
+
+        worked = WORKED_FOR_RE.search(plain)
+        working = WORKING_RE.search(plain)
+        background = BACKGROUND_TERMINAL_RE.search(plain)
+        if not any((worked, working, background)):
+            break
+        summary_indexes.append(index)
+        if worked:
+            worked_duration = worked.group("duration").strip()
+        if working:
+            is_working = True
+        if background:
+            background_count = background.group("count")
+        index -= 1
+
+    tail_start = min(summary_indexes) if summary_indexes else input_start
+    body = lines[:tail_start]
+    while body and not plain_terminal_output(body[-1]):
+        body.pop()
+
+    working_state = not worked_duration and (
+        is_working or str(agent_status or "").casefold() == "working"
+    )
+    summary = []
+    if worked_duration:
+        summary.append(f"\x1b[0m\x1b[2mWorked for {worked_duration}\x1b[0m")
+    elif working_state:
+        summary.append("\x1b[0m\x1b[2mWorking\x1b[0m")
+    if background_count and not working_state:
+        suffix = "" if background_count == "1" else "s"
+        summary.append(
+            f"\x1b[0m\x1b[2m{background_count} background terminal{suffix} running\x1b[0m"
+        )
+    summary.append(lines[model_index].lstrip())
+
+    if body:
+        body.append("")
+    return "\r\n".join([*body, *summary])
+
+
+def read_pane_snapshot(
+    pane_id: str,
+    lines: int,
+    remote=None,
+    agent_status: str = "",
+) -> tuple[str, str]:
+    args = (
+        "pane",
+        "read",
+        pane_id,
+        "--lines",
+        str(lines),
+        "--source",
+        "recent",
+    )
+    try:
+        result = run_herdr_result(*args, "--format", "ansi", remote=remote)
+    except Exception:
+        result = None
+
+    if result is not None and result.returncode == 0:
+        ansi_content = simplify_codex_terminal_snapshot(
+            str(result.stdout or "").strip(),
+            agent_status=agent_status,
+        )
+        return plain_terminal_output(ansi_content), ansi_content
+
+    # Herdr versions predating ANSI pane snapshots still receive the original
+    # plain-text request instead of leaving the Agent output window empty.
+    return run_herdr(*args, remote=remote), ""
 
 
 def path_within_workspace_roots(path: Path) -> bool:
@@ -1879,8 +2016,18 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "lines must be an integer"}))
                     continue
                 raw_pane_id, remote = pane_route(pane_id)
-                content = run_herdr("pane", "read", raw_pane_id, "--lines", str(lines), "--source", "recent", remote=remote)
-                await ws.send(json.dumps({"type": "pane_content", "pane_id": pane_id, "content": content}))
+                content, ansi_content = read_pane_snapshot(
+                    raw_pane_id,
+                    lines,
+                    remote=remote,
+                    agent_status=agent_cache.get(pane_id, {}).get("status", ""),
+                )
+                await ws.send(json.dumps({
+                    "type": "pane_content",
+                    "pane_id": pane_id,
+                    "content": content,
+                    "ansi_content": ansi_content,
+                }))
             elif msg_type == "agent_seen":
                 pane_id = msg.get("pane_id", "")
                 if pane_id not in known_panes:
