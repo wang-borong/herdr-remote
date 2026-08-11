@@ -96,6 +96,7 @@ WEB_JS="$DIR/web/app.js"
   grep -q "ensureAgentOutputTerminal" "$WEB_JS" && \
   grep -q "enableAgentOutputTouchScrolling" "$WEB_JS" && \
   grep -q 'addEventListener("touchmove"' "$WEB_JS" && \
+  grep -q "select option" "$DIR/web/app.css" && grep -q "width: fit-content" "$DIR/web/app.css" && \
   grep -q "ssh_profile_save" "$WEB_JS" && grep -q "Herdr FiraCode Nerd" "$WEB_JS" && \
   grep -q "mobile-keybar" "$WEB" && grep -q "tmux-keybar" "$WEB" && \
   grep -q 'data-terminal-key="left"' "$WEB" && grep -q 'data-terminal-key="right"' "$WEB" && \

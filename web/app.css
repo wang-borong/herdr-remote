@@ -138,6 +138,11 @@ select {
   -webkit-tap-highlight-color: transparent;
 }
 
+select option {
+  color: var(--text);
+  background-color: var(--surface-strong);
+}
+
 button {
   color: inherit;
 }
@@ -1377,9 +1382,11 @@ dialog {
 }
 
 .modal {
-  width: auto;
+  width: fit-content;
+  height: fit-content;
   max-width: none;
   max-height: none;
+  margin: auto;
   padding: 0;
   background: transparent;
   border: 0;
