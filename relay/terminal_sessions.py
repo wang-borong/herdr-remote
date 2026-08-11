@@ -24,6 +24,7 @@ from pathlib import Path
 
 PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9._@:%+\-\[\]]{1,255}$")
+REMOTE_EXECUTABLE_RE = re.compile(r"^(?:/[A-Za-z0-9._+@%/:=\-]+|[A-Za-z0-9._+\-]+)$")
 PROFILE_COLORS = {"violet", "cyan", "green", "amber", "rose"}
 MAX_SSH_PROFILES = 32
 MAX_TERMINAL_INPUT_BYTES = 16 * 1024
@@ -56,6 +57,20 @@ def _clean_text(value, *, field: str, maximum: int, required: bool = True) -> st
     if len(cleaned) > maximum:
         raise TerminalConfigError(f"{field} is too long")
     return cleaned
+
+
+def _clean_bool(value, *, field: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise TerminalConfigError(f"{field} must be true or false")
 
 
 def _profile_slug(label: str, target: str) -> str:
@@ -103,6 +118,44 @@ def normalize_ssh_profile(value: dict) -> dict:
     if color not in PROFILE_COLORS:
         color = "cyan"
 
+    agent_enabled = _clean_bool(
+        value.get("agent_enabled"),
+        field="Agent discovery",
+        default=False,
+    )
+    herdr_bin = _clean_text(
+        value.get("herdr_bin", "herdr"),
+        field="Remote herdr executable",
+        maximum=255,
+    )
+    if herdr_bin.startswith("-") or not REMOTE_EXECUTABLE_RE.fullmatch(herdr_bin):
+        raise TerminalConfigError(
+            "Remote herdr executable must be a command name or absolute path"
+        )
+    raw_workspace_roots = value.get("workspace_roots")
+    if raw_workspace_roots is None:
+        raw_workspace_roots = [value.get("workspace_root", "~/Workspace")]
+    elif isinstance(raw_workspace_roots, str):
+        raw_workspace_roots = raw_workspace_roots.splitlines()
+    if not isinstance(raw_workspace_roots, list) or not 1 <= len(raw_workspace_roots) <= 8:
+        raise TerminalConfigError("Remote workspace roots must contain 1-8 paths")
+    workspace_roots = []
+    for raw_workspace_root in raw_workspace_roots:
+        workspace_root = _clean_text(
+            raw_workspace_root,
+            field="Remote workspace root",
+            maximum=1024,
+        )
+        if not (
+            workspace_root == "~"
+            or workspace_root.startswith(("~/", "/"))
+        ):
+            raise TerminalConfigError(
+                "Remote workspace root must be absolute or start with ~/"
+            )
+        if workspace_root not in workspace_roots:
+            workspace_roots.append(workspace_root)
+
     return {
         "id": profile_id,
         "kind": "ssh",
@@ -111,6 +164,10 @@ def normalize_ssh_profile(value: dict) -> dict:
         "port": port,
         "description": description,
         "color": color,
+        "agent_enabled": agent_enabled,
+        "herdr_bin": herdr_bin,
+        "workspace_root": workspace_roots[0],
+        "workspace_roots": workspace_roots,
     }
 
 
@@ -215,6 +272,7 @@ def terminal_profile_command(
     *,
     shell_binary: str,
     ssh_binary: str,
+    ssh_config_file: Path | None = None,
     tmux_binary: str | None,
     cwd: Path,
 ) -> tuple[list[str], Path, bool]:
@@ -222,13 +280,15 @@ def terminal_profile_command(
     if profile.get("kind") == "local":
         direct_command = [shell_binary, "-l"]
     else:
-        direct_command = [
-            ssh_binary,
+        direct_command = [ssh_binary]
+        if ssh_config_file:
+            direct_command.extend(["-F", str(ssh_config_file)])
+        direct_command.extend([
             "-tt",
             "-o", "ConnectTimeout=10",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
-        ]
+        ])
         if profile.get("port", 22) != 22:
             direct_command.extend(["-p", str(profile["port"])])
         direct_command.append(profile["target"])
@@ -365,6 +425,7 @@ class TerminalSession:
         *,
         shell_binary: str,
         ssh_binary: str,
+        ssh_config_file: Path | None = None,
         tmux_binary: str | None,
         cwd: Path,
         cols: int,
@@ -374,6 +435,7 @@ class TerminalSession:
         self.event_handler = event_handler
         self.shell_binary = shell_binary
         self.ssh_binary = ssh_binary
+        self.ssh_config_file = ssh_config_file
         self.tmux_binary = tmux_binary
         self.cwd = cwd
         self.cols, self.rows = validated_terminal_dimensions(cols, rows)
@@ -389,6 +451,7 @@ class TerminalSession:
             self.profile,
             shell_binary=self.shell_binary,
             ssh_binary=self.ssh_binary,
+            ssh_config_file=self.ssh_config_file,
             tmux_binary=self.tmux_binary,
             cwd=self.cwd,
         )

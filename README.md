@@ -64,6 +64,10 @@ cd relay
 
 Remote Shell provides a real PTY with xterm.js, persistent tmux sessions, Git/system maintenance, mouse support, touch-friendly mobile controls, a dedicated Ctrl+B web tmux prefix that does not conflict with Herdr's Ctrl+X, and allowlisted SSH profiles for LAN servers. Native SSH, ProxyJump, and optional subnet-router workflows remain available even when the browser console is offline. See [Remote Shell and LAN access](REMOTE_SHELL.md).
 
+An SSH profile can also be enabled as a Herdr Agent Source. The dashboard then discovers and controls that host's agents with source-scoped Pane IDs, reports per-host health, browses allowlisted remote Workspace roots, and starts new Codex agents on the selected machine.
+
+The Telegram bot consumes the same Relay snapshot, so remote agents automatically appear in `/start`, `/agents`, `/read`, `/reply`, `/send`, `/interrupt`, blocked/completion notifications, and `/digest`. `/status` also reports each local or SSH Agent Source's health and Agent count.
+
 ## Telegram Bot
 
 For the hardened Telegram-only setup (recommended for personal remote control):

@@ -121,6 +121,28 @@ ssh-copy-id builder@192.168.1.50
 
 示例配置见 `relay/ssh-hosts.example.json`。
 
+### 同时连接远端 Herdr Agents
+
+编辑或添加 SSH 服务器时，可以启用 **发现并控制这台主机上的 Herdr Agents**。同一个 SSH Profile 随即同时提供：
+
+- Remote Shell 终端入口。
+- 远端 Herdr Agent 发现、状态与健康检查。
+- Pane 输出、Prompt、审批、Tab 排队和 Interrupt。
+- 受限 Workspace 目录浏览。
+- 在所选远端目录中创建 Herdr workspace 并启动 Codex。
+
+需要填写远端 `herdr` 命令名或绝对路径，以及 1–8 个允许启动 Agent 的 Workspace 根目录。所有路径都会在远端解析后重新检查边界；目录列表不会展示隐藏目录或符号链接。
+
+Relay 为远端 Pane 使用 `<profile-id>::<raw-pane-id>` 全局 ID。例如 `build-server::w0:p1`，因此不同机器都存在 `w0:p1` 时不会发生状态覆盖或命令串台。本机 Pane ID 保持不变。
+
+远端 SSH 查询使用 Batch Mode，推荐先验证密钥和 Herdr 路径：
+
+```bash
+ssh build-server '/home/builder/.local/bin/herdr pane list'
+```
+
+不可达的主机会在新建 Agent 对话框中显示为离线；各主机并行检查，不会按主机数量串行累积超时。
+
 ## 从其他电脑直接跳到局域网服务器
 
 不必先手动登录本机再执行第二次 SSH。PC 上可以使用 ProxyJump：
@@ -189,6 +211,7 @@ HERDR_TAILSCALE_SSH=1
 HERDR_WEB_TERMINAL=1
 HERDR_TERMINAL_ALLOWED_USERS=you@example.com
 HERDR_SSH_HOSTS_FILE=/home/user/.config/herdr-remote/ssh-hosts.json
+HERDR_SSH_CONFIG_FILE=/home/user/.ssh/config
 HERDR_TERMINAL_MAX_SESSIONS=6
 HERDR_TERMINAL_CWD=/home/user
 HERDR_TERMINAL_SHELL=/bin/zsh

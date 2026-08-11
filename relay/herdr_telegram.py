@@ -93,9 +93,10 @@ directory_path_tokens: OrderedDict[str, str] = OrderedDict()
 approval_tokens: dict[str, str] = {}  # pane_id -> current blocked-notification generation
 approval_trust_keys: dict[str, str] = {}  # pane_id -> current persistent-trust option key
 agents: list[dict] = []       # current agent list from relay
+agent_sources: list[dict] = []  # local and SSH Agent Source health from relay
 prev_statuses: dict[str, str] = {}  # pane_id -> last known status
 relay_connected = False
-daily_stats: dict[str, dict] = {}  # pane_id -> {agent, project, blocked_count, working_mins, last_change}
+daily_stats: dict[str, dict] = {}  # pane_id -> agent/source identity and daily counters
 
 AGENT_PAGE_SIZE = 20
 PENDING_LIMIT = 500
@@ -261,10 +262,30 @@ def find_agent(pane_id: str) -> dict | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def host_suffix(host: str | None) -> str:
+    host = str(host or "local")
+    return f" @{host}" if host != "local" else ""
+
+
+def agent_source_status_lines() -> list[str]:
+    lines = []
+    for source in agent_sources:
+        label = str(source.get("label") or source.get("id") or "unknown")
+        status = str(source.get("status") or "unknown").upper()
+        count = int(source.get("agent_count") or 0)
+        line = f"  {label}: {status} · {count} Agent{'s' if count != 1 else ''}"
+        error = str(source.get("error") or "").strip()
+        if status == "OFFLINE" and error:
+            line += f" · {error}"
+        lines.append(line)
+    return lines
+
+
 def clear_relay_connection_state():
-    global agents, relay_connected
+    global agents, agent_sources, relay_connected
     relay_connected = False
     agents = []
+    agent_sources = []
     approval_tokens.clear()
     approval_trust_keys.clear()
 
@@ -776,16 +797,25 @@ async def configure_bot_ui(app: Application):
 
 
 def dashboard_text() -> str:
+    source_summary = ""
+    if agent_sources:
+        online = sum(source.get("status") == "online" for source in agent_sources)
+        source_summary = f"\nSources: {online}/{len(agent_sources)} online"
     if not relay_connected:
         text = "herdr-remote bot\n\nRelay disconnected. Use /status for connection details."
     elif not agents:
-        text = "herdr-remote bot\n\nConnected to relay. No agents are running."
+        text = f"herdr-remote bot\n\nConnected to relay. No agents are running.{source_summary}"
     else:
         blocked = sum(agent.get("status") == "blocked" for agent in agents)
         working = sum(agent.get("status") == "working" for agent in agents)
         done = sum(agent.get("status") == "done" for agent in agents)
         idle = len(agents) - blocked - working - done
-        text = f"herdr-remote bot\n\nAgents: {len(agents)} ({blocked} blocked, {working} working, {done} done, {idle} idle)\nSelect an agent to read and reply."
+        text = (
+            f"herdr-remote bot\n\n"
+            f"Agents: {len(agents)} ({blocked} blocked, {working} working, "
+            f"{done} done, {idle} idle){source_summary}\n"
+            "Select an agent to read and reply."
+        )
     return text
 
 
@@ -927,6 +957,9 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Status: {status}\n"
         f"Agents: {len(agents)} ({b} blocked, {w} working, {d} done, {i} idle)"
     )
+    source_lines = agent_source_status_lines()
+    if source_lines:
+        text += "\nAgent Sources:\n" + "\n".join(source_lines)
     await update.message.reply_text(text)
 
 
@@ -1083,14 +1116,16 @@ async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No activity recorded yet today.")
         return
 
-    import time
     lines = ["Today's activity:\n"]
     sorted_agents = sorted(daily_stats.values(), key=lambda x: x.get("working_mins", 0), reverse=True)
     for s in sorted_agents:
         blocked = f", blocked {s['blocked_count']}x" if s.get("blocked_count") else ""
         mins = s.get("working_mins", 0)
         time_str = f"{mins}m" if mins < 60 else f"{mins//60}h{mins%60}m"
-        lines.append(f"  {s['project']} ({s['agent']}): {time_str} working{blocked}")
+        lines.append(
+            f"  {s['project']} ({s['agent']}){host_suffix(s.get('host'))}: "
+            f"{time_str} working{blocked}"
+        )
 
     await update.message.reply_text("\n".join(lines))
 
@@ -1431,11 +1466,19 @@ def interaction_keyboard(pane_id: str) -> InlineKeyboardMarkup:
     ]])
 
 
-async def notify_blocked(app: Application, pane_id: str, agent: str, project: str, prompt: str, options: list[str] | None):
+async def notify_blocked(
+    app: Application,
+    pane_id: str,
+    agent: str,
+    project: str,
+    prompt: str,
+    options: list[str] | None,
+    host: str = "local",
+):
     if not CHAT_ID:
         return
     text = (
-        f"{agent} blocked in {project}\n\n{prompt[:400]}\n\n"
+        f"{agent} blocked in {project}{host_suffix(host)}\n\n{prompt[:400]}\n\n"
         "Use an approval button, open the output, or reply to this notification."
     )
     generation = secrets.token_hex(4)
@@ -1464,6 +1507,7 @@ async def notify_blocked_safely(app: Application, msg: dict):
             project=msg.get("project", ""),
             prompt=msg.get("prompt", ""),
             options=msg.get("options"),
+            host=msg.get("host", "local"),
         )
     except Exception as e:
         log.warning("Failed to send blocked notification: %s", scrub(e))
@@ -1487,11 +1531,16 @@ async def track_agent_updates(app: Application, updated_agents: list[dict]):
             daily_stats[pane_id] = {
                 "agent": agent_data.get("agent", ""),
                 "project": agent_data.get("project", ""),
+                "host": agent_data.get("host", "local"),
+                "source_id": agent_data.get("source_id", "local"),
                 "blocked_count": 0,
                 "working_mins": 0,
                 "last_change": now,
             }
         stats = daily_stats[pane_id]
+        for field in ("agent", "project", "host", "source_id"):
+            if agent_data.get(field):
+                stats[field] = agent_data[field]
         if old_status == "working" and old_status != new_status:
             stats["working_mins"] += int((now - stats["last_change"]) / 60)
         if new_status == "blocked" and old_status != "blocked":
@@ -1507,7 +1556,8 @@ async def track_agent_updates(app: Application, updated_agents: list[dict]):
                 msg = await app.bot.send_message(
                     chat_id=int(CHAT_ID),
                     text=(
-                        f"{agent_data['project']} ({agent_data['agent']}) finished.\n\n"
+                        f"{agent_data['project']} ({agent_data['agent']})"
+                        f"{host_suffix(agent_data.get('host') or stats.get('host'))} finished.\n\n"
                         "Open the output below, or reply to this notification to send a follow-up."
                     ),
                     reply_markup=interaction_keyboard(pane_id),
@@ -1521,7 +1571,7 @@ async def track_agent_updates(app: Application, updated_agents: list[dict]):
 async def relay_listener(app: Application):
     """Persistent WebSocket connection to relay."""
     import websockets
-    global agents, relay_connected, prev_statuses
+    global agents, agent_sources, relay_connected, prev_statuses
 
     while True:
         try:
@@ -1534,7 +1584,14 @@ async def relay_listener(app: Application):
                     except json.JSONDecodeError:
                         continue
 
-                    if msg.get("type") == "agents":
+                    if msg.get("type") == "agent_sources":
+                        agent_sources = [
+                            dict(source)
+                            for source in msg.get("sources", [])
+                            if isinstance(source, dict) and source.get("id")
+                        ]
+
+                    elif msg.get("type") == "agents":
                         new_agents = msg.get("agents", [])
                         blocked_panes = {
                             agent.get("pane_id") for agent in new_agents

@@ -68,6 +68,7 @@ cd herdi-ios && xcodegen generate
 | `HERDR_RELAY_TOKEN` | Required shared secret for relay auth |
 | `HERDR_ALLOW_REMOTE_BIND` | Explicit opt-in for non-loopback relay binding |
 | `HERDR_REMOTES` | Comma-separated SSH targets to poll |
+| `HERDR_SSH_CONFIG_FILE` | User SSH config used by Remote Shell and Agent Sources |
 | `HERDR_BIN` | Path to herdr binary (default: `/opt/homebrew/bin/herdr`) |
 | `HERDR_RELAY` | Relay URL used by clients (default: `ws://127.0.0.1:8375`) |
 | `HERDR_TG_USER_ID` | Telegram controller user allowlist |

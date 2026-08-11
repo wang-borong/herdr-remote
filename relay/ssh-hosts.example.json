@@ -7,7 +7,13 @@
       "target": "builder@192.168.1.50",
       "port": 22,
       "description": "局域网 Debian 构建机",
-      "color": "green"
+      "color": "green",
+      "agent_enabled": true,
+      "herdr_bin": "/home/builder/.local/bin/herdr",
+      "workspace_roots": [
+        "/home/builder/Workspace",
+        "/srv/projects"
+      ]
     },
     {
       "id": "nas",
@@ -15,7 +21,10 @@
       "target": "home-nas",
       "port": 22,
       "description": "使用 ~/.ssh/config 中的 Host 别名",
-      "color": "cyan"
+      "color": "cyan",
+      "agent_enabled": false,
+      "herdr_bin": "herdr",
+      "workspace_roots": ["~/Workspace"]
     }
   ]
 }

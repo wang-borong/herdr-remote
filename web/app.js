@@ -42,6 +42,8 @@ const elements = {
   queuePromptButton: byId("queue-prompt-button"),
   sendPromptButton: byId("send-prompt-button"),
   newAgentDialog: byId("new-agent-dialog"),
+  agentSourceSelect: byId("agent-source-select"),
+  agentSourceStatus: byId("agent-source-status"),
   pathJumpForm: byId("path-jump-form"),
   pathJumpInput: byId("path-jump-input"),
   directoryRefreshButton: byId("directory-refresh-button"),
@@ -55,6 +57,7 @@ const elements = {
   initialPromptInput: byId("initial-prompt-input"),
   initialPromptCount: byId("initial-prompt-count"),
   launchDirectory: byId("launch-directory"),
+  launchSource: byId("launch-source"),
   startAgentButton: byId("start-agent-button"),
   interruptDialog: byId("interrupt-dialog"),
   confirmInterruptButton: byId("confirm-interrupt-button"),
@@ -106,6 +109,9 @@ const elements = {
   sshHostPort: byId("ssh-host-port"),
   sshHostColor: byId("ssh-host-color"),
   sshHostDescription: byId("ssh-host-description"),
+  sshHostAgentEnabled: byId("ssh-host-agent-enabled"),
+  sshHostHerdrBin: byId("ssh-host-herdr-bin"),
+  sshHostWorkspaceRoot: byId("ssh-host-workspace-root"),
   saveSshHostButton: byId("save-ssh-host-button"),
   deleteSshHostButton: byId("delete-ssh-host-button"),
   deleteSshHostDialog: byId("delete-ssh-host-dialog"),
@@ -172,6 +178,8 @@ const state = {
   reconnectAttempt: 0,
   reconnectTimer: null,
   agents: [],
+  agentSources: [],
+  selectedSource: "local",
   activePane: null,
   filter: "all",
   query: "",
@@ -397,6 +405,9 @@ function handleMessage(message) {
     case "agents":
       replaceAgentSnapshot(Array.isArray(message.agents) ? message.agents : []);
       break;
+    case "agent_sources":
+      handleAgentSources(Array.isArray(message.sources) ? message.sources : []);
+      break;
     case "agent_update":
       if (message.agent) upsertAgent(message.agent);
       break;
@@ -484,6 +495,7 @@ function handleBlocked(message) {
     agent: message.agent || existing?.agent || "agent",
     project: message.project || existing?.project || "Agent",
     host: message.host || existing?.host || "local",
+    source_id: message.source_id || existing?.source_id || "local",
     status: "blocked",
     options: Array.isArray(message.options) ? message.options : [],
     blockedPrompt: message.prompt || "",
@@ -501,6 +513,7 @@ function handlePaneContent(message) {
 }
 
 function handleDirectoryListing(message) {
+  if (message.source_id && message.source_id !== state.selectedSource) return;
   state.directoryPending = false;
   state.directory = message;
   if (message.can_start_agent && message.path) {
@@ -508,6 +521,7 @@ function handleDirectoryListing(message) {
       path: message.path,
       display_path: message.display_path || message.path,
       git_root: message.git_root || "",
+      source_id: message.source_id || state.selectedSource,
     };
   } else {
     state.selectedDirectory = null;
@@ -568,6 +582,57 @@ function handleSession(message) {
 
 function terminalProfileById(profileId) {
   return state.terminalProfiles.find((profile) => profile.id === profileId) || null;
+}
+
+function agentSourceById(sourceId) {
+  return state.agentSources.find((source) => source.id === sourceId) || null;
+}
+
+function agentSourceUsable(source) {
+  return source?.status === "online" && source.can_start_agent !== false;
+}
+
+function handleAgentSources(sources) {
+  const previousSource = state.selectedSource;
+  state.agentSources = sources;
+  if (!agentSourceById(state.selectedSource)) {
+    state.selectedSource = agentSourceById("local")?.id
+      || sources.find(agentSourceUsable)?.id
+      || sources[0]?.id
+      || "local";
+  }
+  renderAgentSourcePicker();
+  if (previousSource !== state.selectedSource && elements.newAgentDialog.open) {
+    state.directory = null;
+    state.selectedDirectory = null;
+    browseDirectory(null);
+  }
+  refreshActionAvailability();
+}
+
+function renderAgentSourcePicker() {
+  if (!elements.agentSourceSelect) return;
+  elements.agentSourceSelect.replaceChildren();
+  for (const source of state.agentSources) {
+    const option = document.createElement("option");
+    option.value = source.id;
+    const stateLabel = source.status === "online"
+      ? `在线 · ${source.agent_count || 0} Agents`
+      : (source.status === "offline" ? "离线" : "检查中");
+    option.textContent = `${source.label} · ${stateLabel}`;
+    option.disabled = source.status === "offline";
+    elements.agentSourceSelect.append(option);
+  }
+  if (agentSourceById(state.selectedSource)) {
+    elements.agentSourceSelect.value = state.selectedSource;
+  }
+  const selected = agentSourceById(state.selectedSource);
+  elements.agentSourceSelect.disabled = !state.agentSources.length || state.directoryPending;
+  elements.agentSourceStatus.classList.toggle("is-offline", selected?.status === "offline");
+  elements.agentSourceStatus.textContent = selected?.status === "online"
+    ? `${selected.kind === "local" ? "本机" : "SSH"} Agent Source 已就绪`
+    : (selected?.error || "正在等待 Agent Source 健康检查…");
+  elements.launchSource.textContent = selected?.label || "本机";
 }
 
 function nativeSshCommand() {
@@ -990,7 +1055,9 @@ function createTerminalProfileCard(profile) {
   trailing.className = "terminal-profile-trailing";
   const badge = document.createElement("span");
   badge.className = "machine-kind-badge";
-  badge.textContent = profile.kind === "local" ? "LOCAL" : "SSH";
+  badge.textContent = profile.kind === "local"
+    ? "LOCAL"
+    : (profile.agent_enabled ? "SSH + AGENTS" : "SSH");
   const chevron = document.createElement("span");
   chevron.className = "agent-card-chevron";
   chevron.setAttribute("aria-hidden", "true");
@@ -1071,6 +1138,11 @@ function openSshHostDialog(profileId = "") {
   elements.sshHostPort.value = String(profile?.port || 22);
   elements.sshHostColor.value = profile?.color || "cyan";
   elements.sshHostDescription.value = profile?.description || "";
+  elements.sshHostAgentEnabled.checked = profile?.agent_enabled === true;
+  elements.sshHostHerdrBin.value = profile?.herdr_bin || "herdr";
+  elements.sshHostWorkspaceRoot.value = Array.isArray(profile?.workspace_roots)
+    ? profile.workspace_roots.join("\n")
+    : (profile?.workspace_root || "~/Workspace");
   elements.sshHostTitle.textContent = profile ? "编辑 SSH 服务器" : "添加 SSH 服务器";
   elements.deleteSshHostButton.hidden = !profile;
   state.sshProfilePending = false;
@@ -1080,13 +1152,23 @@ function openSshHostDialog(profileId = "") {
 }
 
 function renderSshProfileForm() {
+  const agentEnabled = elements.sshHostAgentEnabled.checked;
   elements.saveSshHostButton.disabled = state.sshProfilePending || !socketReady();
   elements.deleteSshHostButton.disabled = state.sshProfilePending || !socketReady();
+  elements.sshHostAgentEnabled.disabled = state.sshProfilePending;
+  elements.sshHostHerdrBin.disabled = state.sshProfilePending || !agentEnabled;
+  elements.sshHostWorkspaceRoot.disabled = state.sshProfilePending || !agentEnabled;
+  elements.sshHostHerdrBin.required = agentEnabled;
+  elements.sshHostWorkspaceRoot.required = agentEnabled;
   elements.saveSshHostButton.textContent = state.sshProfilePending ? "正在保存…" : "保存并连接";
 }
 
 function saveSshHost() {
   if (state.sshProfilePending || !elements.sshHostForm.reportValidity()) return;
+  const workspaceRoots = elements.sshHostWorkspaceRoot.value
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
   const profile = {
     id: elements.sshHostId.value,
     label: elements.sshHostLabel.value.trim(),
@@ -1094,6 +1176,9 @@ function saveSshHost() {
     port: Number(elements.sshHostPort.value),
     color: elements.sshHostColor.value,
     description: elements.sshHostDescription.value.trim(),
+    agent_enabled: elements.sshHostAgentEnabled.checked,
+    herdr_bin: elements.sshHostHerdrBin.value.trim() || "herdr",
+    workspace_roots: workspaceRoots.length ? workspaceRoots : ["~/Workspace"],
   };
   if (!send({type: "ssh_profile_save", profile})) return;
   state.sshProfilePending = true;
@@ -1515,17 +1600,25 @@ function openNewAgentDialog() {
   state.startPending = false;
   elements.initialPromptInput.value = "";
   elements.pathJumpInput.value = "";
+  if (!agentSourceById(state.selectedSource)) {
+    state.selectedSource = agentSourceById("local")?.id
+      || state.agentSources.find(agentSourceUsable)?.id
+      || state.agentSources[0]?.id
+      || "local";
+  }
   updateCounter(elements.initialPromptInput, elements.initialPromptCount);
+  renderAgentSourcePicker();
   renderDirectoryBrowser();
   elements.newAgentDialog.showModal();
   browseDirectory(null);
 }
 
 function browseDirectory(path) {
-  if (!socketReady()) return;
+  const source = agentSourceById(state.selectedSource);
+  if (!socketReady() || !agentSourceUsable(source)) return;
   state.directoryPending = true;
   renderDirectoryBrowser();
-  const message = { type: "list_directories" };
+  const message = { type: "list_directories", source_id: state.selectedSource };
   if (path) message.path = path;
   send(message);
 }
@@ -1533,10 +1626,12 @@ function browseDirectory(path) {
 function renderDirectoryBrowser() {
   elements.directoryList.replaceChildren();
   const listing = state.directory;
+  const sourceUsable = agentSourceUsable(agentSourceById(state.selectedSource));
   elements.directoryPath.textContent = listing?.display_path || "配置的 Workspace 根目录";
   elements.directoryUpButton.disabled = state.directoryPending || !listing?.parent;
-  elements.directoryRefreshButton.disabled = state.directoryPending || !socketReady();
+  elements.directoryRefreshButton.disabled = state.directoryPending || !socketReady() || !sourceUsable;
   elements.directoryNote.hidden = !listing?.truncated;
+  renderAgentSourcePicker();
 
   if (state.directoryPending) {
     elements.directoryList.append(directoryMessage("正在安全读取目录…", "directory-loading"));
@@ -1554,7 +1649,7 @@ function renderDirectoryBrowser() {
   elements.selectedDirectory.hidden = !selected;
   elements.selectedDirectoryPath.textContent = selected?.display_path || "";
   elements.launchDirectory.textContent = selected?.display_path || "尚未选择";
-  elements.selectDirectoryButton.disabled = state.directoryPending || !listing?.can_start_agent;
+  elements.selectDirectoryButton.disabled = state.directoryPending || !sourceUsable || !listing?.can_start_agent;
   elements.selectDirectoryButton.textContent = listing?.can_start_agent ? "当前目录已可用于启动" : "选择当前目录";
   refreshActionAvailability();
 }
@@ -1600,6 +1695,7 @@ function selectCurrentDirectory() {
     path: state.directory.path,
     display_path: state.directory.display_path || state.directory.path,
     git_root: state.directory.git_root || "",
+    source_id: state.directory.source_id || state.selectedSource,
   };
   renderDirectoryBrowser();
 }
@@ -1610,6 +1706,7 @@ function startAgent() {
   if (!send({
     type: "start_agent",
     kind: "codex",
+    source_id: state.selectedDirectory.source_id || state.selectedSource,
     cwd: state.selectedDirectory.path,
     prompt,
   })) return;
@@ -1619,12 +1716,16 @@ function startAgent() {
 
 function refreshActionAvailability() {
   const connected = socketReady();
+  const selectedSource = agentSourceById(state.selectedSource);
   elements.newAgentButton.disabled = !connected;
   elements.emptyNewAgent.disabled = !connected;
   elements.refreshOutputButton.disabled = !connected || !state.activePane;
   elements.copyOutputButton.disabled = !state.activePane;
   elements.interruptButton.disabled = !connected || !state.activePane;
-  elements.startAgentButton.disabled = !connected || !state.selectedDirectory || state.startPending;
+  elements.startAgentButton.disabled = !connected
+    || !agentSourceUsable(selectedSource)
+    || !state.selectedDirectory
+    || state.startPending;
   elements.startAgentButton.querySelector("span").textContent = state.startPending ? "正在启动…" : "启动 Codex";
   elements.addSshHostButton.disabled = !connected || !state.terminalAuthorized;
   elements.refreshTerminalProfilesButton.disabled = !connected || !state.terminalAuthorized;
@@ -1823,6 +1924,14 @@ function bindEvents() {
     const path = elements.pathJumpInput.value.trim();
     if (path) browseDirectory(path);
   });
+  elements.agentSourceSelect.addEventListener("change", () => {
+    state.selectedSource = elements.agentSourceSelect.value;
+    state.directory = null;
+    state.selectedDirectory = null;
+    elements.pathJumpInput.value = "";
+    renderDirectoryBrowser();
+    browseDirectory(null);
+  });
   elements.directoryRefreshButton.addEventListener("click", () => browseDirectory(state.directory?.path || null));
   elements.directoryUpButton.addEventListener("click", () => browseDirectory(state.directory?.parent));
   elements.selectDirectoryButton.addEventListener("click", selectCurrentDirectory);
@@ -1834,6 +1943,7 @@ function bindEvents() {
   elements.themeSelect.addEventListener("change", () => applyTheme(elements.themeSelect.value));
   elements.pushToggleButton.addEventListener("click", togglePush);
   elements.addSshHostButton.addEventListener("click", () => openSshHostDialog());
+  elements.sshHostAgentEnabled.addEventListener("change", renderSshProfileForm);
   elements.refreshTerminalProfilesButton.addEventListener("click", () => {
     if (state.terminalAuthorized) send({type: "terminal_profiles_request"});
   });

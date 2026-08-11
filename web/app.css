@@ -1455,6 +1455,48 @@ dialog {
   font-weight: 800;
 }
 
+.agent-source-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 16px;
+}
+
+.agent-source-field > span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.agent-source-field select {
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: none;
+}
+
+.agent-source-field select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.agent-source-field small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.agent-source-field small.is-offline {
+  color: var(--rose);
+}
+
 .path-jump {
   margin-top: 16px;
 }
@@ -2781,7 +2823,8 @@ dialog {
 }
 
 .field-stack input,
-.field-stack select {
+.field-stack select,
+.field-stack textarea {
   width: 100%;
   height: 40px;
   padding: 0 11px;
@@ -2793,14 +2836,63 @@ dialog {
   font-size: 11px;
 }
 
+.field-stack textarea {
+  height: auto;
+  min-height: 72px;
+  padding-top: 9px;
+  padding-bottom: 9px;
+  resize: vertical;
+}
+
 .field-stack input:focus,
-.field-stack select:focus {
+.field-stack select:focus,
+.field-stack textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 #ssh-host-target {
   font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+#ssh-host-herdr-bin,
+#ssh-host-workspace-root {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.agent-discovery-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px;
+  color: var(--text-soft);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
+  border-radius: 11px;
+}
+
+.agent-discovery-toggle input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+
+.agent-discovery-toggle strong,
+.agent-discovery-toggle small {
+  display: block;
+}
+
+.agent-discovery-toggle strong {
+  font-size: 10px;
+}
+
+.agent-discovery-toggle small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .ssh-host-hint {

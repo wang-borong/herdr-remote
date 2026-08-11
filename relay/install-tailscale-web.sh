@@ -11,6 +11,7 @@ TAILSCALE_PROXY="${HERDR_TAILSCALE_PROXY:-}"
 TAILSCALE_LOGIN_TIMEOUT="${HERDR_TAILSCALE_LOGIN_TIMEOUT:-3m}"
 TAILSCALE_PROXY_DROPIN="/etc/systemd/system/tailscaled.service.d/herdr-remote-proxy.conf"
 SSH_HOSTS_FILE="${HERDR_SSH_HOSTS_FILE:-$CONFIG_DIR/ssh-hosts.json}"
+SSH_CONFIG_FILE="${HERDR_SSH_CONFIG_FILE:-$HOME/.ssh/config}"
 CONFIGURE_ONLY=false
 RESET_FUNNEL=false
 REMOTE_SHELL=false
@@ -445,6 +446,7 @@ load_ssh_profiles(Path(sys.argv[1]))
     upsert_config HERDR_WEB_TERMINAL 1
     upsert_config HERDR_TERMINAL_ALLOWED_USERS "$ALLOWED_USERS"
     upsert_config HERDR_SSH_HOSTS_FILE "$SSH_HOSTS_FILE"
+    upsert_config HERDR_SSH_CONFIG_FILE "$SSH_CONFIG_FILE"
     upsert_config HERDR_TERMINAL_MAX_SESSIONS 6
 fi
 

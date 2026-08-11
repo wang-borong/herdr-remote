@@ -3,7 +3,6 @@
 # requires-python = ">=3.10"
 # dependencies = ["python-telegram-bot>=21.0", "websockets>=14.0"]
 # ///
-import asyncio
 import ast
 import importlib
 import json
@@ -156,6 +155,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         tg.REQUIRE_PRIVATE_CHAT = True
         tg.ALLOW_PERSISTENT_TRUST = True
         tg.agents = []
+        tg.agent_sources = []
         tg.relay_connected = False
         tg.pending.clear()
         tg.selected_workspace_dirs.clear()
@@ -171,6 +171,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         tg.REQUIRE_PRIVATE_CHAT = self.old_require_private_chat
         tg.ALLOW_PERSISTENT_TRUST = self.old_allow_persistent_trust
         tg.agents = []
+        tg.agent_sources = []
         tg.relay_connected = False
         tg.selected_workspace_dirs.clear()
         tg.directory_path_tokens.clear()
@@ -481,6 +482,54 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(set(duplicate_labels)), 2)
         self.assertTrue(all("w" in label and ":p1" in label for label in duplicate_labels))
 
+    async def test_remote_agent_picker_routes_global_pane_id_and_shows_host(self):
+        tg.relay_connected = True
+        remote_agent = {
+            "pane_id": "server::w17:p1",
+            "raw_pane_id": "w17:p1",
+            "source_id": "server",
+            "agent": "codex",
+            "status": "idle",
+            "project": "yolo-pose",
+            "cwd": "/home/wbr/workspace-ai/yolo-pose",
+            "host": "Herdr 192.168.2.99",
+        }
+        tg.agents = [remote_agent]
+        button = tg.build_agent_keyboard("read").inline_keyboard[0][0]
+        self.assertIn("Herdr 192.168.2.99", button.text)
+        self.assertEqual(
+            tg.parse_callback_data(button.callback_data)["pane_id"],
+            "server::w17:p1",
+        )
+
+        callback = FakeCallback(button.callback_data)
+        with patch.object(tg, "read_pane", AsyncMock(return_value="remote output")) as read:
+            await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
+
+        read.assert_awaited_once_with("server::w17:p1")
+        self.assertIn("Herdr 192.168.2.99", callback.message.replies[0][0])
+
+    async def test_status_reports_local_and_remote_agent_source_health(self):
+        tg.relay_connected = True
+        tg.agents = make_agents(2)
+        tg.agent_sources = [
+            {"id": "local", "label": "本机", "status": "online", "agent_count": 2},
+            {
+                "id": "server",
+                "label": "Herdr 192.168.2.99",
+                "status": "online",
+                "agent_count": 1,
+            },
+        ]
+        update = make_update()
+
+        await tg.cmd_status(update, SimpleNamespace(args=[]))
+
+        text = update.message.replies[0][0]
+        self.assertIn("Agent Sources:", text)
+        self.assertIn("本机: ONLINE · 2 Agents", text)
+        self.assertIn("Herdr 192.168.2.99: ONLINE · 1 Agent", text)
+
     def test_large_keyboard_paginates_without_omitting_agents(self):
         agent_list = make_agents(tg.AGENT_PAGE_SIZE + 5)
         tg.agents = agent_list
@@ -597,6 +646,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_done_agent_is_listed_and_sends_finished_notification(self):
         tg.agents = make_agents(1, status="done", project="completed")
+        tg.agents[0]["host"] = "Herdr 192.168.2.99"
         update = make_update()
 
         await tg.cmd_agents(update, SimpleNamespace(args=[]))
@@ -608,11 +658,29 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         await tg.track_agent_updates(app, tg.agents)
         chat_id, text, kwargs, sent = bot.sent[0]
         self.assertEqual(chat_id, 42)
-        self.assertIn("completed (opencode) finished", text)
+        self.assertIn("completed (opencode) @Herdr 192.168.2.99 finished", text)
         button = kwargs["reply_markup"].inline_keyboard[0][0]
         self.assertEqual(button.text, "Open output & reply")
         self.assertEqual(tg.parse_callback_data(button.callback_data)["pane_id"], "w0:p1")
         self.assertEqual(tg.pending_pane(42, sent.message_id), "w0:p1")
+
+    async def test_digest_disambiguates_remote_agent_by_host(self):
+        tg.daily_stats["server::w17:p1"] = {
+            "agent": "codex",
+            "project": "yolo-pose",
+            "host": "Herdr 192.168.2.99",
+            "source_id": "server",
+            "blocked_count": 2,
+            "working_mins": 75,
+            "last_change": 0,
+        }
+        update = make_update()
+
+        await tg.cmd_digest(update, SimpleNamespace(args=[]))
+
+        text = update.message.replies[0][0]
+        self.assertIn("yolo-pose (codex) @Herdr 192.168.2.99", text)
+        self.assertIn("1h15m working, blocked 2x", text)
 
     async def test_page_callback_rebuilds_from_latest_cache(self):
         tg.relay_connected = True
@@ -838,12 +906,14 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
     def test_relay_disconnect_clears_approval_generations(self):
         tg.relay_connected = True
         tg.agents = make_agents(1, status="blocked")
+        tg.agent_sources = [{"id": "local", "status": "online"}]
         tg.approval_tokens["w0:p1"] = "generation"
 
         tg.clear_relay_connection_state()
 
         self.assertFalse(tg.relay_connected)
         self.assertEqual(tg.agents, [])
+        self.assertEqual(tg.agent_sources, [])
         self.assertEqual(tg.approval_tokens, {})
 
     async def test_failed_blocked_notification_preserves_previous_generation(self):
@@ -949,6 +1019,34 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("reply to this notification", text)
         self.assertNotIn("parse_mode", kwargs)
         self.assertEqual(tg.pending_pane(chat_id, sent.message_id), "w0:p1")
+
+    async def test_remote_blocked_notification_keeps_global_id_and_names_host(self):
+        remote_pane = "server::w17:p1"
+        tg.agents = [{
+            "pane_id": remote_pane,
+            "source_id": "server",
+            "agent": "codex",
+            "status": "blocked",
+            "project": "yolo-pose",
+            "host": "Herdr 192.168.2.99",
+        }]
+        bot = FakeBot()
+
+        await tg.notify_blocked(
+            SimpleNamespace(bot=bot),
+            pane_id=remote_pane,
+            agent="codex",
+            project="yolo-pose",
+            prompt="Allow tool?",
+            options=["yes, single permission", "no (tab to edit)"],
+            host="Herdr 192.168.2.99",
+        )
+
+        chat_id, text, kwargs, sent = bot.sent[0]
+        self.assertIn("@Herdr 192.168.2.99", text)
+        self.assertEqual(tg.pending_pane(chat_id, sent.message_id), remote_pane)
+        open_button = kwargs["reply_markup"].inline_keyboard[-1][0]
+        self.assertEqual(tg.parse_callback_data(open_button.callback_data)["pane_id"], remote_pane)
 
     async def test_group_prompts_keep_independent_pane_mappings(self):
         tg.REQUIRE_PRIVATE_CHAT = False

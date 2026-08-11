@@ -23,8 +23,8 @@ from terminal_sessions import (
     save_ssh_profile,
     terminal_environment,
     terminal_profile_command,
-    tmux_server_configuration_command,
     terminate_persistent_session,
+    tmux_server_configuration_command,
     validated_terminal_dimensions,
 )
 
@@ -42,6 +42,9 @@ class TerminalProfileTests(unittest.TestCase):
             })
 
             self.assertEqual(saved["id"], "build-server")
+            self.assertFalse(saved["agent_enabled"])
+            self.assertEqual(saved["herdr_bin"], "herdr")
+            self.assertEqual(saved["workspace_roots"], ["~/Workspace"])
             self.assertEqual(load_ssh_profiles(config_file), [saved])
             self.assertEqual(stat.S_IMODE(config_file.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(config_file.parent.stat().st_mode), 0o700)
@@ -56,6 +59,34 @@ class TerminalProfileTests(unittest.TestCase):
             normalize_ssh_profile({"label": "Server", "target": "server", "port": 70000})
         with self.assertRaisesRegex(TerminalConfigError, "Profile id"):
             normalize_ssh_profile({"id": "local", "label": "Server", "target": "server"})
+        with self.assertRaisesRegex(TerminalConfigError, "herdr executable"):
+            normalize_ssh_profile({
+                "label": "Server",
+                "target": "server",
+                "agent_enabled": True,
+                "herdr_bin": "herdr; touch /tmp/unsafe",
+            })
+        with self.assertRaisesRegex(TerminalConfigError, "workspace root"):
+            normalize_ssh_profile({
+                "label": "Server",
+                "target": "server",
+                "agent_enabled": True,
+                "workspace_roots": ["relative/path"],
+            })
+
+    def test_profile_keeps_agent_discovery_configuration(self):
+        profile = normalize_ssh_profile({
+            "id": "gpu",
+            "label": "GPU Server",
+            "target": "gpu-host",
+            "agent_enabled": True,
+            "herdr_bin": "/home/dev/.local/bin/herdr",
+            "workspace_roots": ["~/Workspace", "/srv/models", "~/Workspace"],
+        })
+
+        self.assertTrue(profile["agent_enabled"])
+        self.assertEqual(profile["herdr_bin"], "/home/dev/.local/bin/herdr")
+        self.assertEqual(profile["workspace_roots"], ["~/Workspace", "/srv/models"])
 
     def test_tmux_commands_use_a_dedicated_persistent_socket(self):
         profile = normalize_ssh_profile({
@@ -79,6 +110,24 @@ class TerminalProfileTests(unittest.TestCase):
         self.assertIn("/usr/bin/ssh -tt", command[-1])
         self.assertIn("-p 2222", command[-1])
         self.assertEqual(cwd, Path("/tmp"))
+
+    def test_terminal_command_can_bypass_broken_system_ssh_config(self):
+        profile = normalize_ssh_profile({
+            "id": "build",
+            "label": "Build",
+            "target": "build-host",
+        })
+        command, _, persistent = terminal_profile_command(
+            profile,
+            shell_binary="/bin/zsh",
+            ssh_binary="/usr/bin/ssh",
+            ssh_config_file=Path("/home/dev/.ssh/config"),
+            tmux_binary=None,
+            cwd=Path("/tmp"),
+        )
+
+        self.assertFalse(persistent)
+        self.assertEqual(command[:3], ["/usr/bin/ssh", "-F", "/home/dev/.ssh/config"])
 
     def test_web_tmux_configuration_enables_mouse_and_scoped_prefix_bindings(self):
         command = tmux_server_configuration_command("/usr/bin/tmux")

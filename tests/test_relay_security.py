@@ -49,8 +49,11 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         relay.known_panes.clear()
         relay.pane_remote_map.clear()
+        relay.pane_raw_map.clear()
         relay.clients.clear()
         relay.agent_cache.clear()
+        relay.agent_source_cache.clear()
+        relay.last_statuses.clear()
         relay.client_auth.clear()
         relay.active_terminal_sessions.clear()
         relay.machine_access_cache = None
@@ -747,6 +750,190 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[-1], shlex.join([relay.HERDR, "agent", "prompt", "w0:p1", prompt]))
         self.assertNotIn(prompt, command[:-1])
+
+    def test_remote_agents_receive_source_scoped_global_pane_ids(self):
+        source = relay.normalize_ssh_profile({
+            "id": "build",
+            "label": "Build Server",
+            "target": "build-host",
+            "agent_enabled": True,
+            "herdr_bin": "/home/dev/.local/bin/herdr",
+        })
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps({
+                "result": {
+                    "panes": [{
+                        "pane_id": "w0:p1",
+                        "agent": "codex",
+                        "agent_status": "working",
+                        "cwd": "/home/dev/Workspace/project",
+                    }],
+                },
+            }),
+            stderr="",
+        )
+        with patch.object(relay, "run_herdr_result", return_value=completed):
+            agents, status = relay.get_agents_from_source(source)
+
+        self.assertEqual(agents[0]["pane_id"], "build::w0:p1")
+        self.assertEqual(agents[0]["raw_pane_id"], "w0:p1")
+        self.assertEqual(agents[0]["source_id"], "build")
+        self.assertEqual(agents[0]["host"], "Build Server")
+        self.assertEqual(status["status"], "online")
+
+    async def test_namespaced_pane_routes_commands_to_the_raw_remote_pane(self):
+        source = relay.normalize_ssh_profile({
+            "id": "build",
+            "label": "Build Server",
+            "target": "build-host",
+            "agent_enabled": True,
+        })
+        pane_id = "build::w0:p1"
+        relay.known_panes.add(pane_id)
+        relay.pane_raw_map[pane_id] = "w0:p1"
+        relay.pane_remote_map[pane_id] = source
+        ws = FakeWebSocket([{"type": "read_pane", "pane_id": pane_id, "lines": 40}])
+
+        with patch.object(relay, "run_herdr", return_value="remote output") as run_herdr:
+            await relay.handle_client(ws)
+
+        run_herdr.assert_called_once_with(
+            "pane", "read", "w0:p1", "--lines", "40", "--source", "recent", remote=source
+        )
+        self.assertIn(
+            {"type": "pane_content", "pane_id": pane_id, "content": "remote output"},
+            ws.sent,
+        )
+
+    async def test_poll_keeps_identical_local_and_remote_raw_pane_ids_distinct(self):
+        source = relay.normalize_ssh_profile({
+            "id": "build",
+            "label": "Build Server",
+            "target": "build-host",
+            "agent_enabled": True,
+        })
+        local_agent = {
+            "pane_id": "w0:p1",
+            "raw_pane_id": "w0:p1",
+            "source_id": "local",
+            "agent": "codex",
+            "status": "idle",
+            "cwd": "/tmp/local",
+            "project": "local",
+            "host": "local",
+        }
+        remote_agent = {
+            **local_agent,
+            "pane_id": "build::w0:p1",
+            "source_id": "build",
+            "cwd": "/tmp/remote",
+            "project": "remote",
+            "host": "Build Server",
+        }
+        statuses = [
+            relay.source_status(relay.local_agent_source(), "online", agent_count=1),
+            relay.source_status(source, "online", agent_count=1),
+        ]
+        with (
+            patch.object(
+                relay,
+                "collect_all_agents",
+                new=AsyncMock(return_value=(
+                    [local_agent, remote_agent],
+                    statuses,
+                    {"local": relay.local_agent_source(), "build": source},
+                )),
+            ),
+            patch.object(relay, "broadcast", new=AsyncMock()),
+        ):
+            await relay._poll_once()
+
+        self.assertEqual(set(relay.agent_cache), {"w0:p1", "build::w0:p1"})
+        self.assertIsNone(relay.pane_remote_map["w0:p1"])
+        self.assertEqual(relay.pane_remote_map["build::w0:p1"], source)
+
+    def test_remote_workspace_listing_uses_profile_roots(self):
+        source = relay.normalize_ssh_profile({
+            "id": "build",
+            "label": "Build Server",
+            "target": "build-host",
+            "agent_enabled": True,
+            "workspace_roots": ["~/Workspace", "/srv/models"],
+        })
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps({
+                "path": "/home/dev/Workspace/project",
+                "display_path": "~/Workspace/project",
+                "parent": "/home/dev/Workspace",
+                "entries": [],
+                "can_start_agent": True,
+                "git_root": "/home/dev/Workspace/project",
+                "truncated": False,
+            }),
+            stderr="",
+        )
+        with patch.object(relay, "run_remote_result", return_value=completed) as run_remote:
+            listing = relay.remote_workspace_directory_listing(
+                source,
+                "/home/dev/Workspace/project",
+            )
+
+        arguments = run_remote.call_args.args[1]
+        self.assertEqual(arguments[0:2], ["python3", "-c"])
+        self.assertEqual(json.loads(arguments[3]), ["~/Workspace", "/srv/models"])
+        self.assertEqual(arguments[4], "/home/dev/Workspace/project")
+        self.assertTrue(listing["can_start_agent"])
+
+    def test_remote_codex_start_returns_a_namespaced_agent(self):
+        source = relay.normalize_ssh_profile({
+            "id": "build",
+            "label": "Build Server",
+            "target": "build-host",
+            "agent_enabled": True,
+            "herdr_bin": "/home/dev/.local/bin/herdr",
+        })
+        created = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps({
+                "result": {
+                    "workspace": {"workspace_id": "w9"},
+                    "root_pane": {"pane_id": "w9:p1"},
+                },
+            }),
+            stderr="",
+        )
+        started = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps({
+                "result": {
+                    "agent": {"pane_id": "w9:p1", "agent_status": "idle"},
+                },
+            }),
+            stderr="",
+        )
+        listing = {
+            "path": "/home/dev/Workspace/project",
+            "display_path": "~/Workspace/project",
+            "can_start_agent": True,
+        }
+        with (
+            patch.object(relay, "remote_workspace_directory_listing", return_value=listing),
+            patch.object(relay, "run_herdr_result", side_effect=[created, started]) as run_herdr,
+        ):
+            result = relay.start_codex_on_source(listing["path"], "", source)
+
+        self.assertEqual(result["pane_id"], "build::w9:p1")
+        self.assertEqual(result["raw_pane_id"], "w9:p1")
+        self.assertEqual(result["source_id"], "build")
+        self.assertEqual(result["host"], "Build Server")
+        self.assertEqual(run_herdr.call_args_list[0].kwargs["remote"], source)
+        self.assertEqual(run_herdr.call_args_list[1].kwargs["remote"], source)
 
     def test_workspace_browsing_is_confined_and_skips_symlinks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
