@@ -471,6 +471,107 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"chars={len(prompt)}", detail)
         self.assertNotIn("secret-token-789", detail)
 
+    def test_mark_agent_seen_focuses_an_authoritative_done_agent(self):
+        done = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps({"result": {"agent": {"agent_status": "done"}}}),
+            stderr="",
+        )
+        focused = subprocess.CompletedProcess([], 0, stdout='{"result":{}}', stderr="")
+        idle = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps({"result": {"agent": {"agent_status": "idle"}}}),
+            stderr="",
+        )
+
+        with patch.object(
+            relay,
+            "run_herdr_result",
+            side_effect=[done, focused, idle],
+        ) as run_herdr:
+            agent, changed = relay.mark_agent_seen("w0:p1")
+
+        self.assertTrue(changed)
+        self.assertEqual(agent["agent_status"], "idle")
+        self.assertEqual(
+            run_herdr.call_args_list,
+            [
+                unittest.mock.call("agent", "get", "w0:p1", remote=None, timeout=5),
+                unittest.mock.call("agent", "focus", "w0:p1", remote=None, timeout=5),
+                unittest.mock.call("agent", "get", "w0:p1", remote=None, timeout=5),
+            ],
+        )
+
+    def test_mark_agent_seen_does_not_focus_a_non_done_agent(self):
+        working = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps({"result": {"agent": {"agent_status": "working"}}}),
+            stderr="",
+        )
+
+        with patch.object(relay, "run_herdr_result", return_value=working) as run_herdr:
+            agent, changed = relay.mark_agent_seen("w0:p1")
+
+        self.assertFalse(changed)
+        self.assertEqual(agent["agent_status"], "working")
+        run_herdr.assert_called_once_with("agent", "get", "w0:p1", remote=None, timeout=5)
+
+    async def test_agent_seen_routes_remote_pane_and_broadcasts_authoritative_status(self):
+        source = relay.normalize_ssh_profile({
+            "id": "build",
+            "label": "Build Server",
+            "target": "build-host",
+            "agent_enabled": True,
+        })
+        pane_id = "build::w17:p1"
+        relay.known_panes.add(pane_id)
+        relay.pane_raw_map[pane_id] = "w17:p1"
+        relay.pane_remote_map[pane_id] = source
+        relay.agent_cache[pane_id] = {
+            "pane_id": pane_id,
+            "raw_pane_id": "w17:p1",
+            "source_id": "build",
+            "agent": "codex",
+            "status": "done",
+            "project": "remote-project",
+            "host": "Build Server",
+        }
+        ws = FakeWebSocket([{"type": "agent_seen", "pane_id": pane_id}])
+
+        with (
+            patch.object(relay, "mark_agent_seen") as mark_seen,
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                new=AsyncMock(return_value=({"agent_status": "idle"}, True)),
+            ) as to_thread,
+            patch.object(relay, "broadcast", new=AsyncMock()) as broadcast,
+            patch.object(relay, "audit") as audit,
+        ):
+            await relay.handle_client(ws)
+
+        to_thread.assert_awaited_once_with(mark_seen, "w17:p1", source)
+        mark_seen.assert_not_called()
+        expected_agent = {
+            **relay.agent_cache[pane_id],
+            "status": "idle",
+        }
+        broadcast.assert_awaited_once_with({"type": "agent_update", "agent": expected_agent})
+        audit.assert_called_once_with("agent_seen", "127.0.0.1", "unknown", pane_id)
+        self.assertIn(
+            {
+                "type": "command_result",
+                "command": "agent_seen",
+                "ok": True,
+                "changed": True,
+                "status": "idle",
+            },
+            ws.sent,
+        )
+
     def test_submit_agent_prompt_waits_for_observed_state_change(self):
         prompt = "run the tests"
         idle = subprocess.CompletedProcess(

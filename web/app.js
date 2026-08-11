@@ -1335,7 +1335,7 @@ function createAgentCard(agent) {
   button.type = "button";
   button.className = `agent-card${agent.pane_id === state.activePane ? " is-selected" : ""}${status === "blocked" ? " is-blocked" : ""}`;
   button.setAttribute("aria-label", `${agentLabel(agent)}，${STATUS[status].label}`);
-  button.addEventListener("click", () => selectAgent(agent.pane_id));
+  button.addEventListener("click", () => selectAgent(agent.pane_id, true, true));
 
   const avatar = document.createElement("span");
   avatar.className = "agent-card-avatar";
@@ -1404,13 +1404,18 @@ function selectInitialAgentIfNeeded() {
   }
 }
 
-function selectAgent(paneId, updateHistory = true) {
+function selectAgent(paneId, updateHistory = true, markSeen = false) {
+  const shouldMarkSeen = markSeen
+    && normalizedStatus(state.agents.find((agent) => agent.pane_id === paneId)) === "done";
   state.activePane = paneId;
   state.userScrolledUp = false;
   document.body.classList.add("agent-open");
   if (updateHistory) updatePaneUrl(paneId);
   renderAll();
   refreshOutput();
+  if (shouldMarkSeen && socketReady()) {
+    send({ type: "agent_seen", pane_id: paneId });
+  }
 }
 
 function clearAgentSelection() {

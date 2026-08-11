@@ -230,6 +230,17 @@ async def send_agent_prompt_to_relay(pane_id: str, text: str):
         raise RuntimeError(response.get("message", "relay rejected prompt"))
 
 
+async def mark_agent_seen_at_relay(pane_id: str) -> dict:
+    """Ask the relay to mark a completed Agent's output as seen."""
+    response = await relay_request(
+        {"type": "agent_seen", "pane_id": pane_id},
+        "command_result",
+    )
+    if response.get("command") != "agent_seen" or not response.get("ok"):
+        raise RuntimeError(response.get("message", "relay rejected agent acknowledgement"))
+    return response
+
+
 # --- Auth guard ---
 
 def authorized(update: Update) -> bool:
@@ -406,6 +417,40 @@ async def send_pane_output(message, chat, agent: dict, content: str | None, repl
 async def send_reply_prompt(message, chat, agent: dict, content: str | None = None):
     sent_messages = await send_pane_output(message, chat, agent, content, reply_prompt=True)
     return sent_messages[-1]
+
+
+def pane_output_was_read(content: str | None) -> bool:
+    if not isinstance(content, str) or content == "(no response)":
+        return False
+    return not content.startswith("(error reading pane:")
+
+
+async def acknowledge_agent_output(agent: dict, content: str | None):
+    """Best-effort acknowledgement after Telegram successfully presents output."""
+    if agent.get("status") != "done" or not pane_output_was_read(content):
+        return
+    try:
+        response = await mark_agent_seen_at_relay(agent["pane_id"])
+    except Exception as e:
+        log.warning(
+            "Failed to mark Telegram Agent output as seen for pane %s (%s)",
+            agent.get("pane_id", ""),
+            type(e).__name__,
+        )
+        return
+    status = response.get("status")
+    if isinstance(status, str) and status:
+        agent["status"] = status
+
+
+async def read_and_present_agent(message, chat, agent: dict, *, reply_prompt: bool = False):
+    content = await read_pane(agent["pane_id"])
+    if reply_prompt:
+        sent = await send_reply_prompt(message, chat, agent, content)
+    else:
+        sent = await send_pane_output(message, chat, agent, content)
+    await acknowledge_agent_output(agent, content)
+    return sent
 
 
 def agents_for_action(action: str) -> list[dict]:
@@ -983,8 +1028,7 @@ async def cmd_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"No agent matching '{query}'. Use /agents to see list.")
         return
 
-    content = await read_pane(match["pane_id"])
-    await send_pane_output(update.message, update.effective_chat, match, content)
+    await read_and_present_agent(update.message, update.effective_chat, match)
 
 
 async def cmd_interrupt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1072,8 +1116,12 @@ async def cmd_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"No agent matching '{query}'.")
         return
 
-    content = await read_pane(match["pane_id"])
-    await send_reply_prompt(update.message, update.effective_chat, match, content)
+    await read_and_present_agent(
+        update.message,
+        update.effective_chat,
+        match,
+        reply_prompt=True,
+    )
 
 
 async def cmd_trust(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1295,8 +1343,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
     if action == "read":
-        content = await read_pane(data["pane_id"])
-        await send_pane_output(query.message, update.effective_chat, selected_agent, content)
+        await read_and_present_agent(query.message, update.effective_chat, selected_agent)
         return
 
     if action == "interrupt":
@@ -1312,8 +1359,12 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "select_reply":
-        content = await read_pane(data["pane_id"])
-        await send_reply_prompt(query.message, update.effective_chat, selected_agent, content)
+        await read_and_present_agent(
+            query.message,
+            update.effective_chat,
+            selected_agent,
+            reply_prompt=True,
+        )
         return
 
     if action == "trust":

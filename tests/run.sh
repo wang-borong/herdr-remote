@@ -85,6 +85,9 @@ WEB="$DIR/web/index.html"
 WEB_JS="$DIR/web/app.js"
 [ -f "$DIR/web/app.css" ] && [ -f "$DIR/web/manifest.webmanifest" ] && \
   grep -q "WebSocket" "$WEB_JS" && grep -q "agent_prompt" "$WEB_JS" && \
+  grep -q "agent_seen" "$WEB_JS" && \
+  grep -q 'selectAgent(agent.pane_id, true, true)' "$WEB_JS" && \
+  grep -q 'function selectAgent(paneId, updateHistory = true, markSeen = false)' "$WEB_JS" && \
   grep -q "agent_prompt_queue" "$WEB_JS" && grep -q "queue-prompt-button" "$WEB" && \
   grep -q 'message.delivery === "queued"' "$WEB_JS" && \
   grep -q "list_directories" "$WEB_JS" && grep -q "start_agent" "$WEB_JS" && \

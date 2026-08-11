@@ -621,6 +621,84 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(reply_kwargs["reply_markup"], tg.ForceReply)
         self.assertEqual(tg.pending_pane(42, reply_message.message_id), "w0:p1")
 
+    async def test_done_remote_read_marks_seen_after_output_is_presented(self):
+        remote_agent = {
+            "pane_id": "server::w17:p1",
+            "raw_pane_id": "w17:p1",
+            "source_id": "server",
+            "agent": "codex",
+            "status": "done",
+            "project": "yolo-pose",
+            "cwd": "/home/wbr/workspace-ai/yolo-pose",
+            "host": "Herdr 192.168.2.99",
+        }
+        tg.agents = [remote_agent]
+        update = make_update()
+
+        async def mark_seen(pane_id):
+            self.assertTrue(update.message.replies)
+            self.assertEqual(pane_id, "server::w17:p1")
+            return {"command": "agent_seen", "ok": True, "status": "idle"}
+
+        with (
+            patch.object(tg, "read_pane", AsyncMock(return_value="completed output")),
+            patch.object(tg, "mark_agent_seen_at_relay", side_effect=mark_seen) as mark,
+        ):
+            await tg.cmd_read(update, SimpleNamespace(args=["yolo-pose"]))
+
+        mark.assert_awaited_once_with("server::w17:p1")
+        self.assertIn("completed output", update.message.replies[0][0])
+        self.assertEqual(remote_agent["status"], "idle")
+
+    async def test_open_output_and_reply_marks_done_agent_seen(self):
+        tg.relay_connected = True
+        tg.agents = make_agents(1, status="done")
+        button = tg.interaction_keyboard("w0:p1").inline_keyboard[0][0]
+        callback = FakeCallback(button.callback_data)
+
+        with (
+            patch.object(tg, "read_pane", AsyncMock(return_value="recent output")),
+            patch.object(
+                tg,
+                "mark_agent_seen_at_relay",
+                AsyncMock(return_value={"command": "agent_seen", "ok": True, "status": "idle"}),
+            ) as mark,
+        ):
+            await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
+
+        mark.assert_awaited_once_with("w0:p1")
+        self.assertIn("recent output", callback.message.replies[0][0])
+        self.assertIsInstance(callback.message.replies[0][1]["reply_markup"], tg.ForceReply)
+
+    async def test_non_done_or_failed_reads_do_not_mark_agent_seen(self):
+        with patch.object(tg, "mark_agent_seen_at_relay", AsyncMock()) as mark:
+            await tg.acknowledge_agent_output(make_agents(1, status="idle")[0], "idle output")
+            await tg.acknowledge_agent_output(make_agents(1, status="working")[0], "working output")
+            await tg.acknowledge_agent_output(make_agents(1, status="done")[0], "(no response)")
+            await tg.acknowledge_agent_output(
+                make_agents(1, status="done")[0],
+                "(error reading pane: relay unavailable)",
+            )
+
+        mark.assert_not_awaited()
+
+    async def test_read_still_succeeds_if_mark_seen_fails(self):
+        tg.agents = make_agents(1, status="done")
+        update = make_update()
+
+        with (
+            patch.object(tg, "read_pane", AsyncMock(return_value="completed output")),
+            patch.object(
+                tg,
+                "mark_agent_seen_at_relay",
+                AsyncMock(side_effect=RuntimeError("relay unavailable")),
+            ) as mark,
+        ):
+            await tg.cmd_read(update, SimpleNamespace(args=["project"]))
+
+        mark.assert_awaited_once_with("w0:p1")
+        self.assertIn("completed output", update.message.replies[0][0])
+
     async def test_interrupt_uses_canonical_key_and_waits_for_relay_ack(self):
         tg.agents = make_agents(1, status="working")
         update = make_update()

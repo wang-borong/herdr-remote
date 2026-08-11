@@ -17,6 +17,7 @@
 - 响应式 Agent Dashboard，兼容桌面和手机浏览器。
 - 按状态筛选和搜索本机 Agent。
 - 查看最近 60、120 或 200 行 Pane 输出，并可自动刷新。
+- 用户点击已完成的 Agent 卡片后，会将该完成结果标记为已查看并恢复为待命；桌面端自动选中和页面初始化不会误清状态。
 - 通过 `herdr agent prompt` 提交 Prompt；Agent 工作中还可用 **Tab 缓存**，把下一条任务明确加入 Codex 队列。
 - 二次确认后发送规范的 `C-c` Interrupt。
 - 在配置的 Workspace 白名单中浏览目录。

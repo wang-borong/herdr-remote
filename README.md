@@ -112,6 +112,8 @@ The `/start`, `/read`, `/reply`, `/send`, and `/interrupt` pickers keep every el
 
 Finished and blocked notifications include **Open output & reply**. You can also reply directly to the notification to send a follow-up without returning to the agent list. Blocked notifications retain their one-tap approval controls.
 
+After `/read`, `/reply`, or **Open output & reply** successfully displays a completed Agent's output, the Relay marks that completion as seen and Herdr returns the Agent to `idle`.
+
 ## Architecture
 
 ```

@@ -811,6 +811,26 @@ def get_agent_info(pane_id: str, remote=None) -> dict:
     return agent
 
 
+def mark_agent_seen(pane_id: str, remote=None) -> tuple[dict, bool]:
+    """Mark a completed Agent as seen without focusing other Agent states.
+
+    Herdr's agent.view.clear API clears an Agent View definition; agent focus
+    is the operation that acknowledges a completed Agent.
+    """
+    before = get_agent_info(pane_id, remote=remote)
+    if str(before.get("agent_status", "unknown")).casefold() != "done":
+        return before, False
+
+    focused = run_herdr_result(
+        "agent", "focus", pane_id,
+        remote=remote,
+        timeout=5,
+    )
+    if focused.returncode != 0:
+        raise RuntimeError("Could not mark agent as seen")
+    return get_agent_info(pane_id, remote=remote), True
+
+
 def agent_state_advanced(before: dict, after: dict) -> bool:
     if after.get("agent_status") != before.get("agent_status"):
         return True
@@ -1861,6 +1881,48 @@ async def handle_client(ws):
                 raw_pane_id, remote = pane_route(pane_id)
                 content = run_herdr("pane", "read", raw_pane_id, "--lines", str(lines), "--source", "recent", remote=remote)
                 await ws.send(json.dumps({"type": "pane_content", "pane_id": pane_id, "content": content}))
+            elif msg_type == "agent_seen":
+                pane_id = msg.get("pane_id", "")
+                if pane_id not in known_panes:
+                    await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
+                    continue
+                raw_pane_id, remote = pane_route(pane_id)
+                try:
+                    agent_info, focused = await asyncio.to_thread(
+                        mark_agent_seen,
+                        raw_pane_id,
+                        remote,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "agent_seen command failed for pane %s (%s)",
+                        pane_id,
+                        type(e).__name__,
+                    )
+                    await ws.send(json.dumps({
+                        "type": "error",
+                        "message": "agent_seen command failed",
+                    }))
+                    continue
+
+                status = str(agent_info.get("agent_status", "unknown")).casefold()
+                agent_update = {
+                    **agent_cache.get(pane_id, {}),
+                    "pane_id": pane_id,
+                    "status": status,
+                }
+                agent_cache[pane_id] = agent_update
+                if focused:
+                    log.info("Marked agent output as seen: pane=%s", pane_id)
+                    audit("agent_seen", ip, device, pane_id)
+                await broadcast({"type": "agent_update", "agent": agent_update})
+                await ws.send(json.dumps({
+                    "type": "command_result",
+                    "command": "agent_seen",
+                    "ok": True,
+                    "changed": focused,
+                    "status": status,
+                }))
             elif msg_type == "send_keys":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:
