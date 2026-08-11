@@ -741,6 +741,67 @@ function ensureWebTerminal() {
   return true;
 }
 
+function enableAgentOutputTouchScrolling(terminal) {
+  const surface = terminal.element;
+  if (!surface) return;
+
+  let lastTouchY = null;
+  let pixelRemainder = 0;
+  const resetTouch = () => {
+    lastTouchY = null;
+    pixelRemainder = 0;
+  };
+
+  surface.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 1) {
+      resetTouch();
+      return;
+    }
+    lastTouchY = event.touches[0].clientY;
+    pixelRemainder = 0;
+    event.stopPropagation();
+  }, { passive: true });
+
+  surface.addEventListener("touchmove", (event) => {
+    if (lastTouchY === null || event.touches.length !== 1) {
+      resetTouch();
+      return;
+    }
+
+    const currentY = event.touches[0].clientY;
+    const deltaY = lastTouchY - currentY;
+    lastTouchY = currentY;
+    event.stopPropagation();
+    if (!deltaY) return;
+
+    const buffer = terminal.buffer.active;
+    const canScroll = deltaY > 0
+      ? buffer.viewportY < buffer.baseY
+      : buffer.viewportY > 0;
+    if (!canScroll) {
+      pixelRemainder = 0;
+      return;
+    }
+
+    event.preventDefault();
+    const screenHeight = surface.querySelector(".xterm-screen")?.clientHeight
+      || surface.clientHeight;
+    const lineHeight = Math.max(1, screenHeight / Math.max(1, terminal.rows));
+    pixelRemainder += deltaY;
+    const lineDelta = Math.trunc(pixelRemainder / lineHeight);
+    if (!lineDelta) return;
+    terminal.scrollLines(lineDelta);
+    pixelRemainder -= lineDelta * lineHeight;
+  }, { passive: false });
+
+  const finishTouch = (event) => {
+    resetTouch();
+    event.stopPropagation();
+  };
+  surface.addEventListener("touchend", finishTouch, { passive: true });
+  surface.addEventListener("touchcancel", finishTouch, { passive: true });
+}
+
 function ensureAgentOutputTerminal() {
   if (state.outputTerminalInstance) return true;
   if (typeof window.Terminal !== "function" || typeof window.FitAddon?.FitAddon !== "function") {
@@ -767,6 +828,7 @@ function ensureAgentOutputTerminal() {
     const fitAddon = new window.FitAddon.FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(elements.agentOutputTerminal);
+    enableAgentOutputTouchScrolling(terminal);
     if (terminal.textarea) {
       terminal.textarea.setAttribute("aria-label", "Agent 最近输出（只读）");
       terminal.textarea.setAttribute("aria-readonly", "true");
