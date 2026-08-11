@@ -773,7 +773,7 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(ValueError, "outside the configured roots"):
                     relay.resolve_workspace_path(str(outside))
 
-    def test_codex_start_allows_an_ordinary_directory_and_uses_structured_arguments(self):
+    def test_codex_start_allows_an_ordinary_directory_and_waits_for_the_new_shell(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir) / "ordinary"
             directory.mkdir()
@@ -783,6 +783,16 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                     "result": {
                         "workspace": {"workspace_id": "w9"},
                         "root_pane": {"pane_id": "w9:p1"},
+                    }
+                }),
+                stderr="",
+            )
+            pane_busy = subprocess.CompletedProcess(
+                [], 1,
+                stdout=json.dumps({
+                    "error": {
+                        "code": "agent_pane_busy",
+                        "message": "agent target pane w9:p1 is not an available shell",
                     }
                 }),
                 stderr="",
@@ -799,8 +809,13 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch.object(relay, "WORKSPACE_ROOTS", [directory.parent.resolve()]),
-                patch.object(relay, "run_herdr_result", side_effect=[created, started]) as run_herdr,
+                patch.object(
+                    relay,
+                    "run_herdr_result",
+                    side_effect=[created, pane_busy, started],
+                ) as run_herdr,
                 patch.object(relay, "submit_agent_prompt", return_value=True) as submit_prompt,
+                patch.object(relay.time, "sleep") as sleep,
             ):
                 result = relay.start_local_codex(str(directory), "inspect; do not run a shell")
 
@@ -816,10 +831,12 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 run_herdr.call_args_list[1],
                 unittest.mock.call(
-                    "agent", "start", "codex", "--kind", "codex", "--pane", "w9:p1",
+                    "agent", "start", "codex-w9", "--kind", "codex", "--pane", "w9:p1",
                     "--timeout", "60000", timeout=75,
                 ),
             )
+            self.assertEqual(run_herdr.call_args_list[2], run_herdr.call_args_list[1])
+            sleep.assert_called_once_with(relay.AGENT_START_PANE_READY_INTERVAL_SECONDS)
             submit_prompt.assert_called_once_with("w9:p1", "inspect; do not run a shell")
 
     async def test_start_agent_message_redacts_prompt_and_broadcasts_new_agent(self):

@@ -150,6 +150,8 @@ AGENT_PROMPT_WAIT_TIMEOUT_MS = 8_000
 AGENT_PROMPT_PROCESS_TIMEOUT_SECONDS = 12
 AGENT_PROMPT_CONFIRM_ATTEMPTS = 15
 AGENT_PROMPT_CONFIRM_INTERVAL_SECONDS = 0.2
+AGENT_START_PANE_READY_TIMEOUT_SECONDS = 10
+AGENT_START_PANE_READY_INTERVAL_SECONDS = 0.1
 
 TOOL_OPTIONS = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
 SUBAGENT_OPTIONS = ["approve all pending", "configure individually", "exit (cancel subagents)"]
@@ -483,6 +485,35 @@ def herdr_error_code(result: subprocess.CompletedProcess) -> str:
     return str(error.get("code", "")) if isinstance(error, dict) else ""
 
 
+def codex_agent_name(workspace_id: str) -> str:
+    """Return a stable agent name that is unique within the Herdr session."""
+    suffix = re.sub(r"[^a-z0-9_-]+", "-", workspace_id.casefold()).strip("-_")
+    if not suffix:
+        raise RuntimeError("Herdr returned an invalid workspace ID")
+    return f"codex-{suffix}"
+
+
+def start_codex_in_pane(pane_id: str, workspace_id: str) -> dict:
+    """Start Codex once a newly created pane reaches its shell prompt."""
+    agent_name = codex_agent_name(workspace_id)
+    deadline = time.monotonic() + AGENT_START_PANE_READY_TIMEOUT_SECONDS
+    while True:
+        started = run_herdr_result(
+            "agent", "start", agent_name,
+            "--kind", "codex",
+            "--pane", pane_id,
+            "--timeout", "60000",
+            timeout=75,
+        )
+        if started.returncode == 0:
+            return parse_herdr_result(started)
+        if herdr_error_code(started) != "agent_pane_busy":
+            return parse_herdr_result(started)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Herdr pane did not become ready for Codex")
+        time.sleep(AGENT_START_PANE_READY_INTERVAL_SECONDS)
+
+
 def get_agent_info(pane_id: str, remote=None) -> dict:
     result = run_herdr_result("agent", "get", pane_id, remote=remote, timeout=5)
     if result.returncode != 0:
@@ -609,14 +640,7 @@ def start_local_codex(cwd: str, prompt: str = "") -> dict:
         if not workspace_id or not pane_id:
             raise RuntimeError("Herdr did not return the new workspace and pane IDs")
 
-        started = run_herdr_result(
-            "agent", "start", "codex",
-            "--kind", "codex",
-            "--pane", pane_id,
-            "--timeout", "60000",
-            timeout=75,
-        )
-        started_result = parse_herdr_result(started)
+        started_result = start_codex_in_pane(pane_id, workspace_id)
         agent = started_result.get("agent") or {}
         if agent.get("pane_id") != pane_id:
             raise RuntimeError("Herdr returned an unexpected agent pane")
