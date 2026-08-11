@@ -707,6 +707,7 @@ input::placeholder {
 
 .agent-card-main {
   min-width: 0;
+  overflow: hidden;
 }
 
 .agent-card-title,
@@ -727,6 +728,7 @@ input::placeholder {
 
 .agent-card-subtitle,
 .agent-card-path {
+  display: block;
   color: var(--muted);
   font-size: 10px;
 }
