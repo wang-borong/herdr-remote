@@ -62,7 +62,7 @@ cd relay
 ./install-tailscale-web.sh --remote-shell
 ```
 
-Remote Shell provides a real PTY with xterm.js, persistent tmux sessions, Git/system maintenance, mobile shortcut keys including Ctrl+X window/split controls, and allowlisted SSH profiles for LAN servers. Native SSH, ProxyJump, and optional subnet-router workflows remain available even when the browser console is offline. See [Remote Shell and LAN access](REMOTE_SHELL.md).
+Remote Shell provides a real PTY with xterm.js, persistent tmux sessions, Git/system maintenance, mouse support, touch-friendly mobile controls, a dedicated Ctrl+B web tmux prefix that does not conflict with Herdr's Ctrl+X, and allowlisted SSH profiles for LAN servers. Native SSH, ProxyJump, and optional subnet-router workflows remain available even when the browser console is offline. See [Remote Shell and LAN access](REMOTE_SHELL.md).
 
 ## Telegram Bot
 

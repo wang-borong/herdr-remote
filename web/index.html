@@ -339,16 +339,16 @@
                 <button type="button" data-terminal-key="ctrl-c">Ctrl+C</button>
                 <button type="button" data-terminal-key="ctrl-l">Ctrl+L</button>
                 <button type="button" id="terminal-paste-button">粘贴</button>
-                <div class="tmux-keybar" id="tmux-keybar" role="group" aria-label="tmux Ctrl+X 快捷控制" hidden>
-                  <span>tmux · Ctrl+X</span>
-                  <button type="button" data-tmux-action="prefix" title="仅发送 Ctrl+X 前缀">Prefix</button>
-                  <button type="button" data-tmux-action="new-window" title="Ctrl+X c">新窗口</button>
-                  <button type="button" data-tmux-action="previous-window" title="Ctrl+X p">上一窗</button>
-                  <button type="button" data-tmux-action="next-window" title="Ctrl+X n">下一窗</button>
-                  <button type="button" data-tmux-action="window-list" title="Ctrl+X w">窗口列表</button>
-                  <button type="button" data-tmux-action="split-horizontal" title="Ctrl+X |">左右分屏</button>
-                  <button type="button" data-tmux-action="split-vertical" title="Ctrl+X _">上下分屏</button>
-                  <button type="button" data-tmux-action="zoom" title="Ctrl+X z">缩放</button>
+                <div class="tmux-keybar" id="tmux-keybar" role="group" aria-label="tmux Ctrl+B 快捷控制（支持鼠标和触摸）" hidden>
+                  <span>tmux · Ctrl+B</span>
+                  <button type="button" id="terminal-tmux-prefix-button" data-tmux-action="prefix" aria-pressed="false" title="作用于下一次终端按键">Prefix</button>
+                  <button type="button" data-tmux-action="new-window" title="Ctrl+B c">新窗口</button>
+                  <button type="button" data-tmux-action="previous-window" title="Ctrl+B p">上一窗</button>
+                  <button type="button" data-tmux-action="next-window" title="Ctrl+B n">下一窗</button>
+                  <button type="button" data-tmux-action="window-list" title="Ctrl+B w">窗口列表</button>
+                  <button type="button" data-tmux-action="split-horizontal" title="Ctrl+B |">左右分屏</button>
+                  <button type="button" data-tmux-action="split-vertical" title="Ctrl+B _">上下分屏</button>
+                  <button type="button" data-tmux-action="zoom" title="Ctrl+B z">缩放</button>
                 </div>
               </div>
             </section>

@@ -91,7 +91,7 @@ cd relay
 ./install-tailscale-web.sh --remote-shell
 ```
 
-该模式会安装 OpenSSH Client 和 tmux、开启官方 Tailscale SSH，并在 Dashboard 中增加响应式 Remote Shell 页面。手机端提供 Esc、Tab、一次性 Ctrl、Ctrl+C、四向方向键、PgUp、PgDn、粘贴，以及 Ctrl+X 新建/切换窗口、分屏和缩放等 tmux 快捷按钮；PC 端提供服务器列表与大尺寸终端双栏布局。
+该模式会安装 OpenSSH Client 和 tmux、开启官方 Tailscale SSH，并在 Dashboard 中增加响应式 Remote Shell 页面。Web 专用 tmux Server 默认开启鼠标，并使用不会与 Herdr `Ctrl+X` 冲突的 `Ctrl+B` Prefix。手机端提供可触碰的 Esc、Tab、一次性 Ctrl、Ctrl+C、四向方向键、PgUp、PgDn、粘贴，以及新建/切换窗口、分屏和缩放等 tmux 快捷按钮；PC 端提供服务器列表与大尺寸终端双栏布局。
 
 局域网服务器可以直接在网页中添加，Herdr 只保存 SSH Target 和端口，不保存密码或私钥。更完整的使用方式、ProxyJump 和可选子网路由见 [Remote Shell 文档](REMOTE_SHELL.md)。
 

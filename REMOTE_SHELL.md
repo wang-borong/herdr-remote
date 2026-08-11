@@ -63,11 +63,12 @@ ssh 本机用户名@cachyos-wpc
 - **SSH 服务器**：由本机作为网关，连接配置好的局域网 SSH 目标。
 - **tmux 持久会话**：浏览器断线、手机切后台或 Relay 重连后，可重新附着到原会话。
 - **移动快捷键**：Esc、Tab、一次性 Ctrl、Ctrl+C、Ctrl+L、四向方向键、PgUp、PgDn 和剪贴板粘贴。
-- **tmux 快捷栏**：支持单独发送 Ctrl+X Prefix，以及新建/切换窗口、窗口列表、左右/上下分屏和 Pane 缩放。
+- **tmux 鼠标与触控**：Web 专用 tmux Server 默认开启鼠标；手机端可直接触碰快捷栏完成窗口切换、分屏和缩放。
+- **tmux 快捷栏**：支持单独启用 Ctrl+B Prefix，以及新建/切换窗口、窗口列表、左右/上下分屏和 Pane 缩放。
 - **快捷命令**：`pwd`、`ls -la`、`git status`、`git diff --stat`、`htop`。
 - **终端字体**：网页本地提供 FiraCode Nerd Font Mono，Powerline、Starship 与 Nerd Font 图标不依赖手机或电脑预装字体。
 
-点按单独的 **Ctrl** 后，按钮会保持高亮，并把下一次字母、方向键或 PgUp/PgDn 作为 Ctrl 组合发送；再次点按可取消。
+点按单独的 **Ctrl** 后，按钮会保持高亮，并把下一次字母、方向键或 PgUp/PgDn 作为 Ctrl 组合发送；再次点按可取消。焦点切换不会消耗待发送的 Ctrl，因此手机上点按 Ctrl 后再快速输入字母也能组成正确按键。
 
 每个入口使用独立的 tmux Session，并使用专用 socket：
 
@@ -76,17 +77,19 @@ tmux -L herdr-web list-sessions
 tmux -L herdr-web attach -t herdr-local
 ```
 
-会话可以跨浏览器断线和 Relay 重启保留，但系统重启后需要重新创建。
+会话可以跨浏览器断线和 Relay 重启保留，但系统重启后需要重新创建。该专用 Server 会固定启用 `mouse on`，并使用 `Ctrl+B` 作为 Prefix；用户普通 tmux 配置不受影响，Herdr 的 `Ctrl+X` 也可以正常透传。
 
-网页 tmux 快捷栏按当前工作机的 `Ctrl+X` Prefix 配置发送以下组合：
+网页 tmux 快捷栏发送以下组合：
 
 ```text
-Ctrl+X c    新建窗口
-Ctrl+X p/n  上一个 / 下一个窗口
-Ctrl+X w    窗口列表
-Ctrl+X |/_  左右 / 上下分屏
-Ctrl+X z    缩放当前 Pane
+Ctrl+B c    新建窗口
+Ctrl+B p/n  上一个 / 下一个窗口
+Ctrl+B w    窗口列表
+Ctrl+B |/_  左右 / 上下分屏
+Ctrl+B z    缩放当前 Pane
 ```
+
+单独点按 **Prefix** 后，按钮会保持高亮，并把下一次按键与 `Ctrl+B` 原子发送；这可以避免浏览器焦点序列打断 Prefix。PC 可直接使用鼠标操作 tmux，手机可触碰快捷栏按钮操作。
 
 ## 添加局域网服务器
 

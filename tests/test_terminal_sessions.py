@@ -2,6 +2,7 @@ import asyncio
 import base64
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ sys.path.insert(0, str(ROOT / "relay"))
 from terminal_sessions import (
     TerminalConfigError,
     TerminalSession,
+    configure_tmux_server,
     delete_ssh_profile,
     load_ssh_profiles,
     normalize_ssh_profile,
@@ -21,6 +23,7 @@ from terminal_sessions import (
     save_ssh_profile,
     terminal_environment,
     terminal_profile_command,
+    tmux_server_configuration_command,
     terminate_persistent_session,
     validated_terminal_dimensions,
 )
@@ -76,6 +79,50 @@ class TerminalProfileTests(unittest.TestCase):
         self.assertIn("/usr/bin/ssh -tt", command[-1])
         self.assertIn("-p 2222", command[-1])
         self.assertEqual(cwd, Path("/tmp"))
+
+    def test_web_tmux_configuration_enables_mouse_and_scoped_prefix_bindings(self):
+        command = tmux_server_configuration_command("/usr/bin/tmux")
+        commands = []
+        current_command = []
+        for argument in command[3:]:
+            if argument == ";":
+                commands.append(current_command)
+                current_command = []
+            else:
+                current_command.append(argument)
+        commands.append(current_command)
+
+        self.assertEqual(command[:4], ["/usr/bin/tmux", "-L", "herdr-web", "set-option"])
+        self.assertIn(["set-option", "-g", "mouse", "on"], commands)
+        self.assertIn(["set-option", "-g", "prefix", "C-b"], commands)
+        self.assertIn(["set-option", "-g", "prefix2", "None"], commands)
+        self.assertIn(["bind-key", "-T", "prefix", "C-b", "send-prefix"], commands)
+        self.assertIn(["bind-key", "-T", "prefix", "p", "previous-window"], commands)
+        self.assertIn(["bind-key", "-T", "prefix", "n", "next-window"], commands)
+
+        with patch("terminal_sessions.subprocess.run") as run:
+            run.return_value.returncode = 0
+            configure_tmux_server("/usr/bin/tmux")
+
+        run.assert_called_once_with(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+
+    def test_web_tmux_configuration_retries_until_the_server_is_ready(self):
+        failed = subprocess.CompletedProcess([], 1)
+        configured = subprocess.CompletedProcess([], 0)
+        with (
+            patch("terminal_sessions.subprocess.run", side_effect=[failed, configured]) as run,
+            patch("terminal_sessions.time.sleep") as sleep,
+        ):
+            configure_tmux_server("/usr/bin/tmux")
+
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.05)
 
     def test_persistent_ssh_session_tracks_endpoint_and_can_be_terminated(self):
         profile = normalize_ssh_profile({

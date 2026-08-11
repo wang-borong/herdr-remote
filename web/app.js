@@ -94,6 +94,7 @@ const elements = {
   terminalOverlayCopy: byId("terminal-overlay-copy"),
   terminalPasteButton: byId("terminal-paste-button"),
   terminalCtrlButton: byId("terminal-ctrl-button"),
+  terminalTmuxPrefixButton: byId("terminal-tmux-prefix-button"),
   terminalKeybar: document.querySelector(".mobile-keybar"),
   tmuxKeybar: byId("tmux-keybar"),
   sshHostDialog: byId("ssh-host-dialog"),
@@ -143,7 +144,8 @@ const TERMINAL_CTRL_KEY_SEQUENCES = {
   "page-down": "\x1b[6;5~",
 };
 
-const TMUX_PREFIX_SEQUENCE = "\x18";
+const TERMINAL_FOCUS_SEQUENCES = new Set(["\x1b[I", "\x1b[O"]);
+const TMUX_PREFIX_SEQUENCE = "\x02";
 const TMUX_ACTION_SEQUENCES = {
   prefix: TMUX_PREFIX_SEQUENCE,
   "new-window": `${TMUX_PREFIX_SEQUENCE}c`,
@@ -200,6 +202,7 @@ const state = {
   terminalConnected: false,
   terminalPersistent: false,
   terminalCtrlPending: false,
+  terminalTmuxPrefixPending: false,
   terminalShouldReconnect: false,
   terminalInstance: null,
   terminalFitAddon: null,
@@ -639,7 +642,7 @@ function ensureWebTerminal() {
   const fitAddon = new window.FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.open(elements.webTerminal);
-  terminal.onData((data) => sendTerminalText(applyTerminalCtrlToInput(data)));
+  terminal.onData((data) => sendTerminalText(applyTerminalModifiersToInput(data)));
   state.terminalInstance = terminal;
   state.terminalFitAddon = fitAddon;
 
@@ -822,6 +825,7 @@ function sendTerminalText(text) {
 
 function setTerminalCtrlPending(pending) {
   const active = pending === true && state.terminalConnected;
+  if (active) setTerminalTmuxPrefixPending(false);
   state.terminalCtrlPending = active;
   elements.terminalCtrlButton.classList.toggle("is-active", active);
   elements.terminalCtrlButton.setAttribute("aria-pressed", String(active));
@@ -830,24 +834,54 @@ function setTerminalCtrlPending(pending) {
     : "作用于下一次终端输入";
 }
 
-function terminalSequenceWithPendingCtrl(key, sequence) {
-  if (!state.terminalCtrlPending) return sequence;
-  setTerminalCtrlPending(false);
-  return TERMINAL_CTRL_KEY_SEQUENCES[key] || sequence;
+function setTerminalTmuxPrefixPending(pending) {
+  const active = pending === true && state.terminalConnected && state.terminalPersistent;
+  if (active) setTerminalCtrlPending(false);
+  state.terminalTmuxPrefixPending = active;
+  elements.terminalTmuxPrefixButton.classList.toggle("is-active", active);
+  elements.terminalTmuxPrefixButton.setAttribute("aria-pressed", String(active));
+  elements.terminalTmuxPrefixButton.title = active
+    ? "tmux Prefix 已启用；下一次按键将与 Ctrl+B 一次发送"
+    : "作用于下一次终端按键";
 }
 
-function applyTerminalCtrlToInput(input) {
-  if (!state.terminalCtrlPending) return input;
+function clearTerminalModifierState() {
   setTerminalCtrlPending(false);
+  setTerminalTmuxPrefixPending(false);
+}
+
+function ctrlSequenceForInput(input) {
   const modifiedSequence = Object.entries(TERMINAL_KEY_SEQUENCES)
     .find(([key, sequence]) => sequence === input && TERMINAL_CTRL_KEY_SEQUENCES[key]);
   if (modifiedSequence) return TERMINAL_CTRL_KEY_SEQUENCES[modifiedSequence[0]];
   if (input === " ") return "\x00";
   if (input === "?") return "\x7f";
-  if (input.length !== 1) return input;
+  if (input.length !== 1) return null;
   let code = input.charCodeAt(0);
   if (code >= 97 && code <= 122) code -= 32;
-  return code >= 64 && code <= 95 ? String.fromCharCode(code - 64) : input;
+  return code >= 64 && code <= 95 ? String.fromCharCode(code - 64) : null;
+}
+
+function terminalSequenceWithPendingModifiers(key, sequence) {
+  if (state.terminalTmuxPrefixPending) {
+    setTerminalTmuxPrefixPending(false);
+    return `${TMUX_PREFIX_SEQUENCE}${sequence}`;
+  }
+  if (!state.terminalCtrlPending) return sequence;
+  setTerminalCtrlPending(false);
+  return TERMINAL_CTRL_KEY_SEQUENCES[key] || sequence;
+}
+
+function applyTerminalModifiersToInput(input) {
+  if (TERMINAL_FOCUS_SEQUENCES.has(input)) return input;
+  if (state.terminalTmuxPrefixPending) {
+    setTerminalTmuxPrefixPending(false);
+    return `${TMUX_PREFIX_SEQUENCE}${input}`;
+  }
+  if (!state.terminalCtrlPending) return input;
+  const modified = ctrlSequenceForInput(input);
+  setTerminalCtrlPending(false);
+  return modified ?? input;
 }
 
 function closeTerminalSelection() {
@@ -979,11 +1013,11 @@ function createTerminalProfileCard(profile) {
 
 function renderTerminalConnection() {
   const profile = terminalProfileById(state.activeTerminalProfile);
-  if (!state.terminalConnected) setTerminalCtrlPending(false);
+  if (!state.terminalConnected) clearTerminalModifierState();
   elements.terminalCtrlButton.disabled = !state.terminalConnected;
   elements.tmuxKeybar.hidden = !state.terminalPersistent;
   elements.tmuxKeybar.querySelectorAll("button").forEach((button) => {
-    button.disabled = !state.terminalConnected;
+    button.disabled = !state.terminalConnected || !state.terminalPersistent;
   });
   if (!profile) return;
   elements.terminalProfileAvatar.className = `machine-avatar is-${profile.color || "cyan"}`;
@@ -1098,7 +1132,7 @@ async function copyText(text, title, detail) {
 
 async function pasteIntoTerminal() {
   if (!state.terminalConnected) return;
-  setTerminalCtrlPending(false);
+  clearTerminalModifierState();
   try {
     const text = await navigator.clipboard.readText();
     if (text) sendTerminalText(text);
@@ -1836,24 +1870,32 @@ function bindEvents() {
     button.addEventListener("click", () => {
       const key = button.dataset.terminalKey;
       const sequence = TERMINAL_KEY_SEQUENCES[key] || "";
-      sendTerminalText(terminalSequenceWithPendingCtrl(key, sequence));
+      sendTerminalText(terminalSequenceWithPendingModifiers(key, sequence));
       state.terminalInstance?.focus();
     });
   });
   elements.terminalCtrlButton.addEventListener("click", () => {
-    setTerminalCtrlPending(!state.terminalCtrlPending);
+    const pending = !state.terminalCtrlPending;
     state.terminalInstance?.focus();
+    setTerminalCtrlPending(pending);
   });
   document.querySelectorAll("[data-tmux-action]").forEach((button) => {
     button.addEventListener("click", () => {
-      setTerminalCtrlPending(false);
-      sendTerminalText(TMUX_ACTION_SEQUENCES[button.dataset.tmuxAction] || "");
+      const action = button.dataset.tmuxAction;
+      if (action === "prefix") {
+        const pending = !state.terminalTmuxPrefixPending;
+        state.terminalInstance?.focus();
+        setTerminalTmuxPrefixPending(pending);
+        return;
+      }
+      clearTerminalModifierState();
+      sendTerminalText(TMUX_ACTION_SEQUENCES[action] || "");
       state.terminalInstance?.focus();
     });
   });
   document.querySelectorAll("[data-terminal-command]").forEach((button) => {
     button.addEventListener("click", () => {
-      setTerminalCtrlPending(false);
+      clearTerminalModifierState();
       sendTerminalText(`${button.dataset.terminalCommand}\r`);
       state.terminalInstance?.focus();
     });

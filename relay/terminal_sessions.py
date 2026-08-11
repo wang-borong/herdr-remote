@@ -18,6 +18,7 @@ import signal
 import struct
 import subprocess
 import termios
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -27,6 +28,19 @@ PROFILE_COLORS = {"violet", "cyan", "green", "amber", "rose"}
 MAX_SSH_PROFILES = 32
 MAX_TERMINAL_INPUT_BYTES = 16 * 1024
 TMUX_SOCKET_NAME = "herdr-web"
+TMUX_CONFIGURATION_ATTEMPTS = 40
+TMUX_CONFIGURATION_RETRY_SECONDS = 0.05
+TMUX_WEB_PREFIX = "C-b"
+TMUX_WEB_BINDINGS = (
+    ("C-b", "send-prefix"),
+    ("c", "new-window", "-c", "#{pane_current_path}"),
+    ("p", "previous-window"),
+    ("n", "next-window"),
+    ("w", "choose-tree", "-Zw"),
+    ("|", "split-window", "-h", "-c", "#{pane_current_path}"),
+    ("_", "split-window", "-v", "-c", "#{pane_current_path}"),
+    ("z", "resize-pane", "-Z"),
+)
 
 
 class TerminalConfigError(ValueError):
@@ -236,6 +250,41 @@ def terminal_profile_command(
     return command, cwd, True
 
 
+def tmux_server_configuration_command(tmux_binary: str) -> list[str]:
+    """Build the dedicated web tmux server configuration command."""
+    command = [
+        tmux_binary,
+        "-L", TMUX_SOCKET_NAME,
+        "set-option", "-g", "mouse", "on",
+        ";", "set-option", "-g", "prefix", TMUX_WEB_PREFIX,
+        ";", "set-option", "-g", "prefix2", "None",
+    ]
+    for key, *binding in TMUX_WEB_BINDINGS:
+        command.extend([";", "bind-key", "-T", "prefix", key, *binding])
+    return command
+
+
+def configure_tmux_server(tmux_binary: str) -> None:
+    """Apply deterministic mouse and key bindings to the web-only tmux server."""
+    command = tmux_server_configuration_command(tmux_binary)
+    for attempt in range(TMUX_CONFIGURATION_ATTEMPTS):
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise TerminalConfigError("Could not configure the web tmux session") from error
+        if result.returncode == 0:
+            return
+        if attempt + 1 < TMUX_CONFIGURATION_ATTEMPTS:
+            time.sleep(TMUX_CONFIGURATION_RETRY_SECONDS)
+    raise TerminalConfigError("Could not configure the web tmux session")
+
+
 def persistent_session_name(profile: dict) -> str:
     if profile.get("kind") == "local":
         return "herdr-local"
@@ -364,6 +413,12 @@ class TerminalSession:
             os.close(slave_fd)
         os.set_blocking(master_fd, False)
         self.master_fd = master_fd
+        if self.persistent and self.tmux_binary:
+            try:
+                await asyncio.to_thread(configure_tmux_server, self.tmux_binary)
+            except TerminalConfigError:
+                await self.close()
+                raise
 
     def start_reader(self) -> None:
         if not self.process or self.master_fd is None or self.reader_task:

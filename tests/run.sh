@@ -94,7 +94,10 @@ WEB_JS="$DIR/web/app.js"
   grep -q 'data-terminal-key="left"' "$WEB" && grep -q 'data-terminal-key="right"' "$WEB" && \
   grep -q 'data-terminal-key="page-up"' "$WEB" && grep -q 'data-terminal-key="page-down"' "$WEB" && \
   grep -q "terminal-ctrl-button" "$WEB" && grep -q "TERMINAL_CTRL_KEY_SEQUENCES" "$WEB_JS" && \
+  grep -q 'id="terminal-tmux-prefix-button"' "$WEB" && grep -q "tmux · Ctrl+B" "$WEB" && \
   grep -q "TMUX_ACTION_SEQUENCES" "$WEB_JS" && \
+  grep -q "TERMINAL_FOCUS_SEQUENCES" "$WEB_JS" && grep -q 'TMUX_PREFIX_SEQUENCE = "\\x02"' "$WEB_JS" && \
+  grep -q "touch-action: manipulation" "$DIR/web/app.css" && \
   [ -f "$DIR/web/vendor/xterm/xterm.js" ] && \
   [ -f "$DIR/web/vendor/xterm/xterm.css" ] && \
   [ -f "$DIR/web/vendor/xterm/addon-fit.js" ] && \

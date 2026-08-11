@@ -2589,6 +2589,10 @@ dialog {
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 9px;
   font-weight: 700;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .mobile-keybar button:active {
