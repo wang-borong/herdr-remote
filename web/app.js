@@ -1364,6 +1364,7 @@ function renderDetail() {
 
 function renderBlockedBanner(agent) {
   const blocked = normalizedStatus(agent) === "blocked";
+  elements.detailConsole.classList.toggle("has-blocked-banner", blocked);
   elements.blockedBanner.hidden = !blocked;
   elements.approvalActions.replaceChildren();
   if (!blocked) return;
