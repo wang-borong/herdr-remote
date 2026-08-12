@@ -107,6 +107,7 @@ WEB_JS="$DIR/web/app.js"
   grep -q "terminal-ctrl-button" "$WEB" && grep -q "TERMINAL_CTRL_KEY_SEQUENCES" "$WEB_JS" && \
   grep -q 'id="terminal-tmux-prefix-button"' "$WEB" && grep -q "tmux · Ctrl+B" "$WEB" && \
   grep -q "TMUX_ACTION_SEQUENCES" "$WEB_JS" && \
+  grep -q "sendTerminalShortcutText" "$WEB_JS" && grep -q "Pane缩放" "$WEB" && \
   grep -q "TERMINAL_FOCUS_SEQUENCES" "$WEB_JS" && grep -q 'TMUX_PREFIX_SEQUENCE = "\\x02"' "$WEB_JS" && \
   grep -q "touch-action: pan-x pinch-zoom" "$DIR/web/app.css" && \
   grep -q "touch-action: manipulation" "$DIR/web/app.css" && \

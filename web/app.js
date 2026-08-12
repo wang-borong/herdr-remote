@@ -1130,6 +1130,13 @@ function sendTerminalText(text) {
   }
 }
 
+function sendTerminalShortcutText(text) {
+  // xterm can emit DEC focus sequences while a toolbar button hands focus
+  // back. Send those first so they cannot merge with Esc or tmux input.
+  state.terminalInstance?.focus();
+  sendTerminalText(text);
+}
+
 function setTerminalCtrlPending(pending) {
   const active = pending === true && state.terminalConnected;
   if (active) setTerminalTmuxPrefixPending(false);
@@ -2261,8 +2268,7 @@ function bindEvents() {
     button.addEventListener("click", () => {
       const key = button.dataset.terminalKey;
       const sequence = TERMINAL_KEY_SEQUENCES[key] || "";
-      sendTerminalText(terminalSequenceWithPendingModifiers(key, sequence));
-      state.terminalInstance?.focus();
+      sendTerminalShortcutText(terminalSequenceWithPendingModifiers(key, sequence));
     });
   });
   elements.terminalCtrlButton.addEventListener("click", () => {
@@ -2280,15 +2286,13 @@ function bindEvents() {
         return;
       }
       clearTerminalModifierState();
-      sendTerminalText(TMUX_ACTION_SEQUENCES[action] || "");
-      state.terminalInstance?.focus();
+      sendTerminalShortcutText(TMUX_ACTION_SEQUENCES[action] || "");
     });
   });
   document.querySelectorAll("[data-terminal-command]").forEach((button) => {
     button.addEventListener("click", () => {
       clearTerminalModifierState();
-      sendTerminalText(`${button.dataset.terminalCommand}\r`);
-      state.terminalInstance?.focus();
+      sendTerminalShortcutText(`${button.dataset.terminalCommand}\r`);
     });
   });
   elements.terminalPasteButton.addEventListener("click", pasteIntoTerminal);
