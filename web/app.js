@@ -228,7 +228,6 @@ const state = {
 };
 
 const initialUrl = new URL(window.location.href);
-const initialPane = initialUrl.searchParams.get("pane");
 const initialView = initialUrl.searchParams.get("view") === "terminal" ? "terminal" : "agents";
 const initialTerminalProfile = initialUrl.searchParams.get("terminal");
 
@@ -1641,8 +1640,9 @@ function createAgentListEmpty() {
 function selectInitialAgentIfNeeded() {
   if (state.activeView !== "agents") return;
   if (state.activePane && activeAgent()) return;
-  if (initialPane && state.agents.some((agent) => agent.pane_id === initialPane)) {
-    selectAgent(initialPane, false);
+  const requestedPane = paneIdFromUrl();
+  if (requestedPane && state.agents.some((agent) => agent.pane_id === requestedPane)) {
+    selectAgent(requestedPane, false);
     return;
   }
   if (isDesktop() && state.agents.length) {
@@ -1680,6 +1680,12 @@ function updatePaneUrl(paneId) {
   if (paneId) url.searchParams.set("pane", paneId);
   else url.searchParams.delete("pane");
   history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function paneIdFromUrl() {
+  // Mobile Back can remove a deep-linked pane before the next Agent snapshot.
+  // Always read the live URL so a stale startup value cannot reopen the detail.
+  return new URL(window.location.href).searchParams.get("pane");
 }
 
 function renderDetail() {
@@ -2334,7 +2340,7 @@ function bindEvents() {
       if (profileId && profileId !== state.activeTerminalProfile) openTerminalProfile(profileId);
       return;
     }
-    const pane = url.searchParams.get("pane");
+    const pane = paneIdFromUrl();
     if (pane && state.agents.some((agent) => agent.pane_id === pane)) selectAgent(pane, false);
     else if (!pane) clearAgentSelection();
   });

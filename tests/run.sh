@@ -94,6 +94,7 @@ WEB_JS="$DIR/web/app.js"
   grep -q "C-c" "$WEB_JS" && grep -q "terminal_open" "$WEB_JS" && \
   grep -q 'id="agent-output-terminal"' "$WEB" && grep -q "ansi_content" "$WEB_JS" && \
   grep -q "ensureAgentOutputTerminal" "$WEB_JS" && \
+  grep -q "paneIdFromUrl" "$WEB_JS" && \
   grep -q "enableAgentOutputTouchScrolling" "$WEB_JS" && \
   grep -q "enableWebTerminalTouchScrolling" "$WEB_JS" && \
   grep -q 'new WheelEvent("wheel"' "$WEB_JS" && \
