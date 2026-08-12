@@ -722,6 +722,7 @@ function ensureWebTerminal() {
   const fitAddon = new window.FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.open(elements.webTerminal);
+  enableWebTerminalTouchScrolling(terminal);
   terminal.onData((data) => sendTerminalText(applyTerminalModifiersToInput(data)));
   state.terminalInstance = terminal;
   state.terminalFitAddon = fitAddon;
@@ -792,6 +793,97 @@ function enableAgentOutputTouchScrolling(terminal) {
     if (!lineDelta) return;
     terminal.scrollLines(lineDelta);
     pixelRemainder -= lineDelta * lineHeight;
+  }, { passive: false });
+
+  const finishTouch = (event) => {
+    resetTouch();
+    event.stopPropagation();
+  };
+  surface.addEventListener("touchend", finishTouch, { passive: true });
+  surface.addEventListener("touchcancel", finishTouch, { passive: true });
+}
+
+function enableWebTerminalTouchScrolling(terminal) {
+  const surface = terminal.element;
+  if (!surface || typeof window.WheelEvent !== "function") return;
+
+  let originX = null;
+  let originY = null;
+  let lastTouchY = null;
+  let gestureAxis = null;
+  let pixelRemainder = 0;
+  const resetTouch = () => {
+    originX = null;
+    originY = null;
+    lastTouchY = null;
+    gestureAxis = null;
+    pixelRemainder = 0;
+  };
+
+  surface.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 1) {
+      resetTouch();
+      return;
+    }
+    const touch = event.touches[0];
+    originX = touch.clientX;
+    originY = touch.clientY;
+    lastTouchY = touch.clientY;
+    gestureAxis = null;
+    pixelRemainder = 0;
+    event.stopPropagation();
+  }, { passive: true });
+
+  surface.addEventListener("touchmove", (event) => {
+    if (lastTouchY === null || event.touches.length !== 1) {
+      resetTouch();
+      return;
+    }
+
+    const touch = event.touches[0];
+    const deltaY = lastTouchY - touch.clientY;
+    const totalX = Math.abs(originX - touch.clientX);
+    const totalY = Math.abs(originY - touch.clientY);
+    lastTouchY = touch.clientY;
+    event.stopPropagation();
+
+    if (gestureAxis === null && Math.max(totalX, totalY) >= 4) {
+      gestureAxis = totalY > totalX ? "vertical" : "horizontal";
+    }
+    if (gestureAxis !== "vertical" || !deltaY) return;
+
+    event.preventDefault();
+
+    const buffer = terminal.buffer.active;
+    if (terminal.modes.mouseTrackingMode === "none" && buffer.baseY > 0) {
+      const screenHeight = surface.querySelector(".xterm-screen")?.clientHeight
+        || surface.clientHeight;
+      const lineHeight = Math.max(1, screenHeight / Math.max(1, terminal.rows));
+      pixelRemainder += deltaY;
+      const lineDelta = Math.trunc(pixelRemainder / lineHeight);
+      if (!lineDelta) return;
+      terminal.scrollLines(lineDelta);
+      pixelRemainder -= lineDelta * lineHeight;
+      return;
+    }
+
+    pixelRemainder = 0;
+    surface.dispatchEvent(new WheelEvent("wheel", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      screenX: touch.screenX,
+      screenY: touch.screenY,
+      deltaX: 0,
+      deltaY,
+      deltaMode: 0,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+    }));
   }, { passive: false });
 
   const finishTouch = (event) => {

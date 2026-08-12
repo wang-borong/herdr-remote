@@ -2626,6 +2626,7 @@ dialog {
 .web-terminal .xterm {
   height: 100%;
   padding: 0;
+  touch-action: pan-x pinch-zoom;
 }
 
 .web-terminal .xterm-viewport {

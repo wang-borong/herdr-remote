@@ -95,6 +95,9 @@ WEB_JS="$DIR/web/app.js"
   grep -q 'id="agent-output-terminal"' "$WEB" && grep -q "ansi_content" "$WEB_JS" && \
   grep -q "ensureAgentOutputTerminal" "$WEB_JS" && \
   grep -q "enableAgentOutputTouchScrolling" "$WEB_JS" && \
+  grep -q "enableWebTerminalTouchScrolling" "$WEB_JS" && \
+  grep -q 'new WheelEvent("wheel"' "$WEB_JS" && \
+  grep -q 'terminal.modes.mouseTrackingMode === "none"' "$WEB_JS" && \
   grep -q 'addEventListener("touchmove"' "$WEB_JS" && \
   grep -q "select option" "$DIR/web/app.css" && grep -q "width: fit-content" "$DIR/web/app.css" && \
   grep -q "ssh_profile_save" "$WEB_JS" && grep -q "Herdr FiraCode Nerd" "$WEB_JS" && \
@@ -105,6 +108,7 @@ WEB_JS="$DIR/web/app.js"
   grep -q 'id="terminal-tmux-prefix-button"' "$WEB" && grep -q "tmux · Ctrl+B" "$WEB" && \
   grep -q "TMUX_ACTION_SEQUENCES" "$WEB_JS" && \
   grep -q "TERMINAL_FOCUS_SEQUENCES" "$WEB_JS" && grep -q 'TMUX_PREFIX_SEQUENCE = "\\x02"' "$WEB_JS" && \
+  grep -q "touch-action: pan-x pinch-zoom" "$DIR/web/app.css" && \
   grep -q "touch-action: manipulation" "$DIR/web/app.css" && \
   [ -f "$DIR/web/vendor/xterm/xterm.js" ] && \
   [ -f "$DIR/web/vendor/xterm/xterm.css" ] && \
