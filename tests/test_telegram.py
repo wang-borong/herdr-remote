@@ -34,9 +34,17 @@ def make_agents(count, *, status="idle", project="project"):
     ]
 
 
-def make_directory_listing(path="/home/wbr/Workspace/others", *, can_start_agent=False):
+def make_directory_listing(
+    path="/home/wbr/Workspace/others",
+    *,
+    can_start_agent=False,
+    source_id="local",
+    source_label="本机",
+):
     return {
         "type": "directory_listing",
+        "source_id": source_id,
+        "source_label": source_label,
         "path": path,
         "display_path": path.replace("/home/wbr", "~"),
         "parent": "/home/wbr/Workspace" if path else None,
@@ -158,6 +166,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         tg.agent_sources = []
         tg.relay_connected = False
         tg.pending.clear()
+        tg.selected_agent_sources.clear()
         tg.selected_workspace_dirs.clear()
         tg.directory_path_tokens.clear()
         tg.approval_tokens.clear()
@@ -173,6 +182,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         tg.agents = []
         tg.agent_sources = []
         tg.relay_connected = False
+        tg.selected_agent_sources.clear()
         tg.selected_workspace_dirs.clear()
         tg.directory_path_tokens.clear()
         tg.approval_tokens.clear()
@@ -298,7 +308,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(
             disconnected_actions,
-            {"picker", "dashboard", "help", "browse", "new_codex"},
+            {"picker", "dashboard", "help", "hosts", "browse", "new_codex"},
         )
 
         tg.relay_connected = True
@@ -345,6 +355,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
 
         command_text, command_kwargs, _ = command_update.message.replies[0]
         self.assertIn("/start", command_text)
+        self.assertIn("/hosts", command_text)
         self.assertIn("命令补全", command_text)
         self.assertEqual(command_kwargs["parse_mode"], "HTML")
 
@@ -367,8 +378,8 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [command.command for command in commands],
             [
-                "start", "agents", "status", "read", "reply", "send", "interrupt", "digest",
-                "browse", "cd", "cwd", "codex", "help",
+                "start", "agents", "status", "hosts", "read", "reply", "send", "interrupt",
+                "digest", "browse", "cd", "cwd", "codex", "help",
             ],
         )
         self.assertNotIn("trust", [command.command for command in commands])
@@ -378,6 +389,121 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
             tg.MenuButtonCommands,
         )
 
+    async def test_directory_and_codex_requests_include_selected_source(self):
+        listing = make_directory_listing(source_id="server", source_label="Herdr 192.168.2.99")
+        with patch.object(tg, "relay_request", AsyncMock(return_value=listing)) as request:
+            await tg.list_directories_from_relay("~/Workspace", source_id="server")
+
+        request.assert_awaited_once_with(
+            {
+                "type": "list_directories",
+                "source_id": "server",
+                "path": "~/Workspace",
+            },
+            "directory_listing",
+        )
+
+        started = {
+            "pane_id": "server::w9:p1",
+            "source_id": "server",
+            "cwd": "/home/wbr/Workspace/project",
+        }
+        with patch.object(
+            tg,
+            "relay_request",
+            AsyncMock(return_value={"type": "agent_started", "agent": started}),
+        ) as request:
+            await tg.start_codex_from_relay(
+                "/home/wbr/Workspace/project",
+                "run tests",
+                source_id="server",
+            )
+
+        request.assert_awaited_once_with(
+            {
+                "type": "start_agent",
+                "kind": "codex",
+                "source_id": "server",
+                "cwd": "/home/wbr/Workspace/project",
+                "prompt": "run tests",
+            },
+            "agent_started",
+            timeout=90,
+        )
+
+    async def test_hosts_command_selects_online_remote_source_and_opens_its_roots(self):
+        tg.relay_connected = True
+        tg.agent_sources = [
+            {
+                "id": "local",
+                "label": "本机",
+                "status": "online",
+                "agent_count": 2,
+                "can_browse": True,
+            },
+            {
+                "id": "server",
+                "label": "Herdr 192.168.2.99",
+                "status": "online",
+                "agent_count": 1,
+                "can_browse": True,
+            },
+        ]
+        tg.selected_workspace_dirs[42] = "/home/wbr/Workspace/local-project"
+        update = make_update()
+
+        await tg.cmd_hosts(update, SimpleNamespace(args=[]))
+
+        text, kwargs, _ = update.message.replies[0]
+        self.assertIn("Codex hosts", text)
+        remote_button = kwargs["reply_markup"].inline_keyboard[1][0]
+        self.assertIn("Herdr 192.168.2.99", remote_button.text)
+        self.assertLessEqual(len(remote_button.callback_data.encode()), 64)
+        self.assertLessEqual(
+            len(tg.simple_callback_data("source", s="x" * 32).encode()),
+            64,
+        )
+
+        callback = FakeCallback(remote_button.callback_data)
+        listing = make_directory_listing(
+            path="",
+            source_id="server",
+            source_label="Herdr 192.168.2.99",
+        )
+        with patch.object(
+            tg,
+            "list_directories_from_relay",
+            AsyncMock(return_value=listing),
+        ) as browse:
+            await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
+
+        browse.assert_awaited_once_with(None, source_id="server")
+        self.assertEqual(tg.selected_agent_sources[42], "server")
+        self.assertNotIn(42, tg.selected_workspace_dirs)
+        self.assertIn("Selected Codex host", callback.message.replies[0][0])
+        self.assertIn("Host: <b>Herdr 192.168.2.99</b>", callback.message.replies[1][0])
+
+    async def test_offline_remote_source_cannot_replace_current_host(self):
+        tg.relay_connected = True
+        tg.agent_sources = [
+            {"id": "local", "label": "本机", "status": "online", "can_browse": True},
+            {
+                "id": "server",
+                "label": "Herdr 192.168.2.99",
+                "status": "offline",
+                "error": "SSH is unavailable",
+                "can_browse": False,
+            },
+        ]
+        callback = FakeCallback(tg.simple_callback_data("source", s="server"))
+
+        with patch.object(tg, "list_directories_from_relay", AsyncMock()) as browse:
+            await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
+
+        browse.assert_not_awaited()
+        self.assertEqual(tg.selected_agent_source_id(42), "local")
+        self.assertIn("SSH is unavailable", callback.message.replies[0][0])
+
     async def test_browse_command_builds_opaque_directory_buttons(self):
         listing = make_directory_listing()
         update = make_update()
@@ -385,7 +511,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(tg, "list_directories_from_relay", AsyncMock(return_value=listing)) as browse:
             await tg.cmd_browse(update, SimpleNamespace(args=["~/Workspace/others"]))
 
-        browse.assert_awaited_once_with("~/Workspace/others")
+        browse.assert_awaited_once_with("~/Workspace/others", source_id="local")
         text, kwargs, _ = update.message.replies[0]
         self.assertIn("Workspace browser", text)
         self.assertEqual(kwargs["parse_mode"], "HTML")
@@ -398,6 +524,38 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
             "/home/wbr/Workspace/others/herdr-remote",
         )
 
+    async def test_remote_directory_buttons_preserve_source_scope(self):
+        listing = make_directory_listing(
+            source_id="server",
+            source_label="Herdr 192.168.2.99",
+        )
+        button = tg.directory_browser_keyboard(listing).inline_keyboard[0][0]
+        data = json.loads(button.callback_data)
+        self.assertEqual(
+            tg.resolve_directory_location(data["d"]),
+            ("server", "/home/wbr/Workspace/others/herdr-remote"),
+        )
+
+        callback = FakeCallback(button.callback_data)
+        child_listing = make_directory_listing(
+            "/home/wbr/Workspace/others/herdr-remote",
+            can_start_agent=True,
+            source_id="server",
+            source_label="Herdr 192.168.2.99",
+        )
+        with patch.object(
+            tg,
+            "list_directories_from_relay",
+            AsyncMock(return_value=child_listing),
+        ) as browse:
+            await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
+
+        browse.assert_awaited_once_with(
+            "/home/wbr/Workspace/others/herdr-remote",
+            source_id="server",
+        )
+        self.assertEqual(tg.selected_agent_sources[42], "server")
+
     async def test_cd_resolves_relative_to_selected_directory(self):
         tg.selected_workspace_dirs[42] = "/home/wbr/Workspace/others"
         listing = make_directory_listing(
@@ -409,7 +567,10 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(tg, "list_directories_from_relay", AsyncMock(return_value=listing)) as browse:
             await tg.cmd_cd(update, SimpleNamespace(args=["herdr-remote"]))
 
-        browse.assert_awaited_once_with("/home/wbr/Workspace/others/herdr-remote")
+        browse.assert_awaited_once_with(
+            "/home/wbr/Workspace/others/herdr-remote",
+            source_id="local",
+        )
         self.assertEqual(tg.selected_workspace_dirs[42], listing["path"])
         self.assertIn("Selected workspace", update.message.replies[0][0])
         buttons = update.message.replies[0][1]["reply_markup"].inline_keyboard[0]
@@ -433,7 +594,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(tg, "start_codex_from_relay", AsyncMock(return_value=started)) as start:
             await tg.cmd_codex(update, SimpleNamespace(args=[]))
 
-        start.assert_awaited_once_with(selected, "")
+        start.assert_awaited_once_with(selected, "", source_id="local")
         self.assertIn("Starting Codex", update.message.replies[0][0])
         self.assertIn("Codex started", update.message.replies[1][0])
         final_text, final_kwargs, final_message = update.message.replies[-1]
@@ -460,9 +621,47 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(tg, "start_codex_from_relay", AsyncMock(return_value=started)) as start:
             await tg.cmd_codex(update, SimpleNamespace(args=["Explain", "this", "repository"]))
 
-        start.assert_awaited_once_with(selected, "Explain this repository")
+        start.assert_awaited_once_with(
+            selected,
+            "Explain this repository",
+            source_id="local",
+        )
         self.assertIn("Initial prompt submitted", update.message.replies[-1][0])
         self.assertEqual(tg.pending_pane(42, update.message.replies[-1][2].message_id), "w9:p1")
+
+    async def test_codex_starts_on_selected_remote_host_and_remembers_global_agent(self):
+        selected = "/home/wbr/workspace-ai/yolo-pose"
+        tg.agent_sources = [
+            {"id": "local", "label": "本机", "status": "online"},
+            {"id": "server", "label": "Herdr 192.168.2.99", "status": "online"},
+        ]
+        tg.selected_agent_sources[42] = "server"
+        tg.selected_workspace_dirs[42] = selected
+        update = make_update()
+        started = {
+            "pane_id": "server::w17:p1",
+            "raw_pane_id": "w17:p1",
+            "source_id": "server",
+            "workspace_id": "w17",
+            "cwd": selected,
+            "display_path": "~/workspace-ai/yolo-pose",
+            "project": "yolo-pose",
+            "agent": "codex",
+            "host": "Herdr 192.168.2.99",
+            "status": "working",
+            "prompted": True,
+            "warning": "",
+        }
+
+        with patch.object(tg, "start_codex_from_relay", AsyncMock(return_value=started)) as start:
+            await tg.cmd_codex(update, SimpleNamespace(args=["run", "the", "tests"]))
+
+        start.assert_awaited_once_with(selected, "run the tests", source_id="server")
+        remote_agent = tg.find_agent("server::w17:p1")
+        self.assertEqual(remote_agent["raw_pane_id"], "w17:p1")
+        self.assertEqual(remote_agent["source_id"], "server")
+        self.assertEqual(remote_agent["host"], "Herdr 192.168.2.99")
+        self.assertIn("Herdr 192.168.2.99", update.message.replies[-1][0])
 
     def test_labels_sort_status_and_disambiguate_duplicate_agents(self):
         agent_list = [

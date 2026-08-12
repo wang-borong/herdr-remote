@@ -1,6 +1,6 @@
 # Telegram-only 安全部署
 
-这一模式让手机通过私人 Telegram Bot 监控和控制本机 Herdr，不需要 VPS、Cloudflare、Tailscale、公网 IP 或路由器端口转发。
+这一模式让手机通过私人 Telegram Bot 监控和控制本机 Herdr；配置 SSH Agent Source 后，也可以让本机 Relay 作为跳板控制局域网主机。不需要 VPS、Cloudflare、Tailscale、公网 IP 或路由器端口转发。
 
 ```text
 手机 Telegram
@@ -29,6 +29,7 @@
 - Python 3.10+ 和 `uv`。
 - Herdr 0.8+，并且 `herdr agent prompt --help` 可用。
 - 本机和手机能够连接 Telegram。
+- 如需控制局域网主机：本机安装 OpenSSH Client，并已配置免交互 SSH 与远端 `herdr`。
 
 ## 安装
 
@@ -68,10 +69,11 @@ cd herdr-remote/relay
 | `/send` | 直接提交新 Prompt |
 | `/interrupt` | 向活动 Agent 发送 Ctrl+C |
 | `/digest` | 查看当天活动摘要 |
-| `/browse [目录]` | 浏览允许的本地工作目录 |
-| `/cd [目录]` | 选择新 Agent 的工作目录 |
-| `/cwd` | 查看当前选择的目录 |
-| `/codex [Prompt]` | 在所选目录启动 Codex，可同时提交首条 Prompt |
+| `/hosts` | 选择本机或 SSH Agent Source 作为 Codex 运行主机 |
+| `/browse [目录]` | 浏览所选主机允许的工作目录 |
+| `/cd [目录]` | 在所选主机上选择新 Agent 的工作目录 |
+| `/cwd` | 查看当前选择的主机和目录 |
+| `/codex [Prompt]` | 在所选主机与目录启动 Codex，可同时提交首条 Prompt |
 | `/help` | 查看命令和按钮使用说明 |
 
 首次发送 `/start` 后会显示快捷控制面板，可直接点击 Read、Reply、Send、Interrupt、Refresh 和 Help；下方仍会列出当前 Agent，点击 Agent 即可打开输出并回复。Telegram 输入框旁的 Menu 会显示已注册命令，直接输入 `/` 也会出现命令补全。命令菜单仅注册到已配对的聊天。
@@ -82,18 +84,22 @@ Agent 阻塞时，Bot 会提供一次性允许、拒绝和“打开输出并回�
 
 推荐使用按钮流程：
 
-1. 发送 `/start`，点击 **Workspaces**。
-2. 逐层打开目录，点击 **Select here** 选择工作目录。
-3. 点击 **Codex here** 或控制面板中的 **New Codex**。
-4. Codex 就绪后，直接回复 Bot 的 ForceReply 消息提交第一项任务。
+1. 发送 `/start`，点击 **Hosts**，选择本机或在线的 SSH Agent Source。
+2. Bot 会打开该主机的 Workspace 根目录；也可以点击 **Workspaces** 再次浏览。
+3. 逐层打开目录，点击 **Select here** 选择工作目录。
+4. 点击 **Codex here** 或控制面板中的 **New Codex**。
+5. Codex 就绪后，直接回复 Bot 的 ForceReply 消息提交第一项任务。
 
 也可以使用命令：
 
 ```text
+/hosts
 /browse ~/Workspace/others
 /cd ~/Workspace/others/herdr-remote
 /codex 请解释这个仓库并给出改进建议
 ```
+
+`/hosts` 的选择会绑定后续目录按钮、`/cd`、`/cwd` 和 `/codex`。切换主机时会清除旧主机的目录选择，防止把远端路径误发给本机。远端主机需要先配置为启用了 Agent discovery 的 SSH Profile，并确保 Relay 主机能够通过免交互 SSH 执行远端 `herdr`；配置方法见 [Remote Shell and LAN access](REMOTE_SHELL.md#同时连接远端-herdr-agents)。
 
 Relay 默认只允许访问 `~/Workspace`。可在 `~/.config/herdr-remote/config.env` 中配置多个根目录，Linux/macOS 使用冒号分隔：
 

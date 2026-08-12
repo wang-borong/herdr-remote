@@ -45,10 +45,10 @@ python3 -c "import ast; ast.parse(open('$DIR/relay/herdr_telegram_demo.py').read
 assert_eq "$?" "0" "herdr_telegram_demo.py parses"
 
 echo "6. telegram bot has all commands"
-for cmd in cmd_start cmd_agents cmd_status cmd_read cmd_send cmd_reply cmd_trust cmd_interrupt cmd_digest cmd_help cmd_browse cmd_cd cmd_cwd cmd_codex; do
+for cmd in cmd_start cmd_agents cmd_status cmd_read cmd_send cmd_reply cmd_trust cmd_interrupt cmd_digest cmd_help cmd_hosts cmd_browse cmd_cd cmd_cwd cmd_codex; do
   grep -q "async def $cmd" "$DIR/relay/herdr_telegram.py" || { FAIL=$((FAIL+1)); echo "  FAIL: missing $cmd"; continue; }
 done
-PASS=$((PASS+1)); echo "  pass: all 14 commands present"
+PASS=$((PASS+1)); echo "  pass: all 15 commands present"
 
 echo "7. telegram bot env vars documented"
 grep -q "HERDR_TG_TOKEN" "$DIR/relay/herdr_telegram.py" && grep -q "HERDR_TG_CHAT_ID" "$DIR/relay/herdr_telegram.py"

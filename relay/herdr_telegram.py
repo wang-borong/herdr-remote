@@ -88,8 +88,9 @@ if not TOKEN:
 
 # State
 pending: OrderedDict[tuple[int, int], str] = OrderedDict()  # (chat_id, message_id) -> pane_id
+selected_agent_sources: dict[int, str] = {}
 selected_workspace_dirs: dict[int, str] = {}
-directory_path_tokens: OrderedDict[str, str] = OrderedDict()
+directory_path_tokens: OrderedDict[str, tuple[str, str]] = OrderedDict()
 approval_tokens: dict[str, str] = {}  # pane_id -> current blocked-notification generation
 approval_trust_keys: dict[str, str] = {}  # pane_id -> current persistent-trust option key
 agents: list[dict] = []       # current agent list from relay
@@ -120,12 +121,13 @@ BOT_COMMAND_DEFINITIONS = [
     ("start", "打开 Herdr 控制面板"),
     ("agents", "查看全部 Agent 状态"),
     ("status", "检查 Relay 连接状态"),
+    ("hosts", "选择 Codex 运行主机"),
     ("read", "读取 Agent 最近输出"),
     ("reply", "查看输出并回复 Agent"),
     ("send", "向 Agent 发送新 Prompt"),
     ("interrupt", "中断正在运行的 Agent"),
     ("digest", "查看今日活动摘要"),
-    ("browse", "浏览允许的本地工作目录"),
+    ("browse", "浏览所选主机的工作目录"),
     ("cd", "选择 Codex 工作目录"),
     ("cwd", "查看当前选择的目录"),
     ("codex", "在所选目录启动 Codex"),
@@ -201,16 +203,31 @@ async def relay_request(payload: dict, expected_type: str, timeout: int = 15) ->
         raise RuntimeError(scrub(e)) from None
 
 
-async def list_directories_from_relay(path: str | None = None) -> dict:
+async def list_directories_from_relay(
+    path: str | None = None,
+    *,
+    source_id: str = "local",
+) -> dict:
     return await relay_request(
-        {"type": "list_directories", "path": path or ""},
+        {"type": "list_directories", "source_id": source_id, "path": path or ""},
         "directory_listing",
     )
 
 
-async def start_codex_from_relay(cwd: str, prompt: str = "") -> dict:
+async def start_codex_from_relay(
+    cwd: str,
+    prompt: str = "",
+    *,
+    source_id: str = "local",
+) -> dict:
     response = await relay_request(
-        {"type": "start_agent", "kind": "codex", "cwd": cwd, "prompt": prompt},
+        {
+            "type": "start_agent",
+            "kind": "codex",
+            "source_id": source_id,
+            "cwd": cwd,
+            "prompt": prompt,
+        },
         "agent_started",
         timeout=90,
     )
@@ -276,6 +293,55 @@ def find_agent(pane_id: str) -> dict | None:
 def host_suffix(host: str | None) -> str:
     host = str(host or "local")
     return f" @{host}" if host != "local" else ""
+
+
+def find_agent_source(source_id: str) -> dict | None:
+    matches = [source for source in agent_sources if source.get("id") == source_id]
+    return matches[0] if len(matches) == 1 else None
+
+
+def selected_agent_source_id(chat_id: int) -> str:
+    chat_id = int(chat_id)
+    selected = selected_agent_sources.get(chat_id, "local")
+    if not agent_sources or find_agent_source(selected):
+        return selected
+
+    fallback = "local" if find_agent_source("local") else str(agent_sources[0]["id"])
+    selected_agent_sources[chat_id] = fallback
+    selected_workspace_dirs.pop(chat_id, None)
+    return fallback
+
+
+def agent_source_label(source_id: str) -> str:
+    source = find_agent_source(source_id)
+    if source:
+        return str(source.get("label") or source_id)
+    return "本机" if source_id == "local" else source_id
+
+
+def select_agent_source_for_chat(chat_id: int, source_id: str):
+    chat_id = int(chat_id)
+    previous = selected_agent_source_id(chat_id)
+    selected_agent_sources[chat_id] = source_id
+    if previous != source_id:
+        selected_workspace_dirs.pop(chat_id, None)
+
+
+def remember_selected_workspace(chat_id: int, source_id: str, path: str):
+    select_agent_source_for_chat(chat_id, source_id)
+    selected_workspace_dirs[int(chat_id)] = path
+
+
+def selected_workspace_for_chat(chat_id: int, source_id: str | None = None) -> str | None:
+    chat_id = int(chat_id)
+    source_id = source_id or selected_agent_source_id(chat_id)
+    if selected_agent_source_id(chat_id) != source_id:
+        return None
+    return selected_workspace_dirs.get(chat_id)
+
+
+def agent_source_is_usable(source: dict) -> bool:
+    return source.get("status") == "online" and source.get("can_browse", True) is not False
 
 
 def agent_source_status_lines() -> list[str]:
@@ -592,46 +658,107 @@ def simple_callback_data(action: str, **extra) -> str:
     return json.dumps({"action": action, **extra}, separators=(",", ":"))
 
 
-def remember_directory_path(path: str) -> str:
-    token = hashlib.sha256(path.encode()).hexdigest()[:12]
-    if token in directory_path_tokens and directory_path_tokens[token] != path:
+def remember_directory_path(path: str, source_id: str = "local") -> str:
+    location = (source_id, path)
+    token = hashlib.sha256(f"{source_id}\0{path}".encode()).hexdigest()[:12]
+    if token in directory_path_tokens and directory_path_tokens[token] != location:
         token = secrets.token_hex(8)
-    directory_path_tokens[token] = path
+    directory_path_tokens[token] = location
     directory_path_tokens.move_to_end(token)
     while len(directory_path_tokens) > BROWSE_PATH_LIMIT:
         directory_path_tokens.popitem(last=False)
     return token
 
 
-def directory_callback_data(operation: str, path: str = "", page: int = 0) -> str:
-    data = {"action": "dir", "o": operation}
-    if path:
-        data["d"] = remember_directory_path(path)
+def directory_callback_data(
+    operation: str,
+    path: str = "",
+    page: int = 0,
+    source_id: str = "local",
+) -> str:
+    data = {
+        "action": "dir",
+        "o": operation,
+        "d": remember_directory_path(path, source_id),
+    }
     if page:
         data["g"] = page
     return json.dumps(data, separators=(",", ":"))
 
 
-def resolve_directory_token(token: str) -> str | None:
-    path = directory_path_tokens.get(token)
-    if path:
+def resolve_directory_location(token: str) -> tuple[str, str] | None:
+    location = directory_path_tokens.get(token)
+    if location:
         directory_path_tokens.move_to_end(token)
-    return path
+    return location
 
 
-def requested_directory_path(chat_id: int, value: str) -> str:
+def resolve_directory_token(token: str) -> str | None:
+    location = resolve_directory_location(token)
+    return location[1] if location else None
+
+
+def requested_directory_path(chat_id: int, value: str, source_id: str | None = None) -> str:
     value = value.strip()
     if not value or value.startswith(("/", "~")):
         return value
-    selected = selected_workspace_dirs.get(int(chat_id))
+    selected = selected_workspace_for_chat(chat_id, source_id)
     return os.path.join(selected, value) if selected else value
+
+
+def agent_source_picker_text(chat_id: int) -> str:
+    selected_id = selected_agent_source_id(chat_id)
+    if not relay_connected:
+        return "<b>Codex hosts</b>\n\nRelay is disconnected. Reopen this list after it reconnects."
+    if not agent_sources:
+        return "<b>Codex hosts</b>\n\nWaiting for Agent Source health information."
+
+    lines = [
+        "<b>Codex hosts</b>",
+        f"Current: <b>{html.escape(agent_source_label(selected_id))}</b>",
+        "",
+        "Choose an online host. Its allowlisted Workspace roots will open next.",
+    ]
+    return "\n".join(lines)
+
+
+def agent_source_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    selected_id = selected_agent_source_id(chat_id)
+    rows = []
+    for source in agent_sources:
+        source_id = str(source["id"])
+        marker = "✅" if source_id == selected_id else ("🟢" if agent_source_is_usable(source) else "⚪")
+        label = compact_identifier(str(source.get("label") or source_id), 36)
+        status = str(source.get("status") or "unknown").upper()
+        count = int(source.get("agent_count") or 0)
+        button_text = f"{marker} {label} · {status} · {count} Agent{'s' if count != 1 else ''}"[:64]
+        rows.append([InlineKeyboardButton(
+            button_text,
+            callback_data=simple_callback_data("source", s=source_id),
+        )])
+    rows.append([InlineKeyboardButton(
+        "🎛 Control panel",
+        callback_data=simple_callback_data("dashboard"),
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_agent_source_picker(message, chat):
+    await message.reply_text(
+        agent_source_picker_text(chat.id),
+        parse_mode="HTML",
+        reply_markup=agent_source_keyboard(chat.id),
+    )
 
 
 def directory_browser_text(listing: dict, chat_id: int) -> str:
     entries = listing.get("entries", [])
-    selected = selected_workspace_dirs.get(int(chat_id))
+    source_id = str(listing.get("source_id") or selected_agent_source_id(chat_id))
+    source_label = str(listing.get("source_label") or agent_source_label(source_id))
+    selected = selected_workspace_for_chat(chat_id, source_id)
     lines = [
         "<b>Workspace browser</b>",
+        f"Host: <b>{html.escape(source_label)}</b>",
         f"<code>{html.escape(listing.get('display_path') or 'Configured workspace roots')}</code>",
         "",
         f"Folders: {len(entries)}" + ("+" if listing.get("truncated") else ""),
@@ -644,6 +771,7 @@ def directory_browser_text(listing: dict, chat_id: int) -> str:
 
 def directory_browser_keyboard(listing: dict, page: int = 0) -> InlineKeyboardMarkup:
     entries = listing.get("entries", [])
+    source_id = str(listing.get("source_id") or "local")
     page_count = max(1, (len(entries) + BROWSE_PAGE_SIZE - 1) // BROWSE_PAGE_SIZE)
     page = min(max(int(page), 0), page_count - 1)
     start = page * BROWSE_PAGE_SIZE
@@ -654,7 +782,7 @@ def directory_browser_keyboard(listing: dict, page: int = 0) -> InlineKeyboardMa
         label = f"{icon} {entry.get('name') or 'directory'}"[:64]
         rows.append([InlineKeyboardButton(
             label,
-            callback_data=directory_callback_data("o", entry["path"]),
+            callback_data=directory_callback_data("o", entry["path"], source_id=source_id),
         )])
 
     if page_count > 1:
@@ -663,12 +791,16 @@ def directory_browser_keyboard(listing: dict, page: int = 0) -> InlineKeyboardMa
         if page > 0:
             navigation.append(InlineKeyboardButton(
                 "Previous",
-                callback_data=directory_callback_data("o", current_path, page - 1),
+                callback_data=directory_callback_data(
+                    "o", current_path, page - 1, source_id=source_id,
+                ),
             ))
         if page + 1 < page_count:
             navigation.append(InlineKeyboardButton(
                 "Next",
-                callback_data=directory_callback_data("o", current_path, page + 1),
+                callback_data=directory_callback_data(
+                    "o", current_path, page + 1, source_id=source_id,
+                ),
             ))
         rows.append(navigation)
 
@@ -676,19 +808,19 @@ def directory_browser_keyboard(listing: dict, page: int = 0) -> InlineKeyboardMa
     if current_path:
         actions = [InlineKeyboardButton(
             "✅ Select here",
-            callback_data=directory_callback_data("s", current_path),
+            callback_data=directory_callback_data("s", current_path, source_id=source_id),
         )]
         if listing.get("can_start_agent"):
             actions.append(InlineKeyboardButton(
                 "🚀 Codex here",
-                callback_data=directory_callback_data("c", current_path),
+                callback_data=directory_callback_data("c", current_path, source_id=source_id),
             ))
         rows.append(actions)
 
     parent = listing.get("parent")
     navigation = [InlineKeyboardButton(
         "⬆️ Up" if parent else "🏠 Roots",
-        callback_data=directory_callback_data("o", parent or ""),
+        callback_data=directory_callback_data("o", parent or "", source_id=source_id),
     )]
     navigation.append(InlineKeyboardButton(
         "🎛 Control panel",
@@ -698,13 +830,22 @@ def directory_browser_keyboard(listing: dict, page: int = 0) -> InlineKeyboardMa
     return InlineKeyboardMarkup(rows)
 
 
-async def send_directory_browser(message, chat, path: str | None = None, page: int = 0):
-    requested = requested_directory_path(chat.id, path or "")
+async def send_directory_browser(
+    message,
+    chat,
+    path: str | None = None,
+    page: int = 0,
+    source_id: str | None = None,
+):
+    source_id = source_id or selected_agent_source_id(chat.id)
+    requested = requested_directory_path(chat.id, path or "", source_id)
     try:
-        listing = await list_directories_from_relay(requested or None)
+        listing = await list_directories_from_relay(requested or None, source_id=source_id)
     except Exception as e:
         await message.reply_text(f"Cannot browse that directory: {scrub(e)}")
         return None
+    actual_source_id = str(listing.get("source_id") or source_id)
+    select_agent_source_for_chat(chat.id, actual_source_id)
     await message.reply_text(
         directory_browser_text(listing, chat.id),
         parse_mode="HTML",
@@ -713,16 +854,20 @@ async def send_directory_browser(message, chat, path: str | None = None, page: i
     return listing
 
 
-def selected_directory_keyboard(path: str, can_start_agent: bool = True) -> InlineKeyboardMarkup:
+def selected_directory_keyboard(
+    path: str,
+    can_start_agent: bool = True,
+    source_id: str = "local",
+) -> InlineKeyboardMarkup:
     row = []
     if can_start_agent:
         row.append(InlineKeyboardButton(
             "🚀 Start Codex",
-            callback_data=directory_callback_data("c", path),
+            callback_data=directory_callback_data("c", path, source_id=source_id),
         ))
     row.append(InlineKeyboardButton(
         "📂 Browse",
-        callback_data=directory_callback_data("o", path),
+        callback_data=directory_callback_data("o", path, source_id=source_id),
     ))
     return InlineKeyboardMarkup([
         row,
@@ -732,42 +877,57 @@ def selected_directory_keyboard(path: str, can_start_agent: bool = True) -> Inli
 
 def remember_started_agent(started: dict) -> dict:
     global agents
+    source_id = str(started.get("source_id") or "local")
     agent = {
         "pane_id": started["pane_id"],
-        "agent": "codex",
+        "raw_pane_id": started.get("raw_pane_id", started["pane_id"]),
+        "source_id": source_id,
+        "agent": started.get("agent", "codex"),
         "status": started.get("status", "idle"),
         "cwd": started["cwd"],
         "project": started.get("project") or os.path.basename(started["cwd"]),
-        "host": "local",
+        "host": started.get("host") or ("local" if source_id == "local" else agent_source_label(source_id)),
         "workspace_id": started.get("workspace_id", ""),
     }
     agents = apply_agent_message(agents, {"type": "agent_update", "agent": agent})
     return agent
 
 
-async def start_codex_for_chat(message, chat, cwd: str, prompt: str = ""):
+async def start_codex_for_chat(
+    message,
+    chat,
+    cwd: str,
+    prompt: str = "",
+    source_id: str | None = None,
+):
     if len(prompt) > 1000:
         await message.reply_text("Prompt must contain at most 1000 characters.")
         return None
-    await message.reply_text(f"Starting Codex in {cwd} …")
+    source_id = source_id or selected_agent_source_id(chat.id)
+    source_label = agent_source_label(source_id)
+    await message.reply_text(f"Starting Codex on {source_label} in {cwd} …")
     try:
-        started = await start_codex_from_relay(cwd, prompt)
+        started = await start_codex_from_relay(cwd, prompt, source_id=source_id)
     except Exception as e:
         await message.reply_text(f"Could not start Codex: {scrub(e)}")
         return None
 
-    selected_workspace_dirs[int(chat.id)] = started["cwd"]
+    actual_source_id = str(started.get("source_id") or source_id)
+    remember_selected_workspace(chat.id, actual_source_id, started["cwd"])
     agent = remember_started_agent(started)
     warning = started.get("warning", "")
+    started_location = (
+        f"{started.get('display_path', started['cwd'])} on {agent_source_label(actual_source_id)}"
+    )
     if prompt:
         status = "Initial prompt submitted." if started.get("prompted") else (warning or "Initial prompt was not submitted.")
         sent = await message.reply_text(
-            f"Codex started in {started.get('display_path', started['cwd'])}.\n{status}",
+            f"Codex started in {started_location}.\n{status}",
             reply_markup=interaction_keyboard(agent["pane_id"]),
         )
         register_pending(chat.id, sent.message_id, agent["pane_id"])
     else:
-        await message.reply_text(f"Codex started in {started.get('display_path', started['cwd'])}.")
+        await message.reply_text(f"Codex started in {started_location}.")
         await send_reply_prompt(message, chat, agent)
     return agent
 
@@ -785,6 +945,7 @@ def dashboard_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("❓ Help", callback_data=simple_callback_data("help")),
         ],
         [
+            InlineKeyboardButton("🖥 Hosts", callback_data=simple_callback_data("hosts")),
             InlineKeyboardButton("📂 Workspaces", callback_data=simple_callback_data("browse")),
             InlineKeyboardButton("🆕 New Codex", callback_data=simple_callback_data("new_codex")),
         ],
@@ -811,7 +972,8 @@ def help_text() -> str:
         "/send — 发送新 Prompt\n"
         "/interrupt — 发送 Ctrl+C\n"
         "/digest — 查看今日摘要\n\n"
-        "/browse — 浏览允许的工作目录\n"
+        "/hosts — 选择 Codex 运行主机\n"
+        "/browse — 浏览所选主机允许的工作目录\n"
         "/cd — 选择 Codex 工作目录\n"
         "/cwd — 查看当前目录\n"
         "/codex — 在当前目录启动 Codex\n\n"
@@ -885,8 +1047,15 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_hosts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle /hosts — select the Agent Source used for new Codex agents."""
+    if not authorized(update):
+        return
+    await send_agent_source_picker(update.message, update.effective_chat)
+
+
 async def cmd_browse(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle /browse [path] — browse allowlisted local workspace directories."""
+    """Handle /browse [path] — browse the selected Agent Source's workspace roots."""
     if not authorized(update):
         return
     path = " ".join(ctx.args).strip() or None
@@ -897,27 +1066,39 @@ async def cmd_cd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle /cd [path] — select the directory used by /codex."""
     if not authorized(update):
         return
+    source_id = selected_agent_source_id(update.effective_chat.id)
     if not ctx.args:
-        selected = selected_workspace_dirs.get(int(update.effective_chat.id))
+        selected = selected_workspace_for_chat(update.effective_chat.id, source_id)
         if selected:
-            await send_directory_browser(update.message, update.effective_chat, selected)
+            await send_directory_browser(
+                update.message,
+                update.effective_chat,
+                selected,
+                source_id=source_id,
+            )
         else:
             await update.message.reply_text("No directory selected. Choose one below.")
-            await send_directory_browser(update.message, update.effective_chat)
+            await send_directory_browser(
+                update.message,
+                update.effective_chat,
+                source_id=source_id,
+            )
         return
 
-    requested = requested_directory_path(update.effective_chat.id, " ".join(ctx.args))
+    requested = requested_directory_path(update.effective_chat.id, " ".join(ctx.args), source_id)
     try:
-        listing = await list_directories_from_relay(requested)
+        listing = await list_directories_from_relay(requested, source_id=source_id)
     except Exception as e:
         await update.message.reply_text(f"Cannot select that directory: {scrub(e)}")
         return
-    selected_workspace_dirs[int(update.effective_chat.id)] = listing["path"]
+    actual_source_id = str(listing.get("source_id") or source_id)
+    remember_selected_workspace(update.effective_chat.id, actual_source_id, listing["path"])
     await update.message.reply_text(
-        f"Selected workspace:\n{listing['display_path']}",
+        f"Selected workspace on {agent_source_label(actual_source_id)}:\n{listing['display_path']}",
         reply_markup=selected_directory_keyboard(
             listing["path"],
             can_start_agent=listing.get("can_start_agent", False),
+            source_id=actual_source_id,
         ),
     )
 
@@ -926,13 +1107,16 @@ async def cmd_cwd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle /cwd — show the directory selected for new agents."""
     if not authorized(update):
         return
-    selected = selected_workspace_dirs.get(int(update.effective_chat.id))
+    source_id = selected_agent_source_id(update.effective_chat.id)
+    selected = selected_workspace_for_chat(update.effective_chat.id, source_id)
     if not selected:
-        await update.message.reply_text("No workspace selected. Use /browse or /cd first.")
+        await update.message.reply_text(
+            f"No workspace selected on {agent_source_label(source_id)}. Use /hosts, /browse or /cd first."
+        )
         return
     await update.message.reply_text(
-        f"Selected workspace:\n{selected}",
-        reply_markup=selected_directory_keyboard(selected),
+        f"Selected host: {agent_source_label(source_id)}\nSelected workspace:\n{selected}",
+        reply_markup=selected_directory_keyboard(selected, source_id=source_id),
     )
 
 
@@ -940,13 +1124,26 @@ async def cmd_codex(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle /codex [prompt] — create a new Codex agent in the selected directory."""
     if not authorized(update):
         return
-    selected = selected_workspace_dirs.get(int(update.effective_chat.id))
+    source_id = selected_agent_source_id(update.effective_chat.id)
+    selected = selected_workspace_for_chat(update.effective_chat.id, source_id)
     if not selected:
-        await update.message.reply_text("Select a workspace directory before starting Codex.")
-        await send_directory_browser(update.message, update.effective_chat)
+        await update.message.reply_text(
+            f"Select a workspace directory on {agent_source_label(source_id)} before starting Codex."
+        )
+        await send_directory_browser(
+            update.message,
+            update.effective_chat,
+            source_id=source_id,
+        )
         return
     prompt = " ".join(ctx.args).strip()
-    await start_codex_for_chat(update.message, update.effective_chat, selected, prompt)
+    await start_codex_for_chat(
+        update.message,
+        update.effective_chat,
+        selected,
+        prompt,
+        source_id=source_id,
+    )
 
 
 async def cmd_agents(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1238,54 +1435,106 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if action == "hosts":
+        await send_agent_source_picker(query.message, update.effective_chat)
+        return
+
+    if action == "source":
+        if not relay_connected:
+            await query.message.reply_text("Relay disconnected. Choose a host after it reconnects.")
+            return
+        source_id = str(data.get("s") or "")
+        source = find_agent_source(source_id)
+        if not source:
+            await query.message.reply_text("That host is no longer configured. Open /hosts again.")
+            return
+        if not agent_source_is_usable(source):
+            status = str(source.get("status") or "unknown").upper()
+            error = str(source.get("error") or "").strip()
+            detail = f": {error}" if error else ""
+            await query.message.reply_text(
+                f"{agent_source_label(source_id)} is {status}{detail}. Choose an online host."
+            )
+            return
+        select_agent_source_for_chat(update.effective_chat.id, source_id)
+        selected = selected_workspace_for_chat(update.effective_chat.id, source_id)
+        await query.message.reply_text(f"Selected Codex host: {agent_source_label(source_id)}")
+        await send_directory_browser(
+            query.message,
+            update.effective_chat,
+            selected,
+            source_id=source_id,
+        )
+        return
+
     if action == "browse":
         await send_directory_browser(query.message, update.effective_chat)
         return
 
     if action == "new_codex":
-        selected = selected_workspace_dirs.get(int(update.effective_chat.id))
+        source_id = selected_agent_source_id(update.effective_chat.id)
+        selected = selected_workspace_for_chat(update.effective_chat.id, source_id)
         if not selected:
-            await query.message.reply_text("Select a workspace directory before starting Codex.")
-            await send_directory_browser(query.message, update.effective_chat)
+            await query.message.reply_text(
+                f"Select a workspace directory on {agent_source_label(source_id)} before starting Codex."
+            )
+            await send_directory_browser(
+                query.message,
+                update.effective_chat,
+                source_id=source_id,
+            )
             return
         await query.message.reply_text(
-            f"Start a new Codex agent in:\n{selected}",
-            reply_markup=selected_directory_keyboard(selected),
+            f"Start a new Codex agent on {agent_source_label(source_id)} in:\n{selected}",
+            reply_markup=selected_directory_keyboard(selected, source_id=source_id),
         )
         return
 
     if action == "dir":
         operation = data.get("o", "")
         token = data.get("d", "")
-        path = resolve_directory_token(token) if token else ""
-        if token and not path:
+        location = resolve_directory_location(token) if token else None
+        if token and location is None:
             await query.message.reply_text("That directory button expired. Open /browse again.")
             return
+        source_id, path = location or (selected_agent_source_id(update.effective_chat.id), "")
         if operation == "o":
             await send_directory_browser(
                 query.message,
                 update.effective_chat,
                 path or None,
                 page=data.get("g", 0),
+                source_id=source_id,
             )
             return
         if operation == "s" and path:
             try:
-                listing = await list_directories_from_relay(path)
+                listing = await list_directories_from_relay(path, source_id=source_id)
             except Exception as e:
                 await query.message.reply_text(f"Cannot select that directory: {scrub(e)}")
                 return
-            selected_workspace_dirs[int(update.effective_chat.id)] = listing["path"]
+            actual_source_id = str(listing.get("source_id") or source_id)
+            remember_selected_workspace(
+                update.effective_chat.id,
+                actual_source_id,
+                listing["path"],
+            )
             await query.message.reply_text(
-                f"Selected workspace:\n{listing['display_path']}",
+                f"Selected workspace on {agent_source_label(actual_source_id)}:\n{listing['display_path']}",
                 reply_markup=selected_directory_keyboard(
                     listing["path"],
                     can_start_agent=listing.get("can_start_agent", False),
+                    source_id=actual_source_id,
                 ),
             )
             return
         if operation == "c" and path:
-            await start_codex_for_chat(query.message, update.effective_chat, path)
+            await start_codex_for_chat(
+                query.message,
+                update.effective_chat,
+                path,
+                source_id=source_id,
+            )
             return
         await query.message.reply_text("That directory action is no longer valid. Open /browse again.")
         return
@@ -1719,6 +1968,7 @@ def main():
     app.add_handler(CommandHandler("digest", cmd_digest, filters=auth_filter))
     app.add_handler(CommandHandler("interrupt", cmd_interrupt, filters=auth_filter))
     app.add_handler(CommandHandler("help", cmd_help, filters=auth_filter))
+    app.add_handler(CommandHandler("hosts", cmd_hosts, filters=auth_filter))
     app.add_handler(CommandHandler("browse", cmd_browse, filters=auth_filter))
     app.add_handler(CommandHandler("cd", cmd_cd, filters=auth_filter))
     app.add_handler(CommandHandler("cwd", cmd_cwd, filters=auth_filter))

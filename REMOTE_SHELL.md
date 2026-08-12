@@ -141,6 +141,8 @@ Relay 为远端 Pane 使用 `<profile-id>::<raw-pane-id>` 全局 ID。例如 `bu
 ssh build-server '/home/builder/.local/bin/herdr pane list'
 ```
 
+Telegram Bot 使用同一组 Agent Sources。发送 `/hosts` 可以选择本机或某个在线 SSH 主机；选择后 Bot 会打开该主机的白名单 Workspace 根目录，后续 `/browse`、`/cd`、`/cwd`、目录按钮和 `/codex` 都会保持在该主机范围内。这样可以让运行 Relay 的本机充当跳板，从 Telegram 在局域网服务器上选择目录并启动 Codex，而无需把远端 Relay 暴露到网络。
+
 不可达的主机会在新建 Agent 对话框中显示为离线；各主机并行检查，不会按主机数量串行累积超时。
 
 ## 从其他电脑直接跳到局域网服务器

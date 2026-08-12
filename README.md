@@ -66,7 +66,7 @@ Remote Shell provides a real PTY with xterm.js, persistent tmux sessions, Git/sy
 
 An SSH profile can also be enabled as a Herdr Agent Source. The dashboard then discovers and controls that host's agents with source-scoped Pane IDs, reports per-host health, browses allowlisted remote Workspace roots, and starts new Codex agents on the selected machine.
 
-The Telegram bot consumes the same Relay snapshot, so remote agents automatically appear in `/start`, `/agents`, `/read`, `/reply`, `/send`, `/interrupt`, blocked/completion notifications, and `/digest`. `/status` also reports each local or SSH Agent Source's health and Agent count.
+The Telegram bot consumes the same Relay snapshot, so remote agents automatically appear in `/start`, `/agents`, `/read`, `/reply`, `/send`, `/interrupt`, blocked/completion notifications, and `/digest`. `/status` also reports each local or SSH Agent Source's health and Agent count. Use `/hosts` to select an online local or SSH Agent Source; `/browse`, `/cd`, `/cwd`, and `/codex` then remain scoped to that host, including remote Workspace browsing and Codex startup.
 
 ## Telegram Bot
 
@@ -107,6 +107,11 @@ uv run relay/herdr_telegram.py
 | `/trust` | Persistent trust; disabled by default and requires confirmation when enabled |
 | `/interrupt` | Send Ctrl+C |
 | `/digest` | Today's activity summary |
+| `/hosts` | Select the local or SSH host used for new Codex agents |
+| `/browse` | Browse allowlisted Workspace roots on the selected host |
+| `/cd` | Select a Workspace directory on the selected host |
+| `/cwd` | Show the selected host and directory |
+| `/codex` | Start Codex on the selected host |
 
 The `/start`, `/read`, `/reply`, `/send`, and `/interrupt` pickers keep every eligible agent reachable. Normal herds appear in one list; larger herds include Previous and Next buttons. Selecting an agent opens a reply prompt containing its recent output; replying submits text through `herdr agent prompt` rather than emulated terminal input.
 
@@ -186,4 +191,4 @@ The relay listens on `127.0.0.1` by default. Remote binding requires the explici
 
 ### v0.5.0
 
-Telegram bot (`/start /agents /status /read /send /reply /interrupt /digest /browse /cd /cwd /codex /help`) with scoped command completion, allowlisted directory browsing, safe Codex startup, and shortcut buttons; demo bot and Linux setup script.
+Telegram bot (`/start /agents /status /hosts /read /send /reply /interrupt /digest /browse /cd /cwd /codex /help`) with scoped command completion, local/SSH Agent Source selection, allowlisted directory browsing, safe Codex startup, and shortcut buttons; demo bot and Linux setup script.
