@@ -112,6 +112,13 @@ WEB_JS="$DIR/web/app.js"
   grep -q "TERMINAL_FOCUS_SEQUENCES" "$WEB_JS" && grep -q 'TMUX_PREFIX_SEQUENCE = "\\x02"' "$WEB_JS" && \
   grep -q "touch-action: pan-x pinch-zoom" "$DIR/web/app.css" && \
   grep -q "touch-action: manipulation" "$DIR/web/app.css" && \
+  grep -q "interactive-widget=resizes-content" "$WEB" && \
+  grep -q "navigator.virtualKeyboard.overlaysContent = false" "$WEB_JS" && \
+  grep -q 'viewport?.addEventListener("resize"' "$WEB_JS" && \
+  grep -q 'function setShellKeyboardOpen' "$WEB_JS" && \
+  grep -q 'classList.toggle("shell-keyboard-open"' "$WEB_JS" && \
+  grep -q -- '--app-viewport-height' "$DIR/web/app.css" && \
+  grep -q 'body.shell-keyboard-open .interactive-terminal-card' "$DIR/web/app.css" && \
   [ -f "$DIR/web/vendor/xterm/xterm.js" ] && \
   [ -f "$DIR/web/vendor/xterm/xterm.css" ] && \
   [ -f "$DIR/web/vendor/xterm/addon-fit.js" ] && \

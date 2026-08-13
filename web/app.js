@@ -168,6 +168,9 @@ const TERMINAL_FALLBACK_FONT_FAMILY = '"SFMono-Regular", "Cascadia Code", Consol
 const TERMINAL_FONT_FAMILY = '"Herdr FiraCode Nerd", "FiraCode Nerd Font Mono", "MesloLGS Nerd Font Mono", "SFMono-Regular", Consolas, monospace';
 const TERMINAL_KEYBAR_PREFERRED_HEIGHT = 42;
 const TERMINAL_KEYBAR_MIN_HEIGHT = 35;
+const MOBILE_KEYBOARD_MIN_HEIGHT = 120;
+const MOBILE_KEYBOARD_HEIGHT_RATIO = 0.2;
+const MOBILE_VIEWPORT_WIDTH_TOLERANCE = 48;
 const terminalFontReady = document.fonts && typeof document.fonts.load === "function"
   ? document.fonts.load('400 13px "Herdr FiraCode Nerd"').catch(() => [])
   : Promise.resolve([]);
@@ -223,6 +226,12 @@ const state = {
   terminalInstance: null,
   terminalFitAddon: null,
   terminalResizeObserver: null,
+  terminalFitFrame: null,
+  terminalFitTimer: null,
+  terminalFitScrollToBottom: false,
+  visualViewportWidth: 0,
+  visualViewportBaselineHeight: 0,
+  shellKeyboardOpen: false,
   sshProfilePending: false,
   pendingDeleteProfile: null,
 };
@@ -681,8 +690,10 @@ function setAppView(view, updateHistory = true) {
     renderRemoteAccess();
     window.requestAnimationFrame(fitWebTerminal);
   } else {
+    state.terminalInstance?.blur();
     selectInitialAgentIfNeeded();
   }
+  if (state.visualViewportBaselineHeight) syncVisualViewportLayout();
 }
 
 function updateAppUrl() {
@@ -721,6 +732,7 @@ function ensureWebTerminal() {
   const fitAddon = new window.FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.open(elements.webTerminal);
+  if (terminal.textarea) terminal.textarea.setAttribute("enterkeyhint", "enter");
   enableWebTerminalTouchScrolling(terminal);
   terminal.onData((data) => sendTerminalText(applyTerminalModifiersToInput(data)));
   state.terminalInstance = terminal;
@@ -730,11 +742,11 @@ function ensureWebTerminal() {
     if (state.terminalInstance !== terminal) return;
     terminal.options.fontFamily = TERMINAL_FONT_FAMILY;
     terminal.refresh(0, Math.max(0, terminal.rows - 1));
-    window.requestAnimationFrame(fitWebTerminal);
+    scheduleWebTerminalFit();
   });
 
   if ("ResizeObserver" in window) {
-    state.terminalResizeObserver = new ResizeObserver(() => fitWebTerminal());
+    state.terminalResizeObserver = new ResizeObserver(() => scheduleWebTerminalFit());
     state.terminalResizeObserver.observe(elements.webTerminal);
   }
   window.requestAnimationFrame(fitWebTerminal);
@@ -987,6 +999,95 @@ function fitWebTerminal() {
   }
 }
 
+function scheduleWebTerminalFit(scrollToBottom = false) {
+  state.terminalFitScrollToBottom ||= scrollToBottom;
+  if (state.terminalFitFrame !== null) window.cancelAnimationFrame(state.terminalFitFrame);
+  if (state.terminalFitTimer !== null) window.clearTimeout(state.terminalFitTimer);
+  const fit = () => {
+    state.terminalFitFrame = null;
+    fitWebTerminal();
+    if (state.terminalFitScrollToBottom) state.terminalInstance?.scrollToBottom();
+  };
+  state.terminalFitFrame = window.requestAnimationFrame(fit);
+  state.terminalFitTimer = window.setTimeout(() => {
+    state.terminalFitTimer = null;
+    fitWebTerminal();
+    if (state.terminalFitScrollToBottom) state.terminalInstance?.scrollToBottom();
+    state.terminalFitScrollToBottom = false;
+  }, 280);
+}
+
+function webTerminalHasFocus() {
+  const active = document.activeElement;
+  return Boolean(active && (
+    active === state.terminalInstance?.textarea
+    || elements.webTerminal.contains(active)
+  ));
+}
+
+function setShellKeyboardOpen(open) {
+  const keyboardOpen = open === true;
+  document.body.classList.toggle("shell-keyboard-open", keyboardOpen);
+  const keyboardChanged = keyboardOpen !== state.shellKeyboardOpen;
+  if (keyboardChanged) {
+    state.shellKeyboardOpen = keyboardOpen;
+    scheduleWebTerminalFit(keyboardOpen);
+  }
+  return keyboardChanged;
+}
+
+function syncVisualViewportLayout() {
+  const viewport = window.visualViewport;
+  const viewportWidth = Math.round(viewport?.width || window.innerWidth);
+  const viewportHeight = Math.round(viewport?.height || window.innerHeight);
+  const viewportOffsetTop = Math.max(0, Math.round(viewport?.offsetTop || 0));
+  const widthChanged = !state.visualViewportWidth
+    || Math.abs(viewportWidth - state.visualViewportWidth) > MOBILE_VIEWPORT_WIDTH_TOLERANCE;
+
+  if (widthChanged) {
+    state.visualViewportWidth = viewportWidth;
+    state.visualViewportBaselineHeight = viewportHeight;
+  } else if (!webTerminalHasFocus() && viewportHeight > state.visualViewportBaselineHeight) {
+    state.visualViewportBaselineHeight = viewportHeight;
+  }
+
+  const baselineHeight = Math.max(state.visualViewportBaselineHeight, viewportHeight);
+  const keyboardThreshold = Math.max(
+    MOBILE_KEYBOARD_MIN_HEIGHT,
+    Math.round(baselineHeight * MOBILE_KEYBOARD_HEIGHT_RATIO),
+  );
+  const keyboardOpen = !isDesktop()
+    && state.activeView === "terminal"
+    && document.body.classList.contains("shell-open")
+    && webTerminalHasFocus()
+    && baselineHeight - viewportHeight >= keyboardThreshold;
+
+  document.documentElement.style.setProperty("--app-viewport-height", `${viewportHeight}px`);
+  document.documentElement.style.setProperty("--app-viewport-offset-top", `${viewportOffsetTop}px`);
+  const keyboardChanged = setShellKeyboardOpen(keyboardOpen);
+  if (!keyboardChanged) scheduleWebTerminalFit();
+  if (state.activeView !== "terminal") fitAgentOutputTerminal();
+}
+
+function initializeMobileViewportHandling() {
+  if (navigator.virtualKeyboard && "overlaysContent" in navigator.virtualKeyboard) {
+    try {
+      navigator.virtualKeyboard.overlaysContent = false;
+    } catch (_) {
+      // Some browsers expose the API without allowing this preference to change.
+    }
+  }
+
+  const viewport = window.visualViewport;
+  state.visualViewportWidth = Math.round(viewport?.width || window.innerWidth);
+  state.visualViewportBaselineHeight = Math.round(viewport?.height || window.innerHeight);
+  viewport?.addEventListener("resize", syncVisualViewportLayout);
+  viewport?.addEventListener("scroll", syncVisualViewportLayout);
+  document.addEventListener("focusin", syncVisualViewportLayout);
+  document.addEventListener("focusout", () => window.setTimeout(syncVisualViewportLayout, 0));
+  syncVisualViewportLayout();
+}
+
 function alignWebTerminalGrid() {
   const cellHeight = state.terminalInstance?._core?._renderService?.dimensions?.css?.cell?.height;
   const terminalFrame = elements.webTerminal.parentElement;
@@ -1085,6 +1186,8 @@ function handleTerminalOutput(message) {
 
 function handleTerminalExit(message) {
   if (message.session_id !== state.terminalSessionId) return;
+  state.terminalInstance?.blur();
+  setShellKeyboardOpen(false);
   state.terminalSessionId = null;
   state.terminalPending = false;
   state.terminalConnected = false;
@@ -1198,6 +1301,7 @@ function applyTerminalModifiersToInput(input) {
 }
 
 function closeTerminalSelection() {
+  state.terminalInstance?.blur();
   if (state.terminalSessionId && socketReady()) {
     send({type: "terminal_close", session_id: state.terminalSessionId});
   }
@@ -1208,6 +1312,7 @@ function closeTerminalSelection() {
   state.terminalShouldReconnect = false;
   state.activeTerminalProfile = null;
   document.body.classList.remove("shell-open");
+  setShellKeyboardOpen(false);
   renderRemoteAccess();
   renderTerminalConnection();
   updateAppUrl();
@@ -2328,8 +2433,7 @@ function bindEvents() {
   });
   window.addEventListener("online", connect);
   window.addEventListener("resize", () => {
-    fitWebTerminal();
-    fitAgentOutputTerminal();
+    syncVisualViewportLayout();
   });
   window.addEventListener("popstate", () => {
     const url = new URL(window.location.href);
@@ -2357,6 +2461,7 @@ function bindEvents() {
 function initialize() {
   removeLegacyCredentials();
   applyTheme(localStorage.getItem("herdr_theme") || "system");
+  initializeMobileViewportHandling();
   bindEvents();
   state.terminalRequestedProfile = initialTerminalProfile;
   setAppView(initialView, false);

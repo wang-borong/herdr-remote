@@ -7,6 +7,8 @@
 }
 
 :root {
+  --app-viewport-height: 100dvh;
+  --app-viewport-offset-top: 0px;
   --bg: #080b14;
   --bg-elevated: #0c1120;
   --surface: rgba(17, 24, 42, 0.88);
@@ -3284,6 +3286,66 @@ dialog {
 
   .ssh-host-shell .modal-footer {
     margin-top: auto;
+  }
+
+  body.shell-keyboard-open {
+    min-height: var(--app-viewport-height);
+  }
+
+  body.shell-keyboard-open .app-shell {
+    position: fixed;
+    top: var(--app-viewport-offset-top);
+    right: 0;
+    bottom: auto;
+    left: 0;
+    height: var(--app-viewport-height);
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  body.shell-keyboard-open .topbar,
+  body.shell-keyboard-open .connection-banner,
+  body.shell-keyboard-open .mobile-nav {
+    display: none !important;
+  }
+
+  body.shell-keyboard-open .main-stage {
+    grid-row: 1;
+    padding-bottom: 0;
+  }
+
+  body.shell-keyboard-open .shell-console {
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0;
+    padding: 0;
+  }
+
+  body.shell-keyboard-open .shell-header,
+  body.shell-keyboard-open .interactive-terminal-toolbar,
+  body.shell-keyboard-open .terminal-utilities {
+    display: none;
+  }
+
+  body.shell-keyboard-open .interactive-terminal-card {
+    height: 100%;
+    grid-template-rows: minmax(0, 1fr) auto;
+    border-width: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  body.shell-keyboard-open .xterm-frame {
+    grid-row: 1;
+  }
+
+  body.shell-keyboard-open .mobile-keybar {
+    grid-row: 2;
+    padding-right: max(8px, env(safe-area-inset-right));
+    padding-left: max(8px, env(safe-area-inset-left));
+  }
+
+  body.shell-keyboard-open .toast-region {
+    bottom: calc(var(--terminal-keybar-height, 42px) + 8px);
   }
 }
 
