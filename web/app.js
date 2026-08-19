@@ -1178,6 +1178,15 @@ function enableNativeAgentOutputSelection(terminal, surface, selectionTree) {
   let nativeHoldReady = false;
   let nativeHoldTimer = null;
   let nativeSelectionMoved = false;
+  let touchStartedWithNativeSelection = false;
+
+  const hasRememberedNativeSelection = () => Boolean(
+    nativeSelectionInside()
+    || (
+      lastNativeSelectionRange
+      && Date.now() < preserveNativeSelectionUntil
+    )
+  );
 
   const clearNativeHoldTimer = () => {
     if (nativeHoldTimer === null) return;
@@ -1194,6 +1203,7 @@ function enableNativeAgentOutputSelection(terminal, surface, selectionTree) {
     pixelRemainder = 0;
     nativeHoldReady = false;
     nativeSelectionMoved = false;
+    touchStartedWithNativeSelection = false;
   };
 
   selectionLayer.addEventListener("touchstart", (event) => {
@@ -1203,6 +1213,7 @@ function enableNativeAgentOutputSelection(terminal, surface, selectionTree) {
       scheduleSelectionLayerRefresh();
       return;
     }
+    touchStartedWithNativeSelection = hasRememberedNativeSelection();
     touchLocksOutput = true;
     cancelSelectionLayerRefresh();
     const touch = event.touches[0];
@@ -1270,6 +1281,20 @@ function enableNativeAgentOutputSelection(terminal, surface, selectionTree) {
   }, { passive: false });
 
   const finishTouch = (event) => {
+    const cancelExistingSelection = event.type === "touchend"
+      && touchStartedWithNativeSelection
+      && !nativeHoldReady
+      && !nativeSelectionMoved
+      && gestureAxis === null;
+    if (cancelExistingSelection) {
+      if (event.cancelable) event.preventDefault();
+      touchLocksOutput = false;
+      resetTouch();
+      nativeController.clear();
+      event.stopPropagation();
+      updateAgentOutputSelectionState(terminal);
+      return;
+    }
     if (nativeHoldReady || nativeSelectionMoved || nativeSelectionInside()) {
       preserveNativeSelection();
     }
@@ -1281,7 +1306,7 @@ function enableNativeAgentOutputSelection(terminal, surface, selectionTree) {
       updateAgentOutputSelectionState(terminal);
     }
   };
-  selectionLayer.addEventListener("touchend", finishTouch, { passive: true });
+  selectionLayer.addEventListener("touchend", finishTouch, { passive: false });
   selectionLayer.addEventListener("touchcancel", finishTouch, { passive: true });
 }
 

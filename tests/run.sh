@@ -105,6 +105,8 @@ WEB_JS="$DIR/web/app.js"
   grep -q "enableNativeAgentOutputSelection" "$WEB_JS" && \
   grep -q "clearBrowserSelectionInside" "$WEB_JS" && \
   grep -q "NATIVE_SELECTION_RELEASE_GRACE_MS" "$WEB_JS" && \
+  grep -q "touchStartedWithNativeSelection" "$WEB_JS" && \
+  grep -q "cancelExistingSelection" "$WEB_JS" && \
   grep -q "nativeAgentSelectionControllers" "$WEB_JS" && \
   grep -q "restoreNativeSelection" "$WEB_JS" && \
   grep -q "agentOutputAccessibilityTree" "$WEB_JS" && \
