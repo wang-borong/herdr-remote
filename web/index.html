@@ -146,7 +146,7 @@
               </div>
             </div>
             <div class="detail-actions">
-              <button class="icon-button" id="copy-output-button" type="button" aria-label="复制输出" title="复制输出">
+              <button class="icon-button" id="copy-output-button" type="button" aria-label="选择或复制 Agent 输出" title="手机长按拖动选择；PC 拖动选择；点击复制">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               </button>
               <button class="danger-button" id="interrupt-button" type="button" aria-label="Interrupt 当前 Agent">
@@ -317,6 +317,7 @@
                   <span id="terminal-transport-label">Tailscale HTTPS · WebSocket</span>
                 </div>
                 <div class="interactive-terminal-actions">
+                  <button class="toolbar-button" id="copy-web-terminal-button" type="button">复制内容</button>
                   <button class="toolbar-button" id="clear-web-terminal-button" type="button">清屏</button>
                   <button class="toolbar-button" id="reconnect-terminal-button" type="button">重新连接</button>
                 </div>
@@ -341,6 +342,7 @@
                 <button type="button" data-terminal-key="page-down" aria-label="Page Down" title="Page Down">PgDn</button>
                 <button type="button" data-terminal-key="ctrl-c">Ctrl+C</button>
                 <button type="button" data-terminal-key="ctrl-l">Ctrl+L</button>
+                <button type="button" id="terminal-copy-button">复制</button>
                 <button type="button" id="terminal-paste-button">粘贴</button>
                 <div class="tmux-keybar" id="tmux-keybar" role="group" aria-label="tmux Ctrl+B 快捷控制（支持鼠标和触摸）" hidden>
                   <span>tmux · Ctrl+B</span>
@@ -570,6 +572,32 @@
         <button class="ghost-button" type="button" data-close-dialog="delete-ssh-host-dialog">取消</button>
         <button class="danger-button danger-solid" id="confirm-delete-ssh-host-button" type="button">确认删除</button>
       </div>
+    </div>
+  </dialog>
+
+  <dialog class="modal terminal-copy-modal" id="terminal-copy-dialog" aria-labelledby="terminal-copy-title" aria-describedby="terminal-copy-description">
+    <div class="terminal-copy-shell">
+      <header class="modal-header">
+        <div>
+          <p class="eyebrow">COPY TERMINAL TEXT</p>
+          <h2 id="terminal-copy-title">复制终端内容</h2>
+          <p id="terminal-copy-description">手机可长按文本使用系统选择手柄；PC 可拖选或使用 Ctrl/⌘+C。</p>
+        </div>
+        <button class="icon-button modal-close" type="button" data-close-dialog="terminal-copy-dialog" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </header>
+      <div class="terminal-copy-content">
+        <label for="terminal-copy-text">纯文本内容</label>
+        <textarea id="terminal-copy-text" readonly wrap="off" spellcheck="false" aria-label="可选择并复制的终端纯文本"></textarea>
+      </div>
+      <footer class="modal-footer">
+        <p id="terminal-copy-meta">等待终端内容…</p>
+        <div>
+          <button class="ghost-button" id="terminal-copy-select-all-button" type="button">全选</button>
+          <button class="primary-button" id="terminal-copy-confirm-button" type="button">复制全部</button>
+        </div>
+      </footer>
     </div>
   </dialog>
 

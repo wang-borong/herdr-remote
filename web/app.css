@@ -1191,6 +1191,34 @@ input::placeholder {
   height: 100%;
 }
 
+.agent-output-terminal .xterm.is-touch-selecting {
+  touch-action: none;
+  -webkit-touch-callout: none;
+}
+
+.agent-output-terminal .xterm.use-native-touch-selection .agent-output-selection-layer {
+  z-index: 11;
+  pointer-events: auto;
+  cursor: text;
+  touch-action: pan-y;
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
+.agent-output-terminal .xterm.use-native-touch-selection .agent-output-selection-tree,
+.agent-output-terminal .xterm.use-native-touch-selection .agent-output-selection-tree > div {
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
+#copy-output-button.has-selection {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+}
+
 .agent-output-terminal .xterm-viewport {
   overflow-x: hidden;
   background-color: var(--terminal);
@@ -1410,7 +1438,8 @@ dialog {
 
 .modal-shell,
 .confirm-shell,
-.settings-shell {
+.settings-shell,
+.terminal-copy-shell {
   background:
     linear-gradient(150deg, color-mix(in srgb, var(--surface-strong) 96%, var(--accent) 4%), var(--surface-strong));
   border: 1px solid var(--border-strong);
@@ -1895,6 +1924,67 @@ dialog {
   width: min(560px, calc(100vw - 32px));
   overflow: hidden;
   border-radius: 22px;
+}
+
+.terminal-copy-shell {
+  width: min(900px, calc(100vw - 32px));
+  height: min(720px, calc(100dvh - 32px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border-radius: 22px;
+}
+
+.terminal-copy-content {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 16px 22px 18px;
+}
+
+.terminal-copy-content label {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+#terminal-copy-text {
+  min-height: 0;
+  resize: none;
+  padding: 14px 15px;
+  overflow: auto;
+  color: var(--terminal-text);
+  background: var(--terminal);
+  border-color: color-mix(in srgb, var(--accent) 20%, var(--border));
+  border-radius: 12px;
+  font-family: "Herdr FiraCode Nerd", "SFMono-Regular", Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  tab-size: 2;
+  white-space: pre;
+  touch-action: pan-x pan-y;
+  user-select: text;
+  -webkit-user-select: text;
+  overscroll-behavior: contain;
+}
+
+#terminal-copy-text:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.terminal-copy-shell .modal-footer > p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#terminal-copy-confirm-button {
+  min-width: 112px;
 }
 
 .settings-content {
@@ -3047,6 +3137,10 @@ dialog {
     display: none;
   }
 
+  .detail-actions #copy-output-button {
+    display: inline-grid;
+  }
+
   .detail-actions .danger-button span {
     display: none;
   }
@@ -3116,6 +3210,29 @@ dialog {
     max-height: none;
     border: 0;
     border-radius: 0;
+  }
+
+  .terminal-copy-shell {
+    width: 100vw;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .terminal-copy-content {
+    padding: 12px 14px 14px;
+  }
+
+  #terminal-copy-text {
+    padding: 12px;
+    font-size: 16px;
+    line-height: 1.45;
+  }
+
+  .terminal-copy-shell .modal-footer {
+    flex-wrap: wrap;
+    padding-right: 14px;
+    padding-left: 14px;
   }
 
   .new-agent-grid {
@@ -3317,7 +3434,10 @@ dialog {
   body.shell-keyboard-open .shell-console {
     grid-template-rows: minmax(0, 1fr);
     gap: 0;
-    padding: 0;
+    /* Keep the same horizontal xterm grid while the IME opens. Changing the
+       inline padding here used to grow a 390 px phone from 47 to 50 columns
+       mid-input, while tmux could still be redrawing for the old width. */
+    padding: 0 10px;
   }
 
   body.shell-keyboard-open .shell-header,
@@ -3329,7 +3449,8 @@ dialog {
   body.shell-keyboard-open .interactive-terminal-card {
     height: 100%;
     grid-template-rows: minmax(0, 1fr) auto;
-    border-width: 0;
+    border-top-width: 0;
+    border-bottom-width: 0;
     border-radius: 0;
     box-shadow: none;
   }
@@ -3507,7 +3628,7 @@ dialog {
     display: none;
   }
 
-  .interactive-terminal-actions .toolbar-button:first-child {
+  #clear-web-terminal-button {
     display: none;
   }
 

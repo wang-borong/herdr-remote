@@ -28,6 +28,8 @@ REMOTE_EXECUTABLE_RE = re.compile(r"^(?:/[A-Za-z0-9._+@%/:=\-]+|[A-Za-z0-9._+\-]
 PROFILE_COLORS = {"violet", "cyan", "green", "amber", "rose"}
 MAX_SSH_PROFILES = 32
 MAX_TERMINAL_INPUT_BYTES = 16 * 1024
+MAX_TERMINAL_CAPTURE_BYTES = 1024 * 1024
+MAX_TERMINAL_CAPTURE_LINES = 5000
 TMUX_SOCKET_NAME = "herdr-web"
 TMUX_CONFIGURATION_ATTEMPTS = 40
 TMUX_CONFIGURATION_RETRY_SECONDS = 0.05
@@ -300,7 +302,7 @@ def terminal_profile_command(
     command = [
         tmux_binary,
         "-L", TMUX_SOCKET_NAME,
-        "new-session", "-A",
+        "new-session", "-A", "-D",
         "-s", session_name,
     ]
     if profile.get("kind") == "local":
@@ -318,6 +320,7 @@ def tmux_server_configuration_command(tmux_binary: str) -> list[str]:
         "set-option", "-g", "mouse", "on",
         ";", "set-option", "-g", "prefix", TMUX_WEB_PREFIX,
         ";", "set-option", "-g", "prefix2", "None",
+        ";", "set-window-option", "-g", "window-size", "latest",
     ]
     for key, *binding in TMUX_WEB_BINDINGS:
         command.extend([";", "bind-key", "-T", "prefix", key, *binding])
@@ -351,6 +354,43 @@ def persistent_session_name(profile: dict) -> str:
     endpoint = f"{profile['target']}:{profile.get('port', 22)}"
     endpoint_hash = hashlib.sha256(endpoint.encode()).hexdigest()[:8]
     return f"herdr-ssh-{profile['id']}-{endpoint_hash}"
+
+
+def capture_tmux_pane(
+    profile: dict,
+    tmux_binary: str | None,
+    *,
+    maximum_bytes: int = MAX_TERMINAL_CAPTURE_BYTES,
+) -> tuple[str, bool]:
+    """Capture the active pane history from the dedicated web tmux server."""
+    if not tmux_binary:
+        raise TerminalConfigError("tmux history is unavailable for this terminal")
+    try:
+        result = subprocess.run(
+            [
+                tmux_binary,
+                "-L", TMUX_SOCKET_NAME,
+                "capture-pane", "-p", "-J", "-S", f"-{MAX_TERMINAL_CAPTURE_LINES}",
+                "-t", persistent_session_name(profile),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise TerminalConfigError("Could not capture tmux pane history") from error
+    if result.returncode != 0:
+        raise TerminalConfigError("Could not capture tmux pane history")
+
+    output = bytes(result.stdout or b"")
+    truncated = len(output) > maximum_bytes
+    if truncated:
+        output = output[-maximum_bytes:]
+        first_newline = output.find(b"\n")
+        if first_newline >= 0:
+            output = output[first_newline + 1:]
+    return output.decode("utf-8", errors="replace").rstrip("\n"), truncated
 
 
 def terminate_persistent_session(profile: dict, tmux_binary: str | None) -> bool:
@@ -554,11 +594,39 @@ class TerminalSession:
             remaining = remaining[written:]
 
     async def resize(self, cols, rows) -> tuple[int, int]:
-        self.cols, self.rows = validated_terminal_dimensions(cols, rows)
-        if self.master_fd is None:
+        columns, lines = validated_terminal_dimensions(cols, rows)
+        if (
+            self.master_fd is None
+            or not self.process
+            or self.process.returncode is not None
+        ):
             raise TerminalConfigError("Terminal session is not running")
+        if (columns, lines) == (self.cols, self.rows):
+            return self.cols, self.rows
+        self.cols, self.rows = columns, lines
         _set_window_size(self.master_fd, self.cols, self.rows)
+        try:
+            # The PTY slave is opened before the child starts its own session,
+            # so it is not the child's controlling terminal. TIOCSWINSZ still
+            # updates the kernel dimensions, but no foreground process group
+            # receives SIGWINCH automatically. Notify the isolated child
+            # process group explicitly so tmux, SSH and shell line editors
+            # re-read the new width before redrawing wrapped input.
+            os.killpg(self.process.pid, signal.SIGWINCH)
+        except ProcessLookupError as error:
+            raise TerminalConfigError("Terminal session is not running") from error
+        except OSError as error:
+            raise TerminalConfigError("Terminal size could not be applied") from error
         return self.cols, self.rows
+
+    async def capture(self) -> tuple[str, bool]:
+        if not self.persistent or not self.tmux_binary:
+            raise TerminalConfigError("tmux history is unavailable for this terminal")
+        return await asyncio.to_thread(
+            capture_tmux_pane,
+            self.profile,
+            self.tmux_binary,
+        )
 
     async def close(self) -> None:
         if self.closing:

@@ -90,12 +90,14 @@ const elements = {
   editSshHostButton: byId("edit-ssh-host-button"),
   copyJumpCommandButton: byId("copy-jump-command-button"),
   disconnectTerminalButton: byId("disconnect-terminal-button"),
+  copyWebTerminalButton: byId("copy-web-terminal-button"),
   clearWebTerminalButton: byId("clear-web-terminal-button"),
   reconnectTerminalButton: byId("reconnect-terminal-button"),
   webTerminal: byId("web-terminal"),
   terminalConnectionOverlay: byId("terminal-connection-overlay"),
   terminalOverlayTitle: byId("terminal-overlay-title"),
   terminalOverlayCopy: byId("terminal-overlay-copy"),
+  terminalCopyButton: byId("terminal-copy-button"),
   terminalPasteButton: byId("terminal-paste-button"),
   terminalCtrlButton: byId("terminal-ctrl-button"),
   terminalTmuxPrefixButton: byId("terminal-tmux-prefix-button"),
@@ -117,6 +119,13 @@ const elements = {
   deleteSshHostButton: byId("delete-ssh-host-button"),
   deleteSshHostDialog: byId("delete-ssh-host-dialog"),
   confirmDeleteSshHostButton: byId("confirm-delete-ssh-host-button"),
+  terminalCopyDialog: byId("terminal-copy-dialog"),
+  terminalCopyTitle: byId("terminal-copy-title"),
+  terminalCopyDescription: byId("terminal-copy-description"),
+  terminalCopyText: byId("terminal-copy-text"),
+  terminalCopyMeta: byId("terminal-copy-meta"),
+  terminalCopySelectAllButton: byId("terminal-copy-select-all-button"),
+  terminalCopyConfirmButton: byId("terminal-copy-confirm-button"),
   remoteAccessStatus: byId("remote-access-status"),
   openRemoteShellButton: byId("open-remote-shell-button"),
   toastRegion: byId("toast-region"),
@@ -171,6 +180,14 @@ const TERMINAL_KEYBAR_MIN_HEIGHT = 35;
 const MOBILE_KEYBOARD_MIN_HEIGHT = 120;
 const MOBILE_KEYBOARD_HEIGHT_RATIO = 0.2;
 const MOBILE_VIEWPORT_WIDTH_TOLERANCE = 48;
+const TERMINAL_RESIZE_ACK_TIMEOUT = 1200;
+const TERMINAL_PENDING_INPUT_MAX_BYTES = 64 * 1024;
+const AGENT_TOUCH_SELECTION_DELAY = 420;
+const AGENT_TOUCH_MOVE_THRESHOLD = 8;
+const AGENT_TOUCH_SELECTION_EDGE = 36;
+const AGENT_TOUCH_SELECTION_SCROLL_INTERVAL = 80;
+const NATIVE_SELECTION_RELEASE_GRACE_MS = 900;
+const nativeAgentSelectionControllers = new WeakMap();
 const terminalFontReady = document.fonts && typeof document.fonts.load === "function"
   ? document.fonts.load('400 13px "Herdr FiraCode Nerd"').catch(() => [])
   : Promise.resolve([]);
@@ -229,6 +246,19 @@ const state = {
   terminalFitFrame: null,
   terminalFitTimer: null,
   terminalFitScrollToBottom: false,
+  terminalResizeDirty: false,
+  terminalResizeSequence: 0,
+  terminalResizePendingId: null,
+  terminalResizeAckTimer: null,
+  terminalResizeSentCols: 0,
+  terminalResizeSentRows: 0,
+  terminalResizeAckCols: 0,
+  terminalResizeAckRows: 0,
+  terminalPendingInput: [],
+  terminalPendingInputBytes: 0,
+  terminalCaptureId: 0,
+  terminalCapturePending: false,
+  copyDialogSource: "",
   visualViewportWidth: 0,
   visualViewportBaselineHeight: 0,
   shellKeyboardOpen: false,
@@ -386,6 +416,7 @@ function connect() {
     state.startPending = false;
     state.directoryPending = false;
     state.sshProfilePending = false;
+    resetTerminalResizeSync();
     state.terminalSessionId = null;
     state.terminalPending = false;
     state.terminalConnected = false;
@@ -451,6 +482,12 @@ function handleMessage(message) {
       break;
     case "terminal_output":
       handleTerminalOutput(message);
+      break;
+    case "terminal_resized":
+      handleTerminalResized(message);
+      break;
+    case "terminal_capture":
+      handleTerminalCapture(message);
       break;
     case "terminal_exit":
       handleTerminalExit(message);
@@ -710,6 +747,23 @@ function updateAppUrl() {
   history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
+function attachTerminalCopyShortcut(terminal, label, clearAfterCopy = false) {
+  terminal.attachCustomKeyEventHandler((event) => {
+    const copyKey = event.type === "keydown"
+      && String(event.key || "").toLowerCase() === "c"
+      && (event.ctrlKey || event.metaKey)
+      && !event.altKey;
+    if (!copyKey) return true;
+    const selection = terminal.getSelection();
+    if (!selection) return true;
+    event.preventDefault();
+    copyText(selection, "已复制选区", `${label}已复制到剪贴板。`).then((copied) => {
+      if (copied && clearAfterCopy) clearAgentOutputSelection(terminal);
+    });
+    return false;
+  });
+}
+
 function ensureWebTerminal() {
   if (state.terminalInstance) return true;
   if (typeof window.Terminal !== "function" || typeof window.FitAddon?.FitAddon !== "function") {
@@ -733,6 +787,7 @@ function ensureWebTerminal() {
   terminal.loadAddon(fitAddon);
   terminal.open(elements.webTerminal);
   if (terminal.textarea) terminal.textarea.setAttribute("enterkeyhint", "enter");
+  attachTerminalCopyShortcut(terminal, "Shell 终端选区");
   enableWebTerminalTouchScrolling(terminal);
   terminal.onData((data) => sendTerminalText(applyTerminalModifiersToInput(data)));
   state.terminalInstance = terminal;
@@ -753,15 +808,601 @@ function ensureWebTerminal() {
   return true;
 }
 
+function browserSelectionInside(element) {
+  const selection = window.getSelection?.();
+  return Boolean(
+    selection
+    && !selection.isCollapsed
+    && selection.anchorNode
+    && selection.focusNode
+    && element.contains(selection.anchorNode)
+    && element.contains(selection.focusNode),
+  );
+}
+
+function clearBrowserSelectionInside(element) {
+  const selection = window.getSelection?.();
+  if (!selection || !element) return;
+  const anchorInside = selection.anchorNode && element.contains(selection.anchorNode);
+  const focusInside = selection.focusNode && element.contains(selection.focusNode);
+  if (anchorInside || focusInside) selection.removeAllRanges();
+}
+
+function browserSelectionTextInside(element) {
+  return browserSelectionInside(element) ? window.getSelection().toString() : "";
+}
+
+function agentOutputAccessibilityTree(terminal) {
+  return terminal?.element?.querySelector(
+    ".xterm-accessibility:not(.agent-output-selection-layer) .xterm-accessibility-tree",
+  ) || null;
+}
+
+function agentOutputSelectionTree(terminal) {
+  const nativeController = nativeAgentSelectionControllers.get(terminal);
+  return nativeController?.selectionTree() || agentOutputAccessibilityTree(terminal);
+}
+
+function agentOutputSelectionBoundary(selectionTree, container, offset, endBoundary = false) {
+  if (!selectionTree || !container || !selectionTree.children.length) return null;
+  if (container === selectionTree) {
+    const rawIndex = endBoundary ? offset - 1 : offset;
+    const rowIndex = Math.max(0, Math.min(selectionTree.children.length - 1, rawIndex));
+    const row = selectionTree.children[rowIndex];
+    return {
+      row,
+      rowIndex,
+      textOffset: endBoundary ? (row.textContent || "").length : 0,
+    };
+  }
+
+  let row = container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement;
+  while (row && row.parentElement !== selectionTree) row = row.parentElement;
+  if (!row) return null;
+  const rowIndex = Array.prototype.indexOf.call(selectionTree.children, row);
+  if (rowIndex < 0) return null;
+
+  const prefix = document.createRange();
+  try {
+    prefix.selectNodeContents(row);
+    prefix.setEnd(container, offset);
+  } catch (_) {
+    return null;
+  }
+  return {
+    row,
+    rowIndex,
+    textOffset: Math.max(0, Math.min((row.textContent || "").length, prefix.toString().length)),
+  };
+}
+
+function selectedAgentOutputText(terminal, selectionTree) {
+  const selection = window.getSelection?.();
+  if (
+    !selectionTree
+    || !selection
+    || selection.isCollapsed
+    || selection.rangeCount < 1
+    || !browserSelectionInside(selectionTree)
+  ) return "";
+
+  const range = selection.getRangeAt(0);
+  const start = agentOutputSelectionBoundary(
+    selectionTree,
+    range.startContainer,
+    range.startOffset,
+  );
+  const end = agentOutputSelectionBoundary(
+    selectionTree,
+    range.endContainer,
+    range.endOffset,
+    true,
+  );
+  if (!start || !end || start.rowIndex > end.rowIndex) return selection.toString();
+
+  const rows = selectionTree.children;
+  const parts = [];
+  for (let rowIndex = start.rowIndex; rowIndex <= end.rowIndex; rowIndex += 1) {
+    const row = rows[rowIndex];
+    const rawRowText = row?.textContent || "";
+    const rowText = rawRowText === "\u00a0" ? "" : rawRowText;
+    const from = rowIndex === start.rowIndex ? start.textOffset : 0;
+    const to = rowIndex === end.rowIndex ? end.textOffset : rowText.length;
+    parts.push(rowText.slice(from, to));
+    if (rowIndex >= end.rowIndex) continue;
+
+    const nextRow = rows[rowIndex + 1];
+    const nextBufferRow = Number(nextRow?.getAttribute("aria-posinset")) - 1;
+    const nextBufferLine = Number.isInteger(nextBufferRow)
+      ? terminal?.buffer?.active?.getLine(nextBufferRow)
+      : null;
+    if (!nextBufferLine?.isWrapped) parts.push("\n");
+  }
+  return parts.join("");
+}
+
+function agentOutputHasSelection(terminal) {
+  const nativeController = nativeAgentSelectionControllers.get(terminal);
+  const selectionTree = agentOutputSelectionTree(terminal);
+  return Boolean(
+    terminal?.hasSelection()
+    || nativeController?.hasSelection()
+    || (selectionTree && browserSelectionInside(selectionTree)),
+  );
+}
+
+function agentOutputSelectionLocked(terminal) {
+  const nativeController = nativeAgentSelectionControllers.get(terminal);
+  return Boolean(nativeController?.locksOutput() || agentOutputHasSelection(terminal));
+}
+
+function updateAgentOutputSelectionState(terminal) {
+  if (!terminal || (state.outputTerminalInstance && state.outputTerminalInstance !== terminal)) return;
+  const selected = agentOutputHasSelection(terminal);
+  elements.copyOutputButton.classList.toggle("has-selection", selected);
+  elements.copyOutputButton.setAttribute(
+    "aria-label",
+    selected ? "复制已选择的 Agent 输出" : "选择或复制 Agent 输出",
+  );
+  if (!selected && !agentOutputSelectionLocked(terminal)) {
+    window.requestAnimationFrame(() => {
+      if (!agentOutputSelectionLocked(terminal)) renderOutput();
+    });
+  }
+}
+
+function clearAgentOutputSelection(terminal) {
+  if (!terminal) return;
+  const selectionTree = agentOutputSelectionTree(terminal);
+  const nativeController = nativeAgentSelectionControllers.get(terminal);
+  if (nativeController) nativeController.clear();
+  else if (selectionTree) clearBrowserSelectionInside(selectionTree);
+  if (terminal.hasSelection()) terminal.clearSelection();
+  updateAgentOutputSelectionState(terminal);
+}
+
+function enableNativeAgentOutputSelection(terminal, surface, selectionTree) {
+  surface.classList.add("use-native-touch-selection");
+
+  const accessibilityLayer = selectionTree.parentElement;
+  if (!accessibilityLayer) return;
+  const selectionLayer = accessibilityLayer.cloneNode(false);
+  selectionLayer.classList.add("agent-output-selection-layer");
+  selectionLayer.setAttribute("aria-hidden", "true");
+  accessibilityLayer.insertAdjacentElement("afterend", selectionLayer);
+
+  let stableSelectionTree = null;
+  let selectionLayerRefreshFrame = null;
+  let preserveNativeSelectionUntil = 0;
+  let lastNativeSelectionRange = null;
+  let restoreSelectionFrame = null;
+  let releaseSelectionTimer = null;
+  let touchLocksOutput = false;
+
+  const nativeSelectionInside = () => Boolean(
+    stableSelectionTree && browserSelectionInside(stableSelectionTree),
+  );
+
+  const locksOutput = () => Boolean(
+    touchLocksOutput
+    || nativeSelectionInside()
+    || Date.now() < preserveNativeSelectionUntil,
+  );
+
+  const cancelSelectionLayerRefresh = () => {
+    if (selectionLayerRefreshFrame === null) return;
+    window.cancelAnimationFrame(selectionLayerRefreshFrame);
+    selectionLayerRefreshFrame = null;
+  };
+
+  const refreshSelectionLayer = () => {
+    cancelSelectionLayerRefresh();
+    if (locksOutput()) return false;
+    selectionLayer.style.cssText = accessibilityLayer.style.cssText;
+    const clonedTree = selectionTree.cloneNode(false);
+    clonedTree.classList.add("agent-output-selection-tree");
+    const buffer = terminal.buffer.active;
+    for (let viewportRow = 0; viewportRow < terminal.rows; viewportRow += 1) {
+      const sourceRow = selectionTree.children[viewportRow];
+      const clonedRow = sourceRow?.cloneNode(false) || document.createElement("div");
+      const bufferRow = buffer.viewportY + viewportRow;
+      const lineText = buffer.getLine(bufferRow)?.translateToString(true) || "";
+      clonedRow.textContent = lineText || "\u00a0";
+      clonedRow.setAttribute("role", "listitem");
+      clonedRow.setAttribute("aria-posinset", String(bufferRow + 1));
+      clonedRow.setAttribute("aria-setsize", String(buffer.length));
+      clonedRow.removeAttribute("tabindex");
+      clonedTree.append(clonedRow);
+    }
+    selectionLayer.replaceChildren(clonedTree);
+    stableSelectionTree = clonedTree;
+    return true;
+  };
+
+  const scheduleSelectionLayerRefresh = () => {
+    cancelSelectionLayerRefresh();
+    if (locksOutput()) return;
+    selectionLayerRefreshFrame = window.requestAnimationFrame(() => {
+      selectionLayerRefreshFrame = window.requestAnimationFrame(() => {
+        selectionLayerRefreshFrame = null;
+        refreshSelectionLayer();
+      });
+    });
+  };
+
+  const rememberNativeSelection = () => {
+    const selection = window.getSelection?.();
+    if (
+      !stableSelectionTree
+      || !selection
+      || selection.rangeCount < 1
+      || !browserSelectionInside(stableSelectionTree)
+    ) return;
+    lastNativeSelectionRange = selection.getRangeAt(0).cloneRange();
+  };
+
+  const releaseSelectionLockLater = () => {
+    if (releaseSelectionTimer !== null) window.clearTimeout(releaseSelectionTimer);
+    const delay = Math.max(0, preserveNativeSelectionUntil - Date.now()) + 32;
+    releaseSelectionTimer = window.setTimeout(() => {
+      releaseSelectionTimer = null;
+      if (nativeSelectionInside()) return;
+      preserveNativeSelectionUntil = 0;
+      lastNativeSelectionRange = null;
+      scheduleSelectionLayerRefresh();
+      updateAgentOutputSelectionState(terminal);
+    }, delay);
+  };
+
+  const preserveNativeSelection = () => {
+    preserveNativeSelectionUntil = Date.now() + NATIVE_SELECTION_RELEASE_GRACE_MS;
+    rememberNativeSelection();
+    releaseSelectionLockLater();
+  };
+
+  const restoreNativeSelection = () => {
+    restoreSelectionFrame = null;
+    if (Date.now() >= preserveNativeSelectionUntil || !lastNativeSelectionRange) return;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.isCollapsed) return;
+    if (
+      !lastNativeSelectionRange.startContainer.isConnected
+      || !lastNativeSelectionRange.endContainer.isConnected
+      || !stableSelectionTree?.contains(lastNativeSelectionRange.startContainer)
+      || !stableSelectionTree?.contains(lastNativeSelectionRange.endContainer)
+    ) {
+      preserveNativeSelectionUntil = 0;
+      lastNativeSelectionRange = null;
+      scheduleSelectionLayerRefresh();
+      updateAgentOutputSelectionState(terminal);
+      return;
+    }
+    selection.removeAllRanges();
+    selection.addRange(lastNativeSelectionRange.cloneRange());
+  };
+
+  const nativeController = {
+    clear() {
+      touchLocksOutput = false;
+      preserveNativeSelectionUntil = 0;
+      lastNativeSelectionRange = null;
+      if (releaseSelectionTimer !== null) {
+        window.clearTimeout(releaseSelectionTimer);
+        releaseSelectionTimer = null;
+      }
+      if (restoreSelectionFrame !== null) {
+        window.cancelAnimationFrame(restoreSelectionFrame);
+        restoreSelectionFrame = null;
+      }
+      if (stableSelectionTree) clearBrowserSelectionInside(stableSelectionTree);
+      scheduleSelectionLayerRefresh();
+    },
+    hasSelection: nativeSelectionInside,
+    locksOutput,
+    selectedText() {
+      return selectedAgentOutputText(terminal, stableSelectionTree);
+    },
+    selectionTree() {
+      return stableSelectionTree;
+    },
+    refresh: scheduleSelectionLayerRefresh,
+  };
+  nativeAgentSelectionControllers.set(terminal, nativeController);
+  refreshSelectionLayer();
+
+  const keepNativeSelectionEvent = (event) => {
+    if (event.target instanceof Node && selectionLayer.contains(event.target)) {
+      if (event.type === "contextmenu") preserveNativeSelection();
+      event.stopPropagation();
+    }
+  };
+  selectionLayer.addEventListener("mousedown", keepNativeSelectionEvent);
+  selectionLayer.addEventListener("mouseup", keepNativeSelectionEvent);
+  selectionLayer.addEventListener("click", keepNativeSelectionEvent);
+  selectionLayer.addEventListener("contextmenu", keepNativeSelectionEvent);
+  document.addEventListener("selectionchange", () => {
+    const selection = window.getSelection?.();
+    if (nativeSelectionInside()) {
+      rememberNativeSelection();
+      updateAgentOutputSelectionState(terminal);
+      return;
+    }
+    if (Date.now() < preserveNativeSelectionUntil) {
+      if (
+        (!selection || selection.isCollapsed)
+        && restoreSelectionFrame === null
+        && lastNativeSelectionRange
+      ) {
+        restoreSelectionFrame = window.requestAnimationFrame(restoreNativeSelection);
+        return;
+      }
+      if (!lastNativeSelectionRange) return;
+    }
+    preserveNativeSelectionUntil = 0;
+    lastNativeSelectionRange = null;
+    if (terminal.hasSelection()) terminal.clearSelection();
+    scheduleSelectionLayerRefresh();
+    updateAgentOutputSelectionState(terminal);
+  });
+  document.addEventListener("copy", (event) => {
+    const selectedText = nativeController.selectedText();
+    if (selectedText && event.clipboardData) {
+      try {
+        event.clipboardData.setData("text/plain", selectedText);
+        event.preventDefault();
+      } catch (_) {
+        // Keep the browser's native copy behavior when custom clipboard data is unavailable.
+      }
+    }
+    preserveNativeSelectionUntil = 0;
+  }, { capture: true });
+
+  terminal.onRender(scheduleSelectionLayerRefresh);
+  terminal.onScroll(scheduleSelectionLayerRefresh);
+  terminal.onResize(scheduleSelectionLayerRefresh);
+  if ("MutationObserver" in window) {
+    const accessibilityObserver = new MutationObserver(scheduleSelectionLayerRefresh);
+    accessibilityObserver.observe(selectionTree, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  let originX = null;
+  let originY = null;
+  let lastTouchY = null;
+  let gestureAxis = null;
+  let pixelRemainder = 0;
+  let nativeHoldReady = false;
+  let nativeHoldTimer = null;
+  let nativeSelectionMoved = false;
+
+  const clearNativeHoldTimer = () => {
+    if (nativeHoldTimer === null) return;
+    window.clearTimeout(nativeHoldTimer);
+    nativeHoldTimer = null;
+  };
+
+  const resetTouch = () => {
+    clearNativeHoldTimer();
+    originX = null;
+    originY = null;
+    lastTouchY = null;
+    gestureAxis = null;
+    pixelRemainder = 0;
+    nativeHoldReady = false;
+    nativeSelectionMoved = false;
+  };
+
+  selectionLayer.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 1) {
+      touchLocksOutput = false;
+      resetTouch();
+      scheduleSelectionLayerRefresh();
+      return;
+    }
+    touchLocksOutput = true;
+    cancelSelectionLayerRefresh();
+    const touch = event.touches[0];
+    originX = touch.clientX;
+    originY = touch.clientY;
+    lastTouchY = touch.clientY;
+    gestureAxis = null;
+    pixelRemainder = 0;
+    nativeHoldReady = false;
+    nativeSelectionMoved = false;
+    clearNativeHoldTimer();
+    nativeHoldTimer = window.setTimeout(() => {
+      nativeHoldTimer = null;
+      nativeHoldReady = true;
+    }, AGENT_TOUCH_SELECTION_DELAY);
+    event.stopPropagation();
+  }, { passive: true });
+
+  selectionLayer.addEventListener("touchmove", (event) => {
+    if (lastTouchY === null || event.touches.length !== 1) {
+      touchLocksOutput = false;
+      resetTouch();
+      scheduleSelectionLayerRefresh();
+      return;
+    }
+
+    const touch = event.touches[0];
+    const deltaY = lastTouchY - touch.clientY;
+    const totalX = Math.abs(originX - touch.clientX);
+    const totalY = Math.abs(originY - touch.clientY);
+    lastTouchY = touch.clientY;
+    if (nativeSelectionInside() && Math.max(totalX, totalY) >= 2) {
+      nativeSelectionMoved = true;
+    }
+    event.stopPropagation();
+
+    if (nativeHoldReady || nativeSelectionInside()) return;
+    if (gestureAxis === null && Math.max(totalX, totalY) >= AGENT_TOUCH_MOVE_THRESHOLD) {
+      clearNativeHoldTimer();
+      gestureAxis = totalY > totalX ? "vertical" : "horizontal";
+      if (gestureAxis !== null) touchLocksOutput = false;
+    }
+    if (gestureAxis !== "vertical" || !deltaY) return;
+
+    const buffer = terminal.buffer.active;
+    const canScroll = deltaY > 0
+      ? buffer.viewportY < buffer.baseY
+      : buffer.viewportY > 0;
+    if (!canScroll) {
+      pixelRemainder = 0;
+      return;
+    }
+
+    event.preventDefault();
+    if (terminal.hasSelection()) terminal.clearSelection();
+    const screenHeight = surface.querySelector(".xterm-screen")?.clientHeight
+      || surface.clientHeight;
+    const lineHeight = Math.max(1, screenHeight / Math.max(1, terminal.rows));
+    pixelRemainder += deltaY;
+    const lineDelta = Math.trunc(pixelRemainder / lineHeight);
+    if (!lineDelta) return;
+    terminal.scrollLines(lineDelta);
+    pixelRemainder -= lineDelta * lineHeight;
+    scheduleSelectionLayerRefresh();
+  }, { passive: false });
+
+  const finishTouch = (event) => {
+    if (nativeHoldReady || nativeSelectionMoved || nativeSelectionInside()) {
+      preserveNativeSelection();
+    }
+    touchLocksOutput = false;
+    resetTouch();
+    event.stopPropagation();
+    if (!locksOutput()) {
+      scheduleSelectionLayerRefresh();
+      updateAgentOutputSelectionState(terminal);
+    }
+  };
+  selectionLayer.addEventListener("touchend", finishTouch, { passive: true });
+  selectionLayer.addEventListener("touchcancel", finishTouch, { passive: true });
+}
+
 function enableAgentOutputTouchScrolling(terminal) {
   const surface = terminal.element;
   if (!surface) return;
 
+  const selectionTree = agentOutputAccessibilityTree(terminal);
+  const nativeTouchSelection = Boolean(
+    selectionTree
+    && navigator.maxTouchPoints > 0
+    && window.matchMedia("(pointer: coarse)").matches
+    && typeof window.getSelection === "function",
+  );
+  if (nativeTouchSelection) {
+    enableNativeAgentOutputSelection(terminal, surface, selectionTree);
+    return;
+  }
+
+  let originX = null;
+  let originY = null;
   let lastTouchY = null;
+  let lastSelectionTouch = null;
+  let selectionAnchor = null;
+  let gestureMode = null;
+  let selectionTimer = null;
+  let selectionScrollTimer = null;
+  let selectionScrollDirection = 0;
+  let suppressContextMenuUntil = 0;
   let pixelRemainder = 0;
+
+  const clearSelectionTimer = () => {
+    if (selectionTimer === null) return;
+    window.clearTimeout(selectionTimer);
+    selectionTimer = null;
+  };
+
+  const stopSelectionAutoScroll = () => {
+    if (selectionScrollTimer !== null) window.clearInterval(selectionScrollTimer);
+    selectionScrollTimer = null;
+    selectionScrollDirection = 0;
+  };
+
+  const terminalCellFromPoint = (clientX, clientY) => {
+    const screen = surface.querySelector(".xterm-screen");
+    const buffer = terminal.buffer.active;
+    if (!screen || !buffer.length || !terminal.cols || !terminal.rows) return null;
+    const rect = screen.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const column = Math.max(0, Math.min(
+      terminal.cols - 1,
+      Math.floor((clientX - rect.left) / (rect.width / terminal.cols)),
+    ));
+    const viewportRow = Math.max(0, Math.min(
+      terminal.rows - 1,
+      Math.floor((clientY - rect.top) / (rect.height / terminal.rows)),
+    ));
+    return {
+      column,
+      row: Math.max(0, Math.min(buffer.length - 1, buffer.viewportY + viewportRow)),
+    };
+  };
+
+  const selectAgentOutputRange = (anchor, focus) => {
+    if (!anchor || !focus) return;
+    const anchorOffset = anchor.row * terminal.cols + anchor.column;
+    const focusOffset = focus.row * terminal.cols + focus.column;
+    const startOffset = Math.min(anchorOffset, focusOffset);
+    terminal.select(
+      startOffset % terminal.cols,
+      Math.floor(startOffset / terminal.cols),
+      Math.max(1, Math.abs(focusOffset - anchorOffset) + 1),
+    );
+  };
+
+  const updateTouchSelection = () => {
+    if (!selectionAnchor || !lastSelectionTouch) return;
+    selectAgentOutputRange(
+      selectionAnchor,
+      terminalCellFromPoint(lastSelectionTouch.clientX, lastSelectionTouch.clientY),
+    );
+  };
+
+  const setSelectionAutoScroll = (direction) => {
+    if (selectionScrollDirection === direction) return;
+    stopSelectionAutoScroll();
+    if (!direction) return;
+    selectionScrollDirection = direction;
+    selectionScrollTimer = window.setInterval(() => {
+      const buffer = terminal.buffer.active;
+      const before = buffer.viewportY;
+      terminal.scrollLines(direction);
+      if (buffer.viewportY === before) {
+        stopSelectionAutoScroll();
+        return;
+      }
+      updateTouchSelection();
+    }, AGENT_TOUCH_SELECTION_SCROLL_INTERVAL);
+  };
+
+  const updateSelectionAutoScroll = (clientY) => {
+    const screen = surface.querySelector(".xterm-screen");
+    if (!screen) return stopSelectionAutoScroll();
+    const rect = screen.getBoundingClientRect();
+    const edge = Math.min(AGENT_TOUCH_SELECTION_EDGE, rect.height / 4);
+    if (clientY < rect.top + edge) setSelectionAutoScroll(-1);
+    else if (clientY > rect.bottom - edge) setSelectionAutoScroll(1);
+    else stopSelectionAutoScroll();
+  };
+
   const resetTouch = () => {
+    clearSelectionTimer();
+    stopSelectionAutoScroll();
+    originX = null;
+    originY = null;
     lastTouchY = null;
+    lastSelectionTouch = null;
+    selectionAnchor = null;
+    gestureMode = null;
     pixelRemainder = 0;
+    surface.classList.remove("is-touch-selecting");
   };
 
   surface.addEventListener("touchstart", (event) => {
@@ -769,8 +1410,24 @@ function enableAgentOutputTouchScrolling(terminal) {
       resetTouch();
       return;
     }
-    lastTouchY = event.touches[0].clientY;
+    const touch = event.touches[0];
+    originX = touch.clientX;
+    originY = touch.clientY;
+    lastTouchY = touch.clientY;
+    lastSelectionTouch = {clientX: touch.clientX, clientY: touch.clientY};
+    selectionAnchor = terminalCellFromPoint(touch.clientX, touch.clientY);
+    gestureMode = "pending";
     pixelRemainder = 0;
+    clearSelectionTimer();
+    selectionTimer = window.setTimeout(() => {
+      selectionTimer = null;
+      if (gestureMode !== "pending" || !selectionAnchor) return;
+      gestureMode = "selection";
+      suppressContextMenuUntil = Date.now() + 1500;
+      surface.classList.add("is-touch-selecting");
+      terminal.clearSelection();
+      selectAgentOutputRange(selectionAnchor, selectionAnchor);
+    }, AGENT_TOUCH_SELECTION_DELAY);
     event.stopPropagation();
   }, { passive: true });
 
@@ -780,10 +1437,30 @@ function enableAgentOutputTouchScrolling(terminal) {
       return;
     }
 
-    const currentY = event.touches[0].clientY;
+    const touch = event.touches[0];
+    const currentY = touch.clientY;
     const deltaY = lastTouchY - currentY;
+    const totalX = Math.abs(originX - touch.clientX);
+    const totalY = Math.abs(originY - touch.clientY);
     lastTouchY = currentY;
     event.stopPropagation();
+
+    if (gestureMode === "pending" && Math.max(totalX, totalY) >= AGENT_TOUCH_MOVE_THRESHOLD) {
+      clearSelectionTimer();
+      gestureMode = "scroll";
+      terminal.clearSelection();
+    }
+
+    if (gestureMode === "selection") {
+      event.preventDefault();
+      suppressContextMenuUntil = Date.now() + 1000;
+      lastSelectionTouch = {clientX: touch.clientX, clientY: touch.clientY};
+      updateTouchSelection();
+      updateSelectionAutoScroll(touch.clientY);
+      return;
+    }
+
+    if (gestureMode !== "scroll") return;
     if (!deltaY) return;
 
     const buffer = terminal.buffer.active;
@@ -807,11 +1484,36 @@ function enableAgentOutputTouchScrolling(terminal) {
   }, { passive: false });
 
   const finishTouch = (event) => {
+    const selected = gestureMode === "selection" ? terminal.getSelection() : "";
+    const openSelectionCopyDialog = event.type === "touchend" && Boolean(selected);
+    if (gestureMode === "selection" || gestureMode === "pending") {
+      event.preventDefault();
+    }
+    if (gestureMode === "selection") {
+      suppressContextMenuUntil = Date.now() + 1000;
+      if (event.type === "touchcancel") terminal.clearSelection();
+    } else if (gestureMode === "pending") {
+      terminal.clearSelection();
+    }
     resetTouch();
     event.stopPropagation();
+    if (openSelectionCopyDialog) {
+      openTerminalCopyDialog({
+        title: "复制选中的 Agent 输出",
+        description: "已保留刚才长按拖动选择的内容，点击“复制选中”即可写入剪贴板。",
+        content: selected,
+        source: "agent-selection",
+        status: `${selected.split("\n").length} 行 · 已选择 ${selected.length} 个字符`,
+      });
+    }
   };
-  surface.addEventListener("touchend", finishTouch, { passive: true });
-  surface.addEventListener("touchcancel", finishTouch, { passive: true });
+  surface.addEventListener("touchend", finishTouch, { passive: false });
+  surface.addEventListener("touchcancel", finishTouch, { passive: false });
+  surface.addEventListener("contextmenu", (event) => {
+    if (Date.now() >= suppressContextMenuUntil) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, {capture: true});
 }
 
 function enableWebTerminalTouchScrolling(terminal) {
@@ -931,7 +1633,9 @@ function ensureAgentOutputTerminal() {
     const fitAddon = new window.FitAddon.FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(elements.agentOutputTerminal);
+    attachTerminalCopyShortcut(terminal, "Agent 输出选区", true);
     enableAgentOutputTouchScrolling(terminal);
+    terminal.onSelectionChange(() => updateAgentOutputSelectionState(terminal));
     if (terminal.textarea) {
       terminal.textarea.setAttribute("aria-label", "Agent 最近输出（只读）");
       terminal.textarea.setAttribute("aria-readonly", "true");
@@ -969,6 +1673,7 @@ function ensureAgentOutputTerminal() {
 function fitAgentOutputTerminal() {
   const terminal = state.outputTerminalInstance;
   if (!terminal || !state.outputTerminalFitAddon || elements.agentOutputTerminal.hidden) return;
+  if (agentOutputSelectionLocked(terminal)) return;
   if (elements.agentOutputTerminal.clientWidth < 80 || elements.agentOutputTerminal.clientHeight < 80) return;
   const fontSize = isDesktop() ? 13 : 11;
   if (terminal.options.fontSize !== fontSize) terminal.options.fontSize = fontSize;
@@ -977,6 +1682,83 @@ function fitAgentOutputTerminal() {
   } catch (_) {
     return;
   }
+}
+
+function clearTerminalResizeAckTimer() {
+  if (state.terminalResizeAckTimer !== null) {
+    window.clearTimeout(state.terminalResizeAckTimer);
+    state.terminalResizeAckTimer = null;
+  }
+}
+
+function resetTerminalResizeSync() {
+  clearTerminalResizeAckTimer();
+  state.terminalResizeDirty = false;
+  state.terminalResizeSequence = 0;
+  state.terminalResizePendingId = null;
+  state.terminalResizeSentCols = 0;
+  state.terminalResizeSentRows = 0;
+  state.terminalResizeAckCols = 0;
+  state.terminalResizeAckRows = 0;
+  state.terminalPendingInput = [];
+  state.terminalPendingInputBytes = 0;
+}
+
+function completeTerminalResize(resizeId, cols, rows) {
+  if (resizeId !== state.terminalResizePendingId) return;
+  clearTerminalResizeAckTimer();
+  state.terminalResizePendingId = null;
+  state.terminalResizeAckCols = cols;
+  state.terminalResizeAckRows = rows;
+
+  if (state.terminalResizeDirty) {
+    fitWebTerminal();
+    if (state.terminalResizePendingId !== null) return;
+  }
+
+  const terminal = state.terminalInstance;
+  if (terminal && (terminal.cols !== cols || terminal.rows !== rows)) {
+    // The viewport changed again while the previous resize crossed the
+    // WebSocket. Treat the acknowledged size as the new baseline and send
+    // the current grid before releasing any queued input.
+    state.terminalResizeSentCols = cols;
+    state.terminalResizeSentRows = rows;
+    requestWebTerminalResize(terminal.cols, terminal.rows);
+    return;
+  }
+  flushPendingTerminalInput();
+}
+
+function requestWebTerminalResize(cols, rows) {
+  if (!state.terminalSessionId || !socketReady()) return false;
+  if (
+    cols === state.terminalResizeSentCols
+    && rows === state.terminalResizeSentRows
+  ) return false;
+
+  const resizeId = state.terminalResizeSequence + 1;
+  const delivered = send({
+    type: "terminal_resize",
+    session_id: state.terminalSessionId,
+    resize_id: resizeId,
+    cols,
+    rows,
+  });
+  if (!delivered) return false;
+
+  state.terminalResizeSequence = resizeId;
+  state.terminalResizePendingId = resizeId;
+  state.terminalResizeSentCols = cols;
+  state.terminalResizeSentRows = rows;
+  clearTerminalResizeAckTimer();
+  state.terminalResizeAckTimer = window.setTimeout(() => {
+    // A cached older Relay may apply terminal_resize without returning an
+    // acknowledgement. WebSocket ordering still guarantees that any input
+    // sent now follows that resize, so keep compatibility without hanging
+    // the Android keyboard indefinitely.
+    completeTerminalResize(resizeId, cols, rows);
+  }, TERMINAL_RESIZE_ACK_TIMEOUT);
+  return true;
 }
 
 function fitWebTerminal() {
@@ -989,17 +1771,12 @@ function fitWebTerminal() {
   } catch (_) {
     return;
   }
-  if (state.terminalSessionId && socketReady()) {
-    send({
-      type: "terminal_resize",
-      session_id: state.terminalSessionId,
-      cols: state.terminalInstance.cols,
-      rows: state.terminalInstance.rows,
-    });
-  }
+  state.terminalResizeDirty = false;
+  requestWebTerminalResize(state.terminalInstance.cols, state.terminalInstance.rows);
 }
 
 function scheduleWebTerminalFit(scrollToBottom = false) {
+  state.terminalResizeDirty = true;
   state.terminalFitScrollToBottom ||= scrollToBottom;
   if (state.terminalFitFrame !== null) window.cancelAnimationFrame(state.terminalFitFrame);
   if (state.terminalFitTimer !== null) window.clearTimeout(state.terminalFitTimer);
@@ -1129,6 +1906,7 @@ function openTerminalProfile(profileId) {
   state.terminalConnected = false;
   state.terminalPersistent = false;
   state.terminalSessionId = null;
+  resetTerminalResizeSync();
   document.body.classList.add("shell-open");
   setAppView("terminal");
   if (!ensureWebTerminal()) {
@@ -1155,12 +1933,21 @@ function openTerminalProfile(profileId) {
 
 function handleTerminalOpened(message) {
   if (!message.session_id || !message.profile) return;
+  resetTerminalResizeSync();
   state.activeTerminalProfile = message.profile.id;
   state.terminalSessionId = message.session_id;
   state.terminalPending = false;
   state.terminalConnected = true;
   state.terminalPersistent = message.persistent === true;
   state.terminalShouldReconnect = true;
+  const openedCols = Number(message.cols);
+  const openedRows = Number(message.rows);
+  if (Number.isInteger(openedCols) && Number.isInteger(openedRows)) {
+    state.terminalResizeSentCols = openedCols;
+    state.terminalResizeSentRows = openedRows;
+    state.terminalResizeAckCols = openedCols;
+    state.terminalResizeAckRows = openedRows;
+  }
   if (!terminalProfileById(message.profile.id)) state.terminalProfiles.unshift(message.profile);
   ensureWebTerminal();
   renderRemoteAccess();
@@ -1170,6 +1957,19 @@ function handleTerminalOpened(message) {
     fitWebTerminal();
     state.terminalInstance?.focus();
   });
+}
+
+function handleTerminalResized(message) {
+  if (message.session_id !== state.terminalSessionId) return;
+  const resizeId = Number(message.resize_id);
+  const cols = Number(message.cols);
+  const rows = Number(message.rows);
+  if (
+    !Number.isInteger(resizeId)
+    || !Number.isInteger(cols)
+    || !Number.isInteger(rows)
+  ) return;
+  completeTerminalResize(resizeId, cols, rows);
 }
 
 function handleTerminalOutput(message) {
@@ -1184,10 +1984,29 @@ function handleTerminalOutput(message) {
   }
 }
 
+function handleTerminalCapture(message) {
+  if (message.session_id !== state.terminalSessionId) return;
+  if (Number(message.capture_id) !== state.terminalCaptureId) return;
+  state.terminalCapturePending = false;
+  if (!elements.terminalCopyDialog.open || state.copyDialogSource !== "terminal") return;
+  const content = String(message.content || "");
+  if (!content) {
+    elements.terminalCopyMeta.textContent = "tmux 历史为空，显示浏览器缓冲区";
+    return;
+  }
+  setTerminalCopyContent(
+    content,
+    message.truncated === true
+      ? "tmux 历史较长，已保留最近 1 MiB"
+      : `${content.split("\n").length} 行 · tmux Pane 完整历史`,
+  );
+}
+
 function handleTerminalExit(message) {
   if (message.session_id !== state.terminalSessionId) return;
   state.terminalInstance?.blur();
   setShellKeyboardOpen(false);
+  resetTerminalResizeSync();
   state.terminalSessionId = null;
   state.terminalPending = false;
   state.terminalConnected = false;
@@ -1199,10 +2018,34 @@ function handleTerminalExit(message) {
 
 function handleTerminalError(message) {
   const operation = message.operation || "terminal";
+  if (operation === "terminal_capture") {
+    const awaitingCapture = state.terminalCapturePending;
+    state.terminalCapturePending = false;
+    if (!awaitingCapture) return;
+    if (elements.terminalCopyDialog.open && state.copyDialogSource === "terminal") {
+      elements.terminalCopyMeta.textContent = "无法读取 tmux 历史，显示浏览器缓冲区";
+    }
+    showToast("无法读取完整 tmux 历史", "仍可复制浏览器当前保留的终端内容。", "error");
+    return;
+  }
+  if (operation === "terminal_resize") {
+    const discardedInput = state.terminalPendingInputBytes > 0;
+    resetTerminalResizeSync();
+    state.terminalResizeDirty = true;
+    showToast(
+      "终端尺寸同步失败",
+      discardedInput
+        ? "为避免命令错位执行，未发送同步期间的输入；请重新输入。"
+        : "下一次输入会自动重试尺寸同步；若仍失败请重新连接。",
+      "error",
+    );
+    return;
+  }
   if (operation === "ssh_profile") {
     state.sshProfilePending = false;
     renderSshProfileForm();
   } else {
+    resetTerminalResizeSync();
     state.terminalSessionId = null;
     state.terminalPending = false;
     state.terminalConnected = false;
@@ -1213,13 +2056,8 @@ function handleTerminalError(message) {
   showToast("远程操作失败", message.message || "终端操作失败", "error");
 }
 
-function sendTerminalText(text) {
-  if (!state.terminalSessionId || !socketReady() || typeof text !== "string" || !text) return;
-  const bytes = new TextEncoder().encode(text);
-  if (bytes.length > 64 * 1024) {
-    showToast("输入内容过长", "单次终端粘贴最多允许 64 KiB。", "error");
-    return;
-  }
+function deliverTerminalBytes(bytes) {
+  if (!state.terminalSessionId || !socketReady() || !bytes.length) return;
   for (let offset = 0; offset < bytes.length; offset += 12 * 1024) {
     const chunk = bytes.subarray(offset, offset + 12 * 1024);
     let binary = "";
@@ -1232,11 +2070,58 @@ function sendTerminalText(text) {
   }
 }
 
+function flushPendingTerminalInput() {
+  if (state.terminalResizePendingId !== null || !state.terminalPendingInput.length) return;
+  const pending = state.terminalPendingInput;
+  state.terminalPendingInput = [];
+  state.terminalPendingInputBytes = 0;
+  if (!state.terminalSessionId || !socketReady()) return;
+  for (const bytes of pending) deliverTerminalBytes(bytes);
+}
+
+function sendTerminalText(text) {
+  if (!state.terminalSessionId || !socketReady() || typeof text !== "string" || !text) return;
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length > TERMINAL_PENDING_INPUT_MAX_BYTES) {
+    showToast("输入内容过长", "单次终端粘贴最多允许 64 KiB。", "error");
+    return;
+  }
+
+  // A visualViewport or ResizeObserver callback can be waiting for its next
+  // animation frame when Android already emits the first IME character. Fit
+  // synchronously here so the resize message is placed before that input.
+  if (state.terminalResizeDirty) fitWebTerminal();
+  else if (state.terminalInstance) {
+    requestWebTerminalResize(state.terminalInstance.cols, state.terminalInstance.rows);
+  }
+
+  if (state.terminalResizePendingId !== null) {
+    if (state.terminalPendingInputBytes + bytes.length > TERMINAL_PENDING_INPUT_MAX_BYTES) {
+      showToast(
+        "终端正在调整尺寸",
+        "等待 tmux 确认新窗口大小后再粘贴较长内容。",
+        "error",
+      );
+      return;
+    }
+    state.terminalPendingInput.push(bytes);
+    state.terminalPendingInputBytes += bytes.length;
+    return;
+  }
+  deliverTerminalBytes(bytes);
+}
+
 function sendTerminalShortcutText(text) {
-  // xterm can emit DEC focus sequences while a toolbar button hands focus
-  // back. Send those first so they cannot merge with Esc or tmux input.
-  state.terminalInstance?.focus();
+  // Shortcut controls write directly to the PTY. Refocusing xterm here would
+  // reopen the Android keyboard when it is hidden, while the keybar pointer
+  // guard below keeps the existing xterm focus when the keyboard is open.
   sendTerminalText(text);
+}
+
+function preserveTerminalFocusForKeybar(event) {
+  if (event.target instanceof Element && event.target.closest("button")) {
+    event.preventDefault();
+  }
 }
 
 function setTerminalCtrlPending(pending) {
@@ -1305,6 +2190,7 @@ function closeTerminalSelection() {
   if (state.terminalSessionId && socketReady()) {
     send({type: "terminal_close", session_id: state.terminalSessionId});
   }
+  resetTerminalResizeSync();
   state.terminalSessionId = null;
   state.terminalPending = false;
   state.terminalConnected = false;
@@ -1324,6 +2210,7 @@ function renderRemoteAccess() {
   const activeProfile = terminalProfileById(state.activeTerminalProfile);
   if (state.activeTerminalProfile && !activeProfile) {
     state.activeTerminalProfile = null;
+    resetTerminalResizeSync();
     state.terminalSessionId = null;
     state.terminalConnected = false;
     state.terminalPersistent = false;
@@ -1435,6 +2322,8 @@ function renderTerminalConnection() {
   const profile = terminalProfileById(state.activeTerminalProfile);
   if (!state.terminalConnected) clearTerminalModifierState();
   elements.terminalCtrlButton.disabled = !state.terminalConnected;
+  elements.copyWebTerminalButton.disabled = !state.terminalInstance;
+  elements.terminalCopyButton.disabled = !state.terminalInstance;
   elements.tmuxKeybar.hidden = !state.terminalPersistent;
   elements.tmuxKeybar.querySelectorAll("button").forEach((button) => {
     button.disabled = !state.terminalConnected || !state.terminalPersistent;
@@ -1553,18 +2442,187 @@ function confirmDeleteSshHost() {
   elements.confirmDeleteSshHostButton.disabled = true;
 }
 
+function legacyCopyText(text) {
+  if (typeof document.execCommand !== "function") return false;
+  const active = document.activeElement;
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.readOnly = true;
+  textarea.setAttribute("aria-hidden", "true");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "-10000px";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  let copied = false;
+  try {
+    textarea.focus({preventScroll: true});
+    textarea.select();
+    copied = document.execCommand("copy");
+  } catch (_) {
+    copied = false;
+  } finally {
+    textarea.remove();
+    const mobileShellInput = !isDesktop() && active === state.terminalInstance?.textarea;
+    if (active instanceof HTMLElement && !mobileShellInput) {
+      try {
+        active.focus({preventScroll: true});
+      } catch (_) {
+        active.focus();
+      }
+    }
+  }
+  return copied;
+}
+
 async function copyText(text, title, detail) {
   if (!text) {
     showToast("没有可复制内容", "Relay 尚未提供完整连接信息。", "error");
     return false;
   }
   try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
     await navigator.clipboard.writeText(text);
     showToast(title, detail, "success");
     return true;
   } catch (_) {
+    if (legacyCopyText(text)) {
+      showToast(title, detail, "success");
+      return true;
+    }
     showToast("复制失败", "浏览器未授予剪贴板权限。", "error");
     return false;
+  }
+}
+
+function terminalBufferText(terminal) {
+  const buffer = terminal?.buffer?.active;
+  if (!buffer) return "";
+  const lines = [];
+  for (let index = 0; index < buffer.length; index += 1) {
+    const line = buffer.getLine(index);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (line.isWrapped && lines.length) lines[lines.length - 1] += text;
+    else lines.push(text);
+  }
+  return lines.join("\n").replace(/\n+$/, "");
+}
+
+function terminalSelectedText(terminal) {
+  const nativeText = nativeAgentSelectionControllers.get(terminal)?.selectedText() || "";
+  if (nativeText) return nativeText;
+  const browserText = browserSelectionTextInside(agentOutputSelectionTree(terminal));
+  return browserText || (terminal?.hasSelection() ? terminal.getSelection() : "");
+}
+
+function terminalCopySelection() {
+  const start = elements.terminalCopyText.selectionStart;
+  const end = elements.terminalCopyText.selectionEnd;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) return "";
+  return elements.terminalCopyText.value.slice(start, end);
+}
+
+function renderTerminalCopyAction() {
+  const selected = terminalCopySelection();
+  const selectedAgentOutput = state.copyDialogSource === "agent-selection";
+  elements.terminalCopyConfirmButton.disabled = !elements.terminalCopyText.value;
+  elements.terminalCopyConfirmButton.textContent = selected || selectedAgentOutput
+    ? "复制选中"
+    : "复制全部";
+}
+
+function setTerminalCopyContent(text, status = "") {
+  const content = String(text || "");
+  elements.terminalCopyText.value = content;
+  const lineCount = content ? content.split("\n").length : 0;
+  elements.terminalCopyMeta.textContent = status || `${lineCount} 行 · ${content.length} 字符`;
+  renderTerminalCopyAction();
+  window.requestAnimationFrame(() => {
+    elements.terminalCopyText.scrollTop = elements.terminalCopyText.scrollHeight;
+    elements.terminalCopyText.scrollLeft = 0;
+  });
+}
+
+function openTerminalCopyDialog({title, description, content, source, status = ""}) {
+  state.copyDialogSource = source;
+  elements.terminalCopyTitle.textContent = title;
+  elements.terminalCopyDescription.textContent = description;
+  setTerminalCopyContent(content, status);
+  if (source === "terminal") {
+    state.terminalInstance?.blur();
+    setShellKeyboardOpen(false);
+  }
+  if (!elements.terminalCopyDialog.open) elements.terminalCopyDialog.showModal();
+  if (source === "agent-selection") {
+    window.requestAnimationFrame(() => {
+      elements.terminalCopyText.scrollTop = 0;
+      elements.terminalCopyText.scrollLeft = 0;
+    });
+  }
+}
+
+async function copyFromTerminalDialog() {
+  const selection = terminalCopySelection();
+  const text = selection || elements.terminalCopyText.value;
+  if (!text) {
+    showToast("暂无可复制内容", "终端缓冲区当前为空。", "error");
+    return;
+  }
+  const selectedAction = Boolean(selection) || state.copyDialogSource === "agent-selection";
+  const copied = await copyText(
+    text,
+    selectedAction ? "已复制选中内容" : "已复制全部内容",
+    selectedAction ? "选择的终端文本已复制。" : "终端纯文本已复制。",
+  );
+  if (copied && state.copyDialogSource === "agent-selection") {
+    elements.terminalCopyDialog.close();
+  }
+}
+
+function selectAllTerminalCopyText() {
+  elements.terminalCopyText.focus({preventScroll: true});
+  elements.terminalCopyText.select();
+  renderTerminalCopyAction();
+}
+
+async function copyWebTerminalOutput() {
+  const terminal = state.terminalInstance;
+  const selection = terminalSelectedText(terminal);
+  if (selection) {
+    await copyText(selection, "已复制选区", "Shell 终端选区已复制到剪贴板。");
+    return;
+  }
+
+  const localContent = terminalBufferText(terminal);
+  const canCaptureTmux = state.terminalPersistent
+    && Boolean(state.terminalSessionId)
+    && socketReady();
+  if (!localContent && !canCaptureTmux) {
+    showToast("暂无可复制内容", "终端缓冲区当前为空。", "error");
+    return;
+  }
+  const profile = terminalProfileById(state.activeTerminalProfile);
+  openTerminalCopyDialog({
+    title: `${profile?.label || "Shell"} · 复制内容`,
+    description: canCaptureTmux
+      ? "正在读取当前 tmux Pane 的纯文本历史；手机可长按选择，PC 可拖选或使用 Ctrl/⌘+C。"
+      : "这是浏览器终端缓冲区的纯文本；手机可长按选择，PC 可拖选或使用 Ctrl/⌘+C。",
+    content: localContent,
+    source: "terminal",
+    status: canCaptureTmux ? "正在读取 tmux 完整历史…" : "浏览器终端缓冲区",
+  });
+
+  if (!canCaptureTmux) return;
+  const captureId = state.terminalCaptureId + 1;
+  state.terminalCaptureId = captureId;
+  state.terminalCapturePending = send({
+    type: "terminal_capture",
+    session_id: state.terminalSessionId,
+    capture_id: captureId,
+  });
+  if (!state.terminalCapturePending) {
+    elements.terminalCopyMeta.textContent = "无法读取 tmux 历史，显示浏览器缓冲区";
   }
 }
 
@@ -1574,7 +2632,6 @@ async function pasteIntoTerminal() {
   try {
     const text = await navigator.clipboard.readText();
     if (text) sendTerminalText(text);
-    state.terminalInstance?.focus();
   } catch (_) {
     showToast("无法读取剪贴板", "请长按终端并使用系统粘贴菜单。", "error");
   }
@@ -1870,7 +2927,10 @@ function renderOutput() {
     const terminal = state.outputTerminalInstance;
     const unchanged = state.outputRenderedPane === state.activePane
       && state.outputRenderedSnapshot === snapshot;
-    if (!unchanged) {
+    const selectionLocksSnapshot = agentOutputSelectionLocked(terminal)
+      && state.outputRenderedPane === state.activePane;
+    if (!unchanged && !selectionLocksSnapshot) {
+      clearAgentOutputSelection(terminal);
       const preserveScroll = state.userScrolledUp;
       const distanceFromBottom = Math.max(
         0,
@@ -1968,12 +3028,25 @@ function confirmInterrupt() {
 }
 
 async function copyOutput() {
+  const terminal = state.outputTerminalInstance;
+  const selection = terminalSelectedText(terminal);
+  if (selection) {
+    const copied = await copyText(selection, "已复制选区", "Agent 输出选区已复制到剪贴板。");
+    if (copied) clearAgentOutputSelection(terminal);
+    return;
+  }
   const content = state.activePane ? state.outputs.get(state.activePane) : "";
   if (!content) {
     showToast("暂无可复制内容", "先刷新当前 Agent 的输出。", "error");
     return;
   }
-  await copyText(content, "已复制", "终端输出已复制到剪贴板。");
+  openTerminalCopyDialog({
+    title: "Agent 最近输出 · 复制内容",
+    description: "这是当前最近输出的纯文本快照；手机可长按选择，PC 可拖选或使用 Ctrl/⌘+C。",
+    content,
+    source: "agent",
+    status: `${content.split("\n").length} 行 · Agent 最近输出`,
+  });
 }
 
 function setFilter(filter) {
@@ -2285,6 +3358,20 @@ function bindEvents() {
   });
   elements.refreshOutputButton.addEventListener("click", refreshOutput);
   elements.copyOutputButton.addEventListener("click", copyOutput);
+  elements.terminalCopySelectAllButton.addEventListener("click", selectAllTerminalCopyText);
+  elements.terminalCopyConfirmButton.addEventListener("click", copyFromTerminalDialog);
+  ["select", "keyup", "pointerup", "touchend"].forEach((eventName) => {
+    elements.terminalCopyText.addEventListener(eventName, renderTerminalCopyAction);
+  });
+  elements.terminalCopyDialog.addEventListener("close", () => {
+    const source = state.copyDialogSource;
+    state.terminalCaptureId += 1;
+    state.terminalCapturePending = false;
+    state.copyDialogSource = "";
+    elements.terminalCopyText.value = "";
+    renderTerminalCopyAction();
+    if (source === "agent-selection") state.outputTerminalInstance?.clearSelection();
+  });
   elements.terminalOutputFallback.addEventListener("scroll", () => {
     const output = elements.terminalOutputFallback;
     state.userScrolledUp = output.scrollHeight - output.scrollTop - output.clientHeight > 80;
@@ -2357,6 +3444,8 @@ function bindEvents() {
   });
   elements.mobileTerminalBack.addEventListener("click", closeTerminalSelection);
   elements.disconnectTerminalButton.addEventListener("click", closeTerminalSelection);
+  elements.copyWebTerminalButton.addEventListener("click", copyWebTerminalOutput);
+  elements.terminalCopyButton.addEventListener("click", copyWebTerminalOutput);
   elements.reconnectTerminalButton.addEventListener("click", () => {
     if (state.activeTerminalProfile) openTerminalProfile(state.activeTerminalProfile);
   });
@@ -2375,6 +3464,7 @@ function bindEvents() {
       "可从其他电脑直接经本机跳转到目标服务器。",
     );
   });
+  elements.terminalKeybar.addEventListener("pointerdown", preserveTerminalFocusForKeybar);
   document.querySelectorAll("[data-terminal-key]").forEach((button) => {
     button.addEventListener("click", () => {
       const key = button.dataset.terminalKey;
@@ -2384,7 +3474,6 @@ function bindEvents() {
   });
   elements.terminalCtrlButton.addEventListener("click", () => {
     const pending = !state.terminalCtrlPending;
-    state.terminalInstance?.focus();
     setTerminalCtrlPending(pending);
   });
   document.querySelectorAll("[data-tmux-action]").forEach((button) => {
@@ -2392,7 +3481,6 @@ function bindEvents() {
       const action = button.dataset.tmuxAction;
       if (action === "prefix") {
         const pending = !state.terminalTmuxPrefixPending;
-        state.terminalInstance?.focus();
         setTerminalTmuxPrefixPending(pending);
         return;
       }

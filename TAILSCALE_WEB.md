@@ -16,7 +16,7 @@
 
 - 响应式 Agent Dashboard，兼容桌面和手机浏览器。
 - 按状态筛选和搜索本机 Agent。
-- 查看最近 60、120 或 200 行 Pane 输出，并可自动刷新。
+- 查看最近 60、120 或 200 行 Pane 输出，并可自动刷新；支持触屏且提供 xterm 可访问性文本的浏览器会启用系统原生文本选择，并使用与 xterm 缓冲区同步、不会被虚拟行复用的稳定选择层。Android/Chrome 长按拖动并松手后会保留准确选区与系统操作栏，可继续使用复制、全选、分享、网页搜索等操作（实际菜单由系统决定）。不支持原生选择时，会回退到长按拖动后打开网页复制窗口。长按尚未形成选区及选区存在期间都会暂缓重绘，取消选择后自动补上最新输出；无选区时复制入口仍可打开完整的纯文本视图。
 - 用户点击已完成的 Agent 卡片后，会将该完成结果标记为已查看并恢复为待命；桌面端自动选中和页面初始化不会误清状态。
 - 通过 `herdr agent prompt` 提交 Prompt；Agent 工作中还可用 **Tab 缓存**，把下一条任务明确加入 Codex 队列。
 - 二次确认后发送规范的 `C-c` Interrupt。
@@ -92,7 +92,7 @@ cd relay
 ./install-tailscale-web.sh --remote-shell
 ```
 
-该模式会安装 OpenSSH Client 和 tmux、开启官方 Tailscale SSH，并在 Dashboard 中增加响应式 Remote Shell 页面。Web 专用 tmux Server 默认开启鼠标，并使用不会与 Herdr `Ctrl+X` 冲突的 `Ctrl+B` Prefix。手机端提供可触碰的 Esc、Tab、一次性 Ctrl、Ctrl+C、四向方向键、PgUp、PgDn、粘贴，以及新建/切换窗口、分屏和缩放等 tmux 快捷按钮；PC 端提供服务器列表与大尺寸终端双栏布局。
+该模式会安装 OpenSSH Client 和 tmux、开启官方 Tailscale SSH，并在 Dashboard 中增加响应式 Remote Shell 页面。Web 专用 tmux Server 默认开启鼠标，并使用不会与 Herdr `Ctrl+X` 冲突的 `Ctrl+B` Prefix。手机端提供可触碰的 Esc、Tab、一次性 Ctrl、Ctrl+C、四向方向键、PgUp、PgDn、复制、粘贴，以及新建/切换窗口、分屏和缩放等 tmux 快捷按钮；软键盘展开期间保持固定列数，尺寸变化也会先由 Relay 与 tmux 确认再放行输入，避免跨行覆盖和光标错位。复制功能会读取当前 tmux Pane 历史并显示为可原生选择的纯文本。PC 端提供服务器列表与大尺寸终端双栏布局，也可复制 xterm 选区或完整 Pane 历史。
 
 局域网服务器可以直接在网页中添加，Herdr 只保存 SSH Target 和端口，不保存密码或私钥。更完整的使用方式、ProxyJump 和可选子网路由见 [Remote Shell 文档](REMOTE_SHELL.md)。
 

@@ -269,8 +269,14 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             {
                 "type": "terminal_resize",
                 "session_id": "terminal-test",
+                "resize_id": 9,
                 "cols": 120,
                 "rows": 40,
+            },
+            {
+                "type": "terminal_capture",
+                "session_id": "terminal-test",
+                "capture_id": 7,
             },
             {"type": "terminal_close", "session_id": "terminal-test"},
         ])
@@ -307,6 +313,9 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 self.rows = int(rows)
                 return self.cols, self.rows
 
+            async def capture(self):
+                return "older output\nlatest output", True
+
             async def close(self):
                 self.closed = True
 
@@ -331,6 +340,26 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 "persistent": True,
                 "cols": 100,
                 "rows": 30,
+            },
+            ws.sent,
+        )
+        self.assertIn(
+            {
+                "type": "terminal_capture",
+                "session_id": "terminal-test",
+                "capture_id": 7,
+                "content": "older output\nlatest output",
+                "truncated": True,
+            },
+            ws.sent,
+        )
+        self.assertIn(
+            {
+                "type": "terminal_resized",
+                "session_id": "terminal-test",
+                "resize_id": 9,
+                "cols": 120,
+                "rows": 40,
             },
             ws.sent,
         )

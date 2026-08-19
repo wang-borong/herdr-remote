@@ -92,26 +92,64 @@ WEB_JS="$DIR/web/app.js"
   grep -q 'message.delivery === "queued"' "$WEB_JS" && \
   grep -q "list_directories" "$WEB_JS" && grep -q "start_agent" "$WEB_JS" && \
   grep -q "C-c" "$WEB_JS" && grep -q "terminal_open" "$WEB_JS" && \
+  grep -q 'case "terminal_resized"' "$WEB_JS" && \
+  grep -q "terminalResizePendingId" "$WEB_JS" && \
+  grep -q "flushPendingTerminalInput" "$WEB_JS" && \
+  grep -q 'resize_id: resizeId' "$WEB_JS" && \
+  grep -q '"type": "terminal_resized"' "$DIR/relay/herdr_relay.py" && \
   grep -q 'id="agent-output-terminal"' "$WEB" && grep -q "ansi_content" "$WEB_JS" && \
   grep -q "ensureAgentOutputTerminal" "$WEB_JS" && \
   grep -q "paneIdFromUrl" "$WEB_JS" && \
   grep -q "enableAgentOutputTouchScrolling" "$WEB_JS" && \
+  grep -q "AGENT_TOUCH_SELECTION_DELAY" "$WEB_JS" && \
+  grep -q "enableNativeAgentOutputSelection" "$WEB_JS" && \
+  grep -q "clearBrowserSelectionInside" "$WEB_JS" && \
+  grep -q "NATIVE_SELECTION_RELEASE_GRACE_MS" "$WEB_JS" && \
+  grep -q "nativeAgentSelectionControllers" "$WEB_JS" && \
+  grep -q "restoreNativeSelection" "$WEB_JS" && \
+  grep -q "agentOutputAccessibilityTree" "$WEB_JS" && \
+  grep -q "selectedAgentOutputText" "$WEB_JS" && \
+  grep -q "agentOutputHasSelection" "$WEB_JS" && \
+  grep -q "agentOutputSelectionLocked" "$WEB_JS" && \
+  grep -q 'selectionLocksSnapshot = agentOutputSelectionLocked' "$WEB_JS" && \
+  grep -q 'selectionLayer.addEventListener("contextmenu", keepNativeSelectionEvent' "$WEB_JS" && \
+  grep -q 'clonedRow.textContent = lineText' "$WEB_JS" && \
+  grep -q "accessibilityObserver.observe" "$WEB_JS" && \
+  grep -q "agent-output-selection-layer" "$WEB_JS" && \
+  grep -q "agent-output-selection-layer" "$DIR/web/app.css" && \
+  grep -q "use-native-touch-selection" "$DIR/web/app.css" && \
+  grep -q "selectAgentOutputRange" "$WEB_JS" && \
+  grep -q 'source: "agent-selection"' "$WEB_JS" && \
+  grep -q "selectionLocksSnapshot" "$WEB_JS" && \
+  grep -q 'surface.addEventListener("contextmenu"' "$WEB_JS" && \
   grep -q "enableWebTerminalTouchScrolling" "$WEB_JS" && \
+  grep -q "attachTerminalCopyShortcut" "$WEB_JS" && \
+  grep -q 'attachTerminalCopyShortcut(terminal, "Agent 输出选区", true)' "$WEB_JS" && \
+  grep -q "terminalBufferText" "$WEB_JS" && \
   grep -q 'new WheelEvent("wheel"' "$WEB_JS" && \
   grep -q 'terminal.modes.mouseTrackingMode === "none"' "$WEB_JS" && \
   grep -q 'addEventListener("touchmove"' "$WEB_JS" && \
   grep -q "select option" "$DIR/web/app.css" && grep -q "width: fit-content" "$DIR/web/app.css" && \
   grep -q "ssh_profile_save" "$WEB_JS" && grep -q "Herdr FiraCode Nerd" "$WEB_JS" && \
   grep -q "mobile-keybar" "$WEB" && grep -q "tmux-keybar" "$WEB" && \
+  grep -q 'id="terminal-copy-dialog"' "$WEB" && \
+  grep -q 'id="copy-web-terminal-button"' "$WEB" && \
+  grep -q 'id="terminal-copy-button"' "$WEB" && \
+  grep -q 'type: "terminal_capture"' "$WEB_JS" && \
+  grep -q 'elif msg_type == "terminal_capture"' "$DIR/relay/herdr_relay.py" && \
   grep -q 'data-terminal-key="left"' "$WEB" && grep -q 'data-terminal-key="right"' "$WEB" && \
   grep -q 'data-terminal-key="page-up"' "$WEB" && grep -q 'data-terminal-key="page-down"' "$WEB" && \
   grep -q "terminal-ctrl-button" "$WEB" && grep -q "TERMINAL_CTRL_KEY_SEQUENCES" "$WEB_JS" && \
   grep -q 'id="terminal-tmux-prefix-button"' "$WEB" && grep -q "tmux · Ctrl+B" "$WEB" && \
   grep -q "TMUX_ACTION_SEQUENCES" "$WEB_JS" && \
   grep -q "sendTerminalShortcutText" "$WEB_JS" && grep -q "Pane缩放" "$WEB" && \
+  grep -q "preserveTerminalFocusForKeybar" "$WEB_JS" && \
+  grep -q 'terminalKeybar.addEventListener("pointerdown"' "$WEB_JS" && \
+  ! grep -A 2 'if (text) sendTerminalText(text);' "$WEB_JS" | grep -q 'terminalInstance.*focus' && \
   grep -q "TERMINAL_FOCUS_SEQUENCES" "$WEB_JS" && grep -q 'TMUX_PREFIX_SEQUENCE = "\\x02"' "$WEB_JS" && \
   grep -q "touch-action: pan-x pinch-zoom" "$DIR/web/app.css" && \
   grep -q "touch-action: manipulation" "$DIR/web/app.css" && \
+  grep -q -- '-webkit-user-select: text' "$DIR/web/app.css" && \
   grep -q "interactive-widget=resizes-content" "$WEB" && \
   grep -q "navigator.virtualKeyboard.overlaysContent = false" "$WEB_JS" && \
   grep -q 'viewport?.addEventListener("resize"' "$WEB_JS" && \
@@ -119,6 +157,7 @@ WEB_JS="$DIR/web/app.js"
   grep -q 'classList.toggle("shell-keyboard-open"' "$WEB_JS" && \
   grep -q -- '--app-viewport-height' "$DIR/web/app.css" && \
   grep -q 'body.shell-keyboard-open .interactive-terminal-card' "$DIR/web/app.css" && \
+  grep -q 'padding: 0 10px' "$DIR/web/app.css" && \
   [ -f "$DIR/web/vendor/xterm/xterm.js" ] && \
   [ -f "$DIR/web/vendor/xterm/xterm.css" ] && \
   [ -f "$DIR/web/vendor/xterm/addon-fit.js" ] && \

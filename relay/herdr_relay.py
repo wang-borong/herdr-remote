@@ -1882,15 +1882,67 @@ async def handle_client(ws):
                     await send_terminal_error(str(e))
             elif msg_type == "terminal_resize":
                 if not terminal_enabled or terminal_session is None:
-                    await send_terminal_error("Terminal session is not running")
+                    await send_terminal_error(
+                        "Terminal session is not running", "terminal_resize"
+                    )
                     continue
                 if msg.get("session_id") != terminal_session.session_id:
-                    await send_terminal_error("Terminal session id does not match")
+                    await send_terminal_error(
+                        "Terminal session id does not match", "terminal_resize"
+                    )
+                    continue
+                resize_id = msg.get("resize_id")
+                if (
+                    resize_id is not None
+                    and (
+                        isinstance(resize_id, bool)
+                        or not isinstance(resize_id, int)
+                        or not 1 <= resize_id <= 2_147_483_647
+                    )
+                ):
+                    await send_terminal_error(
+                        "Terminal resize id is invalid", "terminal_resize"
+                    )
                     continue
                 try:
-                    await terminal_session.resize(msg.get("cols"), msg.get("rows"))
+                    cols, rows = await terminal_session.resize(
+                        msg.get("cols"), msg.get("rows")
+                    )
                 except TerminalConfigError as e:
-                    await send_terminal_error(str(e))
+                    await send_terminal_error(str(e), "terminal_resize")
+                    continue
+                if resize_id is not None:
+                    await ws.send(json.dumps({
+                        "type": "terminal_resized",
+                        "session_id": terminal_session.session_id,
+                        "resize_id": resize_id,
+                        "cols": cols,
+                        "rows": rows,
+                    }))
+            elif msg_type == "terminal_capture":
+                if not terminal_enabled or terminal_session is None:
+                    await send_terminal_error(
+                        "Terminal session is not running", "terminal_capture"
+                    )
+                    continue
+                if msg.get("session_id") != terminal_session.session_id:
+                    await send_terminal_error(
+                        "Terminal session id does not match", "terminal_capture"
+                    )
+                    continue
+                try:
+                    content, truncated = await terminal_session.capture()
+                except TerminalConfigError as e:
+                    await send_terminal_error(str(e), "terminal_capture")
+                    continue
+                capture_id = msg.get("capture_id")
+                await ws.send(json.dumps({
+                    "type": "terminal_capture",
+                    "session_id": terminal_session.session_id,
+                    "capture_id": capture_id if isinstance(capture_id, int) else 0,
+                    "content": content,
+                    "truncated": truncated,
+                }))
             elif msg_type == "terminal_close":
                 if terminal_session is not None:
                     profile_id = terminal_session.profile["id"]

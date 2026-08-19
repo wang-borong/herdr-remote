@@ -62,13 +62,17 @@ ssh 本机用户名@cachyos-wpc
 - **本机终端**：当前 Linux 用户的完整登录 Shell。
 - **SSH 服务器**：由本机作为网关，连接配置好的局域网 SSH 目标。
 - **tmux 持久会话**：浏览器断线、手机切后台或 Relay 重连后，可重新附着到原会话。
-- **移动快捷键**：Esc、Tab、一次性 Ctrl、Ctrl+C、Ctrl+L、四向方向键、PgUp、PgDn 和剪贴板粘贴。
+- **移动输入尺寸同步**：软键盘展开只改变可见行数，不改变 xterm 列数；若窗口尺寸确实变化，Relay 会在 tmux 确认新行列数后再按顺序放行输入，避免长命令跨行时覆盖行首或光标错位。
+- **移动快捷键**：Esc、Tab、一次性 Ctrl、Ctrl+C、Ctrl+L、四向方向键、PgUp、PgDn、复制和剪贴板粘贴。
+- **跨端复制**：复制按钮读取当前 tmux Pane 历史并打开原生纯文本窗口；手机可长按使用系统选择手柄，PC 可拖选、复制全部，或对已有 xterm 选区使用 Ctrl/⌘+C。
 - **tmux 鼠标与触控**：Web 专用 tmux Server 默认开启鼠标；手机端可直接触碰快捷栏完成窗口切换、分屏和缩放。
 - **tmux 快捷栏**：支持单独启用 Ctrl+B Prefix，以及新建/切换窗口、窗口列表、左右/上下分屏和 Pane 缩放。
 - **快捷命令**：`pwd`、`ls -la`、`git status`、`git diff --stat`、`htop`。
 - **终端字体**：网页本地提供 FiraCode Nerd Font Mono，Powerline、Starship 与 Nerd Font 图标不依赖手机或电脑预装字体。
 
 点按单独的 **Ctrl** 后，按钮会保持高亮，并把下一次字母、方向键或 PgUp/PgDn 作为 Ctrl 组合发送；再次点按可取消。焦点切换不会消耗待发送的 Ctrl，因此手机上点按 Ctrl 后再快速输入字母也能组成正确按键。
+
+tmux 的 `mouse on` 会优先接收终端拖动事件，所以网页的 **复制内容** 不依赖浏览器直接选择 xterm 画布。点击后，Relay 使用专用 tmux socket 捕获当前 Pane 的纯文本 scrollback（最多保留最近 1 MiB），再交给浏览器的原生只读文本窗口。没有 tmux 的临时 Shell 会改用浏览器当前保留的 xterm 缓冲区。
 
 每个入口使用独立的 tmux Session，并使用专用 socket：
 
@@ -77,7 +81,7 @@ tmux -L herdr-web list-sessions
 tmux -L herdr-web attach -t herdr-local
 ```
 
-会话可以跨浏览器断线和 Relay 重启保留，但系统重启后需要重新创建。该专用 Server 会固定启用 `mouse on`，并使用 `Ctrl+B` 作为 Prefix；用户普通 tmux 配置不受影响，Herdr 的 `Ctrl+X` 也可以正常透传。
+会话可以跨浏览器断线和 Relay 重启保留，但系统重启后需要重新创建。为避免 PC 与手机使用不同列数时争夺同一个 Pane 尺寸，同一入口只保留最后打开的 Web tmux Client；从另一浏览器打开会分离旧 Client，但不会结束 tmux Session 或其中运行的任务。该专用 Server 会固定使用最新 Client 的窗口尺寸、启用 `mouse on`，并使用 `Ctrl+B` 作为 Prefix；用户普通 tmux 配置不受影响，Herdr 的 `Ctrl+X` 也可以正常透传。
 
 网页 tmux 快捷栏发送以下组合：
 

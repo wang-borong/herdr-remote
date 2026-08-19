@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "relay"))
 from terminal_sessions import (
     TerminalConfigError,
     TerminalSession,
+    capture_tmux_pane,
     configure_tmux_server,
     delete_ssh_profile,
     load_ssh_profiles,
@@ -105,6 +106,7 @@ class TerminalProfileTests(unittest.TestCase):
 
         self.assertTrue(persistent)
         self.assertEqual(command[:4], ["/usr/bin/tmux", "-L", "herdr-web", "new-session"])
+        self.assertEqual(command[4:6], ["-A", "-D"])
         session_name = command[command.index("-s") + 1]
         self.assertTrue(session_name.startswith("herdr-ssh-build-"))
         self.assertIn("/usr/bin/ssh -tt", command[-1])
@@ -145,6 +147,10 @@ class TerminalProfileTests(unittest.TestCase):
         self.assertIn(["set-option", "-g", "mouse", "on"], commands)
         self.assertIn(["set-option", "-g", "prefix", "C-b"], commands)
         self.assertIn(["set-option", "-g", "prefix2", "None"], commands)
+        self.assertIn(
+            ["set-window-option", "-g", "window-size", "latest"],
+            commands,
+        )
         self.assertIn(["bind-key", "-T", "prefix", "C-b", "send-prefix"], commands)
         self.assertIn(["bind-key", "-T", "prefix", "p", "previous-window"], commands)
         self.assertIn(["bind-key", "-T", "prefix", "n", "next-window"], commands)
@@ -195,6 +201,39 @@ class TerminalProfileTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[:4], ["/usr/bin/tmux", "-L", "herdr-web", "kill-session"])
         self.assertEqual(command[-1], persistent_session_name(profile))
+
+    def test_tmux_capture_returns_recent_history_and_bounds_payload(self):
+        profile = normalize_ssh_profile({
+            "id": "build",
+            "label": "Build",
+            "target": "builder@10.10.0.5",
+        })
+        with patch("terminal_sessions.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=b"old line\nrecent line\nlatest line\n",
+            )
+            content, truncated = capture_tmux_pane(
+                profile,
+                "/usr/bin/tmux",
+                maximum_bytes=25,
+            )
+
+        self.assertTrue(truncated)
+        self.assertEqual(content, "recent line\nlatest line")
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ["/usr/bin/tmux", "-L", "herdr-web", "capture-pane"])
+        self.assertIn("-J", command)
+        self.assertIn("-5000", command)
+        self.assertEqual(command[-1], persistent_session_name(profile))
+        run.assert_called_once_with(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
 
     def test_terminal_size_is_bounded_and_secret_environment_is_removed(self):
         self.assertEqual(validated_terminal_dimensions(9999, 1), (400, 5))
@@ -310,6 +349,75 @@ class TerminalSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"__HERDR_PARTIAL_WRITE_OK__", output)
         self.assertGreater(mocked_write.call_count, 1)
         self.assertIsNone(session.master_fd)
+
+    async def test_resize_notifies_shell_of_new_dimensions(self):
+        output = bytearray()
+        resized_output = bytearray()
+        ready = asyncio.Event()
+        resized = asyncio.Event()
+        finished = asyncio.Event()
+        collect_resized_output = False
+
+        async def event_handler(event):
+            if event["type"] == "terminal_output":
+                chunk = base64.b64decode(event["data"])
+                output.extend(chunk)
+                if b"__HERDR_RESIZE_READY__" in output:
+                    ready.set()
+                if collect_resized_output:
+                    resized_output.extend(chunk)
+                    normalized = bytes(resized_output).replace(b"\r", b"")
+                    if b"__HERDR_WINCH_SIGNAL__17 63\n" in normalized:
+                        resized.set()
+            elif event["type"] == "terminal_exit":
+                finished.set()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            session = TerminalSession(
+                {
+                    "id": "local",
+                    "kind": "local",
+                    "label": "Local",
+                    "target": "localhost",
+                    "port": 0,
+                    "description": "",
+                    "color": "violet",
+                },
+                event_handler,
+                shell_binary="/bin/sh",
+                ssh_binary="/usr/bin/ssh",
+                tmux_binary=None,
+                cwd=Path(temporary),
+                cols=80,
+                rows=24,
+            )
+            try:
+                await session.spawn()
+                session.start_reader()
+                await session.write(
+                    b"trap 'printf \"__HERDR_WINCH_%s__\" SIGNAL; stty size' WINCH; "
+                    b"printf '__HERDR_RESIZE_%s__\\n' READY\n"
+                )
+                await asyncio.wait_for(ready.wait(), timeout=5)
+                collect_resized_output = True
+                self.assertEqual(await session.resize(63, 17), (63, 17))
+                await asyncio.wait_for(resized.wait(), timeout=5)
+                with (
+                    patch("terminal_sessions._set_window_size") as set_window_size,
+                    patch("terminal_sessions.os.killpg") as kill_process_group,
+                ):
+                    self.assertEqual(await session.resize(63, 17), (63, 17))
+                set_window_size.assert_not_called()
+                kill_process_group.assert_not_called()
+                await session.write(b"exit\n")
+                await asyncio.wait_for(finished.wait(), timeout=5)
+            finally:
+                await session.close()
+
+        self.assertIn(
+            b"__HERDR_WINCH_SIGNAL__17 63\n",
+            bytes(resized_output).replace(b"\r", b""),
+        )
 
 
 if __name__ == "__main__":
