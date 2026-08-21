@@ -116,9 +116,10 @@ Pane 输出默认读取最近 60 行，使用 Telegram HTML 的粗体标题和�
 ```text
 HERDR_TG_READ_LINES=60
 HERDR_TG_OUTPUT_MAX_CHARS=12000
+HERDR_TG_CONNECT_TIMEOUT=15
 ```
 
-读取行数会限制在 15–200，输出字符数会限制在 3500–24000。修改后重启 Telegram 服务即可。
+读取行数会限制在 15–200，输出字符数会限制在 3500–24000。Telegram 连接超时默认 15 秒，可在网络握手较慢时调整为 5–60 秒。修改后重启 Telegram 服务即可。
 
 ## 可选：启用永久 Trust
 

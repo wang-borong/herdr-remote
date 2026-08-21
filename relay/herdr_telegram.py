@@ -4,9 +4,20 @@
 # dependencies = ["python-telegram-bot>=21.0", "websockets>=14.0"]
 # ///
 """herdr-remote Telegram bot — monitor and approve agents from Telegram."""
-import asyncio, hashlib, html, ipaddress, json, os, logging, re, secrets, urllib.parse
+import asyncio
+import hashlib
+import html
+import ipaddress
+import json
+import logging
+import os
+import re
+import secrets
+import traceback
+import urllib.parse
 from collections import Counter, OrderedDict
 
+from agent_state import apply_agent_message
 from telegram import (
     BotCommand,
     BotCommandScopeChat,
@@ -16,9 +27,15 @@ from telegram import (
     MenuButtonCommands,
     Update,
 )
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, ContextTypes, filters
-
-from agent_state import apply_agent_message
+from telegram.error import BadRequest, NetworkError, TelegramError
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 os.umask(0o077)
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +70,7 @@ def bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 REQUIRE_PRIVATE_CHAT = env_flag("HERDR_TG_REQUIRE_PRIVATE_CHAT", default=True)
 REQUIRE_LOCAL_RELAY = env_flag("HERDR_TG_REQUIRE_LOCAL_RELAY", default=True)
 ALLOW_PERSISTENT_TRUST = env_flag("HERDR_TG_ALLOW_PERSISTENT_TRUST")
+TELEGRAM_CONNECT_TIMEOUT = bounded_env_int("HERDR_TG_CONNECT_TIMEOUT", 15, 5, 60)
 PANE_READ_LINES = bounded_env_int("HERDR_TG_READ_LINES", 60, 15, 200)
 PANE_OUTPUT_MAX_CHARS = bounded_env_int("HERDR_TG_OUTPUT_MAX_CHARS", 12000, 3500, 24000)
 PANE_CHUNK_ESCAPED_CHARS = 3200
@@ -81,6 +99,47 @@ def scrub(value) -> str:
         if secret:
             s = s.replace(secret, "<redacted>")
     return s
+
+
+def callback_ack_expired(error: BadRequest) -> bool:
+    message = str(error).lower()
+    return "query is too old" in message or "query id is invalid" in message
+
+
+async def answer_callback_safely(query, text: str | None = None):
+    """Best-effort callback acknowledgement that never blocks the real action."""
+    try:
+        await query.answer(text)
+    except BadRequest as e:
+        if callback_ack_expired(e):
+            log.info("Telegram callback acknowledgement expired; continuing with the action.")
+            return
+        log.warning("Could not acknowledge Telegram callback: %s", scrub(e))
+    except NetworkError as e:
+        log.warning("Telegram network error while acknowledging callback: %s", scrub(e))
+    except TelegramError as e:
+        log.warning(
+            "Telegram rejected callback acknowledgement (%s): %s",
+            type(e).__name__,
+            scrub(e),
+        )
+
+
+async def handle_telegram_error(update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Log Telegram failures without leaking credentials or losing useful context."""
+    error = getattr(ctx, "error", None)
+    source = "polling" if update is None else type(update).__name__
+    if isinstance(error, NetworkError):
+        log.warning("Telegram network error during %s: %s", source, scrub(error))
+        return
+    if isinstance(error, BadRequest) and callback_ack_expired(error):
+        log.info("Ignored an expired Telegram callback during %s.", source)
+        return
+    if isinstance(error, BaseException):
+        details = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    else:
+        details = repr(error)
+    log.error("Unhandled Telegram error during %s:\n%s", source, scrub(details).rstrip())
 
 if not TOKEN:
     print("Set HERDR_TG_TOKEN (from @BotFather)")
@@ -1416,9 +1475,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard button presses."""
     query = update.callback_query
     if not authorized(update):
-        await query.answer("Unauthorized")
+        await answer_callback_safely(query, "Unauthorized")
         return
-    await query.answer()
+    await answer_callback_safely(query)
 
     data = parse_callback_data(query.data)
     action = data.get("action", "approval")
@@ -1948,6 +2007,16 @@ def validate_runtime_config():
             raise RuntimeError("Telegram-only secure mode requires a loopback HERDR_RELAY URL")
 
 
+def build_application() -> Application:
+    return (
+        Application.builder()
+        .token(TOKEN)
+        .connect_timeout(TELEGRAM_CONNECT_TIMEOUT)
+        .get_updates_connect_timeout(TELEGRAM_CONNECT_TIMEOUT)
+        .build()
+    )
+
+
 def main():
     try:
         validate_runtime_config()
@@ -1955,7 +2024,7 @@ def main():
         log.error("Configuration error: %s", e)
         return 1
 
-    app = Application.builder().token(TOKEN).build()
+    app = build_application()
     auth_filter = filters.Chat(chat_id=int(CHAT_ID)) & filters.User(user_id=int(USER_ID))
 
     app.add_handler(CommandHandler("start", cmd_start, filters=auth_filter))
@@ -1975,15 +2044,22 @@ def main():
     app.add_handler(CommandHandler("codex", cmd_codex, filters=auth_filter))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & auth_filter, handle_text))
+    app.add_error_handler(handle_telegram_error)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     async def run():
+        def polling_error(error: TelegramError):
+            app.create_task(
+                app.process_error(update=None, error=error),
+                name="telegram-polling-error",
+            )
+
         async with app:
             await app.start()
             await configure_bot_ui(app)
-            await app.updater.start_polling()
+            await app.updater.start_polling(error_callback=polling_error)
             await relay_listener(app)
 
     loop.run_until_complete(run())

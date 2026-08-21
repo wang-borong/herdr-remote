@@ -11,7 +11,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "relay"))
@@ -982,6 +982,52 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(kwargs["reply_markup"], tg.ForceReply)
         self.assertEqual(kwargs["reply_markup"].input_field_placeholder, "Reply to project")
         self.assertEqual(tg.pending_pane(42, sent.message_id), "w0:p1")
+
+    async def test_callback_ack_failure_does_not_block_reply_selection(self):
+        tg.relay_connected = True
+        tg.agents = make_agents(1)
+        errors = [
+            tg.NetworkError("temporary connection failure"),
+            tg.BadRequest("Query is too old and response timeout expired or query id is invalid"),
+        ]
+
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                button = tg.build_agent_keyboard("select_reply").inline_keyboard[0][0]
+                callback = FakeCallback(button.callback_data)
+                callback.answer = AsyncMock(side_effect=error)
+
+                with patch.object(tg, "read_pane", AsyncMock(return_value="recent output")):
+                    await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
+
+                callback.answer.assert_awaited_once_with(None)
+                self.assertIn("recent output", callback.message.replies[0][0])
+                self.assertIsInstance(callback.message.replies[0][1]["reply_markup"], tg.ForceReply)
+
+    async def test_global_error_handler_scrubs_unexpected_errors(self):
+        error = RuntimeError(f"request failed with {tg.TOKEN}")
+
+        with self.assertLogs(tg.log, level="ERROR") as captured:
+            await tg.handle_telegram_error(SimpleNamespace(), SimpleNamespace(error=error))
+
+        output = "\n".join(captured.output)
+        self.assertIn("Unhandled Telegram error", output)
+        self.assertNotIn(tg.TOKEN, output)
+        self.assertIn("<redacted>", output)
+
+    def test_application_builder_extends_telegram_connect_timeouts(self):
+        builder = MagicMock()
+        builder.token.return_value = builder
+        builder.connect_timeout.return_value = builder
+        builder.get_updates_connect_timeout.return_value = builder
+
+        with patch.object(tg.Application, "builder", return_value=builder):
+            result = tg.build_application()
+
+        self.assertIs(result, builder.build.return_value)
+        builder.token.assert_called_once_with(tg.TOKEN)
+        builder.connect_timeout.assert_called_once_with(tg.TELEGRAM_CONNECT_TIMEOUT)
+        builder.get_updates_connect_timeout.assert_called_once_with(tg.TELEGRAM_CONNECT_TIMEOUT)
 
     async def test_stale_selection_offers_refresh(self):
         tg.relay_connected = True
