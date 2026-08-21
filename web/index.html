@@ -17,6 +17,9 @@
   <link rel="stylesheet" href="/app.css">
   <script src="/vendor/xterm/xterm.js" defer></script>
   <script src="/vendor/xterm/addon-fit.js" defer></script>
+  <script src="/vendor/preview/marked-18.0.10.js" defer></script>
+  <script src="/vendor/preview/dompurify-3.4.14.min.js" defer></script>
+  <script src="/vendor/preview/highlight-11.12.0.min.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -46,6 +49,10 @@
           <button class="primary-nav-button" type="button" data-app-view="terminal" aria-pressed="false">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 4 4-4 4M11 17h8"/></svg>
             Remote Shell
+          </button>
+          <button class="primary-nav-button" type="button" data-app-view="files" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h6l2 2h8v11H4Z"/><path d="M8 11h8M8 14h6"/></svg>
+            Files
           </button>
         </nav>
         <div class="topbar-status" aria-live="polite">
@@ -372,6 +379,118 @@
           </article>
         </section>
       </section>
+
+      <section class="file-workspace" id="file-workspace" aria-label="Workspace 文件阅读与下载" hidden>
+        <aside class="file-panel" aria-labelledby="file-browser-title">
+          <div class="panel-heading file-panel-heading">
+            <div>
+              <p class="eyebrow">WORKSPACE</p>
+              <h1 id="file-browser-title">Files</h1>
+            </div>
+            <button class="toolbar-button" id="file-refresh-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2m.5 5v-5h-5"/></svg>
+              刷新
+            </button>
+          </div>
+
+          <label class="file-source-field" for="file-source-select">
+            <span>浏览主机</span>
+            <select id="file-source-select" aria-describedby="file-source-status"></select>
+            <small id="file-source-status">正在读取 Agent Sources…</small>
+          </label>
+
+          <form class="file-path-jump" id="file-path-jump-form">
+            <label for="file-path-jump-input">路径跳转</label>
+            <div>
+              <input id="file-path-jump-input" type="text" placeholder="~/Workspace/project" autocomplete="off" spellcheck="false">
+              <button type="submit">前往</button>
+            </div>
+          </form>
+
+          <div class="file-directory-bar">
+            <button class="icon-button" id="file-up-button" type="button" aria-label="返回上级目录" title="上级目录">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
+            </button>
+            <span id="file-directory-path">配置的 Workspace 根目录</span>
+          </div>
+
+          <label class="search-field file-search" for="file-search-input">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+            <input id="file-search-input" type="search" placeholder="筛选当前目录" autocomplete="off">
+          </label>
+
+          <ul class="file-list" id="file-list" aria-live="polite"></ul>
+          <p class="file-list-note" id="file-list-note" hidden>项目过多，仅显示前 400 项。</p>
+          <p class="file-security-note">
+            <span class="security-dot" aria-hidden="true"></span>
+            隐藏路径和符号链接不会显示；预览限 1 MB，下载限 25 MB。
+          </p>
+        </aside>
+
+        <section class="file-detail" aria-label="文件阅读器">
+          <div class="file-detail-empty" id="file-detail-empty">
+            <div class="file-empty-visual" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v5h5M9 12h6M9 16h6"/></svg>
+            </div>
+            <p class="eyebrow">SAFE FILE VIEWER</p>
+            <h2>选择文件开始阅读</h2>
+            <p>Markdown 会安全渲染，常见代码文件会自动高亮；其他普通文件仍可直接下载。</p>
+          </div>
+
+          <article class="file-viewer" id="file-viewer" hidden>
+            <header class="file-header">
+              <button class="icon-button mobile-file-back" id="mobile-file-back" type="button" aria-label="返回文件列表">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+              </button>
+              <span class="file-avatar" id="file-avatar" aria-hidden="true">{ }</span>
+              <div class="file-identity">
+                <div>
+                  <h2 id="file-title">文件</h2>
+                  <span class="file-kind-badge" id="file-kind-badge">CODE</span>
+                </div>
+                <p id="file-meta">—</p>
+              </div>
+              <div class="file-actions">
+                <button class="secondary-button compact-button" id="copy-file-button" type="button" aria-label="复制文件内容" title="复制文件内容">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  <span>复制</span>
+                </button>
+                <button class="primary-button compact-button" id="download-file-button" type="button" aria-label="下载文件" title="下载文件">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 20h14"/></svg>
+                  <span>下载</span>
+                </button>
+              </div>
+            </header>
+
+            <section class="file-reader-card" aria-labelledby="file-reader-title">
+              <div class="file-reader-toolbar">
+                <div>
+                  <span class="file-reader-dot" aria-hidden="true"></span>
+                  <strong id="file-reader-title">Preview</strong>
+                </div>
+                <span id="file-reader-meta">等待文件内容</span>
+              </div>
+              <div class="file-reader" id="file-reader">
+                <div class="file-reader-status" id="file-reader-status" role="status">
+                  <span class="terminal-spinner" aria-hidden="true"></span>
+                  <strong>正在安全读取文件</strong>
+                  <span>内容仍会在 Relay 端校验</span>
+                </div>
+                <article class="markdown-body" id="file-markdown-content" hidden></article>
+                <pre class="code-preview" id="file-code-preview" hidden><code id="file-code-content"></code></pre>
+                <div class="file-download-only" id="file-download-only" hidden>
+                  <span class="file-download-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v5h5M9 13h6"/></svg>
+                  </span>
+                  <h3>这个文件不提供网页预览</h3>
+                  <p id="file-download-only-copy">代码与 Markdown 之外的普通文件可安全下载到本机查看。</p>
+                  <button class="primary-button" id="download-file-empty-button" type="button">下载文件</button>
+                </div>
+              </div>
+            </section>
+          </article>
+        </section>
+      </section>
     </main>
 
     <nav class="mobile-nav" aria-label="移动端主要功能">
@@ -382,6 +501,10 @@
       <button class="mobile-nav-button" type="button" data-app-view="terminal" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 4 4-4 4M11 17h8"/></svg>
         <span>终端</span>
+      </button>
+      <button class="mobile-nav-button" type="button" data-app-view="files" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h6l2 2h8v11H4Z"/><path d="M8 11h8M8 14h6"/></svg>
+        <span>文件</span>
       </button>
     </nav>
   </div>

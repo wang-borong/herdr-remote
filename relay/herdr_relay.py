@@ -16,18 +16,21 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
+import threading
 import time
 from email.header import decode_header, make_header
 from http.cookies import CookieError, SimpleCookie
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
@@ -172,6 +175,11 @@ def configured_workspace_roots() -> list[Path]:
 
 WORKSPACE_ROOTS = configured_workspace_roots()
 WORKSPACE_ENTRY_LIMIT = 200
+WORKSPACE_FILE_ENTRY_LIMIT = 400
+WORKSPACE_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
+WORKSPACE_FILE_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024
+WORKSPACE_DOWNLOAD_TOKEN_TTL_SECONDS = 90
+WORKSPACE_DOWNLOAD_TOKEN_LIMIT = 256
 AGENT_PROMPT_WAIT_TIMEOUT_MS = 8_000
 AGENT_PROMPT_PROCESS_TIMEOUT_SECONDS = 12
 AGENT_PROMPT_CONFIRM_ATTEMPTS = 15
@@ -201,6 +209,8 @@ agent_start_in_progress = False
 client_auth = {}
 active_terminal_sessions = set()
 machine_access_cache = None
+workspace_downloads = {}
+workspace_download_lock = threading.Lock()
 
 SAFE_RESPONSES = {"y", "n", "a", "yes", "no", "trust", "yes, single permission", "trust, always allow", "no (tab to edit)", "approve all pending", "configure individually", "exit (cancel subagents)"}
 SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"} | {
@@ -564,6 +574,306 @@ def display_workspace_path(path: Path) -> str:
         return str(path)
 
 
+WORKSPACE_MARKDOWN_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
+WORKSPACE_CODE_LANGUAGES = {
+    ".bash": "bash",
+    ".bat": "dos",
+    ".c": "c",
+    ".cc": "cpp",
+    ".cfg": "ini",
+    ".cmake": "cmake",
+    ".cmd": "dos",
+    ".conf": "ini",
+    ".cpp": "cpp",
+    ".cs": "csharp",
+    ".css": "css",
+    ".cxx": "cpp",
+    ".dart": "dart",
+    ".diff": "diff",
+    ".dockerfile": "dockerfile",
+    ".fish": "bash",
+    ".go": "go",
+    ".gql": "graphql",
+    ".gradle": "gradle",
+    ".graphql": "graphql",
+    ".h": "c",
+    ".hh": "cpp",
+    ".hpp": "cpp",
+    ".htm": "xml",
+    ".html": "xml",
+    ".ini": "ini",
+    ".java": "java",
+    ".js": "javascript",
+    ".json": "json",
+    ".jsonc": "json",
+    ".jsx": "javascript",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".less": "less",
+    ".lua": "lua",
+    ".mjs": "javascript",
+    ".patch": "diff",
+    ".php": "php",
+    ".proto": "protobuf",
+    ".ps1": "powershell",
+    ".py": "python",
+    ".pyi": "python",
+    ".rb": "ruby",
+    ".rs": "rust",
+    ".scss": "scss",
+    ".sh": "bash",
+    ".sql": "sql",
+    ".svelte": "xml",
+    ".swift": "swift",
+    ".toml": "ini",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".txt": "plaintext",
+    ".vue": "xml",
+    ".xml": "xml",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".zsh": "bash",
+}
+WORKSPACE_CODE_FILENAMES = {
+    "cmakelists.txt": "cmake",
+    "containerfile": "dockerfile",
+    "dockerfile": "dockerfile",
+    "gemfile": "ruby",
+    "justfile": "makefile",
+    "license": "plaintext",
+    "makefile": "makefile",
+    "procfile": "plaintext",
+    "rakefile": "ruby",
+    "readme": "plaintext",
+    "vagrantfile": "ruby",
+}
+
+
+def safe_workspace_entry_name(name: str) -> bool:
+    return (
+        bool(name)
+        and not name.startswith(".")
+        and not any(ord(character) < 32 or ord(character) == 127 for character in name)
+    )
+
+
+def workspace_file_preview_info(name: str) -> dict | None:
+    normalized = str(name or "").casefold()
+    suffix = Path(normalized).suffix
+    if suffix in WORKSPACE_MARKDOWN_SUFFIXES:
+        return {"kind": "markdown", "language": "markdown"}
+    language = WORKSPACE_CODE_FILENAMES.get(normalized) or WORKSPACE_CODE_LANGUAGES.get(suffix)
+    if not language:
+        return None
+    return {"kind": "code", "language": language}
+
+
+def workspace_root_for_lexical_path(path: Path) -> Path | None:
+    for root in WORKSPACE_ROOTS:
+        if path == root or root in path.parents:
+            return root
+    return None
+
+
+def resolve_workspace_file_path(value: str, *, expected: str = "any") -> Path:
+    if not WORKSPACE_ROOTS:
+        raise ValueError("No workspace roots are configured")
+    if not isinstance(value, str) or not value.strip() or len(value) > 4096:
+        raise ValueError("A workspace path is required")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("Workspace path contains control characters")
+
+    candidate = Path(os.path.expanduser(value.strip()))
+    if not candidate.is_absolute():
+        candidate = WORKSPACE_ROOTS[0] / candidate
+    lexical = Path(os.path.abspath(candidate))
+    root = workspace_root_for_lexical_path(lexical)
+    if root is None:
+        raise ValueError("Workspace path is outside the configured roots")
+
+    relative = lexical.relative_to(root)
+    current = root
+    for component in relative.parts:
+        if component.startswith("."):
+            raise ValueError("Hidden workspace paths cannot be accessed")
+        current = current / component
+        try:
+            if current.is_symlink():
+                raise ValueError("Workspace symbolic links cannot be accessed")
+            current.lstat()
+        except FileNotFoundError as error:
+            raise ValueError("Workspace path does not exist") from error
+        except OSError as error:
+            raise ValueError("Workspace path cannot be accessed") from error
+
+    try:
+        resolved = lexical.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ValueError("Workspace path does not exist") from error
+    if not path_within_workspace_roots(resolved):
+        raise ValueError("Workspace path is outside the configured roots")
+    if expected == "directory" and not resolved.is_dir():
+        raise ValueError("Workspace path is not a directory")
+    if expected == "file" and not resolved.is_file():
+        raise ValueError("Workspace path is not a regular file")
+    return resolved
+
+
+def workspace_file_entry(path: Path, *, kind: str, size: int = 0) -> dict:
+    entry = {
+        "name": path.name or str(path),
+        "path": str(path),
+        "display_path": display_workspace_path(path),
+        "kind": kind,
+        "size": max(0, int(size)),
+    }
+    if kind == "directory":
+        entry["is_repo"] = git_root_for(path) == path
+        return entry
+
+    preview = workspace_file_preview_info(path.name)
+    entry.update({
+        "is_repo": False,
+        "previewable": bool(preview) and size <= WORKSPACE_FILE_PREVIEW_MAX_BYTES,
+        "preview_kind": preview["kind"] if preview else "",
+        "language": preview["language"] if preview else "",
+        "downloadable": size <= WORKSPACE_FILE_DOWNLOAD_MAX_BYTES,
+    })
+    if preview and size > WORKSPACE_FILE_PREVIEW_MAX_BYTES:
+        entry["preview_reason"] = "File is too large to preview"
+    elif not preview:
+        entry["preview_reason"] = "Preview is limited to code and Markdown files"
+    if size > WORKSPACE_FILE_DOWNLOAD_MAX_BYTES:
+        entry["download_reason"] = "File is too large to download"
+    return entry
+
+
+def workspace_file_listing(value: str | None = None) -> dict:
+    if not WORKSPACE_ROOTS:
+        raise ValueError("No workspace roots are configured")
+    if not value:
+        return {
+            "path": "",
+            "display_path": "Configured workspace roots",
+            "parent": None,
+            "entries": [workspace_file_entry(root, kind="directory") for root in WORKSPACE_ROOTS],
+            "truncated": False,
+        }
+
+    directory = resolve_workspace_file_path(value, expected="directory")
+    entries = []
+    try:
+        children = list(os.scandir(directory))
+    except OSError as error:
+        raise ValueError("Workspace directory cannot be read") from error
+    for child in children:
+        if not safe_workspace_entry_name(child.name) or child.is_symlink():
+            continue
+        path = Path(child.path)
+        try:
+            if child.is_dir(follow_symlinks=False):
+                entries.append(workspace_file_entry(path.resolve(strict=True), kind="directory"))
+            elif child.is_file(follow_symlinks=False):
+                size = child.stat(follow_symlinks=False).st_size
+                entries.append(workspace_file_entry(path.resolve(strict=True), kind="file", size=size))
+        except (OSError, RuntimeError):
+            continue
+
+    entries.sort(key=lambda item: (item["kind"] != "directory", item["name"].casefold()))
+    truncated = len(entries) > WORKSPACE_FILE_ENTRY_LIMIT
+    entries = entries[:WORKSPACE_FILE_ENTRY_LIMIT]
+    parent = "" if directory in WORKSPACE_ROOTS else str(directory.parent)
+    return {
+        "path": str(directory),
+        "display_path": display_workspace_path(directory),
+        "parent": parent,
+        "entries": entries,
+        "truncated": truncated,
+    }
+
+
+def workspace_file_metadata(value: str) -> dict:
+    path = resolve_workspace_file_path(value, expected="file")
+    try:
+        file_stat = path.lstat()
+    except OSError as error:
+        raise ValueError("Workspace file cannot be read") from error
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError("Workspace path is not a regular file")
+    return {
+        "path": str(path),
+        "display_path": display_workspace_path(path),
+        "name": path.name,
+        "size": file_stat.st_size,
+    }
+
+
+def read_workspace_file_bytes(path: str, maximum: int, expected_size: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError("Workspace file cannot be read") from error
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError("Workspace path is not a regular file")
+        if file_stat.st_size != expected_size:
+            raise ValueError("Workspace file changed while it was being read")
+        if file_stat.st_size > maximum:
+            raise ValueError("Workspace file exceeds the allowed size")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            raw = handle.read(maximum + 1)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(raw) > maximum:
+        raise ValueError("Workspace file exceeds the allowed size")
+    if len(raw) != expected_size:
+        raise ValueError("Workspace file changed while it was being read")
+    return raw
+
+
+def workspace_file_read(value: str) -> dict:
+    metadata = workspace_file_metadata(value)
+    preview = workspace_file_preview_info(metadata["name"])
+    if not preview:
+        raise ValueError("Preview is limited to code and Markdown files")
+    if metadata["size"] > WORKSPACE_FILE_PREVIEW_MAX_BYTES:
+        raise ValueError("Workspace file is too large to preview")
+    raw = read_workspace_file_bytes(
+        metadata["path"],
+        WORKSPACE_FILE_PREVIEW_MAX_BYTES,
+        metadata["size"],
+    )
+    if b"\x00" in raw:
+        raise ValueError("Binary files cannot be previewed")
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError("Workspace file is not valid UTF-8 text") from error
+    return {
+        **metadata,
+        **preview,
+        "content": content,
+        "line_count": content.count("\n") + 1,
+    }
+
+
+def workspace_file_download(value: str) -> tuple[dict, bytes]:
+    metadata = workspace_file_metadata(value)
+    if metadata["size"] > WORKSPACE_FILE_DOWNLOAD_MAX_BYTES:
+        raise ValueError("Workspace file is too large to download")
+    data = read_workspace_file_bytes(
+        metadata["path"],
+        WORKSPACE_FILE_DOWNLOAD_MAX_BYTES,
+        metadata["size"],
+    )
+    return metadata, data
+
+
 def terminal_access_allowed(auth: dict) -> bool:
     if not WEB_TERMINAL_ENABLED:
         return False
@@ -821,6 +1131,222 @@ print(json.dumps({
 '''
 
 
+REMOTE_WORKSPACE_FILE_SCRIPT = r'''
+import base64
+import json
+import os
+import stat
+import sys
+
+LIMIT = 400
+
+def display(path):
+    home = os.path.realpath(os.path.expanduser("~"))
+    if path == home:
+        return "~"
+    prefix = home + os.sep
+    return "~/" + path[len(prefix):] if path.startswith(prefix) else path
+
+def within(path, roots):
+    for root in roots:
+        try:
+            if os.path.commonpath((path, root)) == root:
+                return True
+        except ValueError:
+            pass
+    return False
+
+def git_root(path, roots):
+    candidate = path
+    while within(candidate, roots):
+        marker = os.path.join(candidate, ".git")
+        if os.path.isdir(marker) or os.path.isfile(marker):
+            return candidate
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+    return ""
+
+def safe_name(name):
+    return bool(name) and not name.startswith(".") and not any(
+        ord(character) < 32 or ord(character) == 127 for character in name
+    )
+
+def fail(message):
+    print(json.dumps({"error": message}))
+    raise SystemExit(2)
+
+try:
+    configured = json.loads(sys.argv[1])
+    operation = sys.argv[2]
+    requested = sys.argv[3]
+    maximum = int(sys.argv[4])
+except (IndexError, json.JSONDecodeError, TypeError, ValueError):
+    fail("Remote workspace file request is invalid")
+
+roots = []
+for value in configured:
+    root = os.path.realpath(os.path.expanduser(value))
+    if os.path.isdir(root) and root not in roots:
+        roots.append(root)
+if not roots:
+    fail("No remote workspace roots are available")
+
+def resolve(requested_path, expected):
+    candidate = os.path.expanduser(requested_path)
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(roots[0], candidate)
+    lexical = os.path.abspath(candidate)
+    root = next((item for item in roots if within(lexical, [item])), None)
+    if root is None:
+        fail("Remote workspace path is outside the configured roots")
+    relative = os.path.relpath(lexical, root)
+    current = root
+    if relative != ".":
+        for component in relative.split(os.sep):
+            if component.startswith("."):
+                fail("Hidden remote workspace paths cannot be accessed")
+            current = os.path.join(current, component)
+            try:
+                mode = os.lstat(current).st_mode
+            except OSError:
+                fail("Remote workspace path does not exist")
+            if stat.S_ISLNK(mode):
+                fail("Remote workspace symbolic links cannot be accessed")
+    resolved = os.path.realpath(lexical)
+    if not within(resolved, roots):
+        fail("Remote workspace path is outside the configured roots")
+    if expected == "directory" and not os.path.isdir(resolved):
+        fail("Remote workspace path is not a directory")
+    if expected == "file":
+        try:
+            mode = os.stat(resolved, follow_symlinks=False).st_mode
+        except OSError:
+            fail("Remote workspace file cannot be read")
+        if not stat.S_ISREG(mode):
+            fail("Remote workspace path is not a regular file")
+    return resolved
+
+if operation == "list":
+    if not requested:
+        entries = [{
+            "name": os.path.basename(root) or root,
+            "path": root,
+            "display_path": display(root),
+            "kind": "directory",
+            "size": 0,
+            "is_repo": git_root(root, roots) == root,
+        } for root in roots]
+        print(json.dumps({
+            "path": "",
+            "display_path": "Configured workspace roots",
+            "parent": None,
+            "entries": entries,
+            "truncated": False,
+        }))
+        raise SystemExit(0)
+
+    directory = resolve(requested, "directory")
+    entries = []
+    try:
+        children = list(os.scandir(directory))
+    except OSError:
+        fail("Remote workspace directory cannot be read")
+    for child in children:
+        if not safe_name(child.name) or child.is_symlink():
+            continue
+        try:
+            if child.is_dir(follow_symlinks=False):
+                child_path = os.path.realpath(child.path)
+                entries.append({
+                    "name": child.name,
+                    "path": child_path,
+                    "display_path": display(child_path),
+                    "kind": "directory",
+                    "size": 0,
+                    "is_repo": git_root(child_path, roots) == child_path,
+                })
+            elif child.is_file(follow_symlinks=False):
+                child_path = os.path.realpath(child.path)
+                entries.append({
+                    "name": child.name,
+                    "path": child_path,
+                    "display_path": display(child_path),
+                    "kind": "file",
+                    "size": child.stat(follow_symlinks=False).st_size,
+                    "is_repo": False,
+                })
+        except OSError:
+            continue
+    entries.sort(key=lambda item: (item["kind"] != "directory", item["name"].casefold()))
+    truncated = len(entries) > LIMIT
+    entries = entries[:LIMIT]
+    parent = "" if directory in roots else os.path.dirname(directory)
+    print(json.dumps({
+        "path": directory,
+        "display_path": display(directory),
+        "parent": parent,
+        "entries": entries,
+        "truncated": truncated,
+    }))
+    raise SystemExit(0)
+
+if operation not in {"info", "read", "download"}:
+    fail("Remote workspace file operation is invalid")
+
+path = resolve(requested, "file")
+try:
+    size = os.stat(path, follow_symlinks=False).st_size
+except OSError:
+    fail("Remote workspace file cannot be read")
+if maximum > 0 and size > maximum:
+    fail("Remote workspace file exceeds the allowed size")
+
+response = {
+    "path": path,
+    "display_path": display(path),
+    "name": os.path.basename(path),
+    "size": size,
+}
+if operation == "info":
+    print(json.dumps(response))
+    raise SystemExit(0)
+
+descriptor = -1
+try:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    opened = os.fstat(descriptor)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_size != size:
+        fail("Remote workspace file changed while it was being read")
+    with os.fdopen(descriptor, "rb") as handle:
+        descriptor = -1
+        raw = handle.read(maximum + 1 if maximum > 0 else -1)
+except OSError:
+    fail("Remote workspace file cannot be read")
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+if maximum > 0 and len(raw) > maximum:
+    fail("Remote workspace file exceeds the allowed size")
+if len(raw) != size:
+    fail("Remote workspace file changed while it was being read")
+
+if operation == "download":
+    response["data"] = base64.b64encode(raw).decode("ascii")
+    print(json.dumps(response))
+    raise SystemExit(0)
+
+if b"\x00" in raw:
+    fail("Binary files cannot be previewed")
+try:
+    response["content"] = raw.decode("utf-8-sig")
+except UnicodeDecodeError:
+    fail("Remote workspace file is not valid UTF-8 text")
+print(json.dumps(response))
+'''
+
+
 def remote_workspace_directory_listing(source: dict, value: str | None = None) -> dict:
     if value is not None:
         if not isinstance(value, str) or len(value) > 4096:
@@ -858,6 +1384,128 @@ def remote_workspace_directory_listing(source: dict, value: str | None = None) -
     return response
 
 
+def remote_workspace_file_request(
+    source: dict,
+    operation: str,
+    value: str | None = None,
+    *,
+    maximum: int = 0,
+    timeout: int = 15,
+) -> dict:
+    if value is not None:
+        if not isinstance(value, str) or len(value) > 4096:
+            raise ValueError("A remote workspace path is required")
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("Remote workspace path contains control characters")
+        value = value.strip()
+    try:
+        result = run_remote_result(
+            source,
+            [
+                "python3",
+                "-c",
+                REMOTE_WORKSPACE_FILE_SCRIPT,
+                json.dumps(
+                    source.get("workspace_roots")
+                    or [source.get("workspace_root", "~/Workspace")]
+                ),
+                operation,
+                value or "",
+                str(max(0, int(maximum))),
+            ],
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("Remote Agent source is offline") from error
+    try:
+        response = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as error:
+        if result.returncode == 255:
+            raise ValueError("Remote Agent source is offline") from error
+        raise ValueError("Remote workspace returned an invalid file response") from error
+    if not isinstance(response, dict):
+        raise ValueError("Remote workspace returned an invalid file response")
+    if result.returncode != 0 or response.get("error"):
+        raise ValueError(str(response.get("error") or "Remote workspace file cannot be read"))
+    return response
+
+
+def remote_workspace_file_listing(source: dict, value: str | None = None) -> dict:
+    listing = remote_workspace_file_request(source, "list", value, timeout=15)
+    entries = []
+    for entry in listing.get("entries", []):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") == "directory":
+            entries.append(entry)
+            continue
+        preview = workspace_file_preview_info(str(entry.get("name", "")))
+        size = max(0, int(entry.get("size", 0)))
+        entry.update({
+            "previewable": bool(preview) and size <= WORKSPACE_FILE_PREVIEW_MAX_BYTES,
+            "preview_kind": preview["kind"] if preview else "",
+            "language": preview["language"] if preview else "",
+            "downloadable": size <= WORKSPACE_FILE_DOWNLOAD_MAX_BYTES,
+        })
+        if preview and size > WORKSPACE_FILE_PREVIEW_MAX_BYTES:
+            entry["preview_reason"] = "File is too large to preview"
+        elif not preview:
+            entry["preview_reason"] = "Preview is limited to code and Markdown files"
+        if size > WORKSPACE_FILE_DOWNLOAD_MAX_BYTES:
+            entry["download_reason"] = "File is too large to download"
+        entries.append(entry)
+    listing["entries"] = entries
+    return listing
+
+
+def remote_workspace_file_metadata(source: dict, value: str) -> dict:
+    return remote_workspace_file_request(
+        source,
+        "info",
+        value,
+        maximum=WORKSPACE_FILE_DOWNLOAD_MAX_BYTES,
+        timeout=15,
+    )
+
+
+def remote_workspace_file_read(source: dict, value: str) -> dict:
+    preview = workspace_file_preview_info(Path(value).name)
+    if not preview:
+        raise ValueError("Preview is limited to code and Markdown files")
+    response = remote_workspace_file_request(
+        source,
+        "read",
+        value,
+        maximum=WORKSPACE_FILE_PREVIEW_MAX_BYTES,
+        timeout=20,
+    )
+    content = str(response.get("content", ""))
+    return {
+        **response,
+        **preview,
+        "content": content,
+        "line_count": content.count("\n") + 1,
+    }
+
+
+def remote_workspace_file_download(source: dict, value: str) -> tuple[dict, bytes]:
+    response = remote_workspace_file_request(
+        source,
+        "download",
+        value,
+        maximum=WORKSPACE_FILE_DOWNLOAD_MAX_BYTES,
+        timeout=45,
+    )
+    encoded = response.pop("data", "")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, TypeError) as error:
+        raise ValueError("Remote workspace returned invalid file data") from error
+    if len(data) != int(response.get("size", -1)):
+        raise ValueError("Remote workspace returned incomplete file data")
+    return response, data
+
+
 def workspace_directory_listing_for_source(
     source_id: str | None,
     value: str | None = None,
@@ -873,6 +1521,61 @@ def workspace_directory_listing_for_source(
         "source_id": source["id"],
         "source_label": source["label"],
     }
+
+
+def workspace_file_listing_for_source(
+    source_id: str | None,
+    value: str | None = None,
+) -> dict:
+    source = agent_source(source_id)
+    if source["kind"] == "local":
+        listing = workspace_file_listing(value)
+    else:
+        listing = remote_workspace_file_listing(source, value)
+    return {
+        "type": "workspace_listing",
+        **listing,
+        "source_id": source["id"],
+        "source_label": source["label"],
+    }
+
+
+def workspace_file_read_for_source(source_id: str | None, value: str) -> dict:
+    source = agent_source(source_id)
+    if source["kind"] == "local":
+        result = workspace_file_read(value)
+    else:
+        result = remote_workspace_file_read(source, value)
+    return {
+        "type": "workspace_file",
+        **result,
+        "source_id": source["id"],
+        "source_label": source["label"],
+    }
+
+
+def workspace_file_metadata_for_source(source_id: str | None, value: str) -> dict:
+    source = agent_source(source_id)
+    if source["kind"] == "local":
+        result = workspace_file_metadata(value)
+        if result["size"] > WORKSPACE_FILE_DOWNLOAD_MAX_BYTES:
+            raise ValueError("Workspace file is too large to download")
+    else:
+        result = remote_workspace_file_metadata(source, value)
+    return {**result, "source_id": source["id"], "source_label": source["label"]}
+
+
+def workspace_file_download_for_source(source_id: str | None, value: str) -> tuple[dict, bytes]:
+    source = agent_source(source_id)
+    if source["kind"] == "local":
+        metadata, data = workspace_file_download(value)
+    else:
+        metadata, data = remote_workspace_file_download(source, value)
+    return {
+        **metadata,
+        "source_id": source["id"],
+        "source_label": source["label"],
+    }, data
 
 
 def parse_herdr_result(result: subprocess.CompletedProcess) -> dict:
@@ -1547,6 +2250,95 @@ def web_session_cookie(request) -> str:
     )
 
 
+def authenticated_principal(auth: dict) -> str:
+    mode = str(auth.get("mode", ""))
+    if mode == "tailscale":
+        return f"tailscale:{str(auth.get('login', '')).casefold()}"
+    if mode in {"token", "token-query", "web-session"}:
+        return "relay-token"
+    if mode == "development":
+        return "development"
+    # handle_client is only reached after process_request authentication. This
+    # fallback also keeps direct unit-test WebSockets deterministic.
+    return "authenticated-client"
+
+
+def purge_workspace_downloads(now: float | None = None) -> None:
+    current = time.time() if now is None else float(now)
+    expired = [
+        token for token, grant in workspace_downloads.items()
+        if float(grant.get("expires", 0)) <= current
+    ]
+    for token in expired:
+        workspace_downloads.pop(token, None)
+
+
+def create_workspace_download(metadata: dict, auth: dict, now: float | None = None) -> dict:
+    current = time.time() if now is None else float(now)
+    token = secrets.token_urlsafe(32)
+    grant = {
+        "source_id": str(metadata["source_id"]),
+        "path": str(metadata["path"]),
+        "name": str(metadata["name"]),
+        "size": int(metadata["size"]),
+        "principal": authenticated_principal(auth),
+        "expires": current + WORKSPACE_DOWNLOAD_TOKEN_TTL_SECONDS,
+    }
+    with workspace_download_lock:
+        purge_workspace_downloads(current)
+        if len(workspace_downloads) >= WORKSPACE_DOWNLOAD_TOKEN_LIMIT:
+            oldest = min(
+                workspace_downloads,
+                key=lambda item: float(workspace_downloads[item].get("expires", 0)),
+            )
+            workspace_downloads.pop(oldest, None)
+        workspace_downloads[token] = grant
+    return {
+        "type": "workspace_download_ready",
+        "token": token,
+        "url": f"/api/workspace-download?token={quote(token, safe='')}",
+        "name": grant["name"],
+        "size": grant["size"],
+        "expires_in": WORKSPACE_DOWNLOAD_TOKEN_TTL_SECONDS,
+    }
+
+
+def consume_workspace_download(
+    token: str,
+    auth: dict,
+    now: float | None = None,
+) -> dict | None:
+    if not isinstance(token, str) or not 20 <= len(token) <= 128:
+        return None
+    current = time.time() if now is None else float(now)
+    principal = authenticated_principal(auth)
+    with workspace_download_lock:
+        purge_workspace_downloads(current)
+        grant = workspace_downloads.get(token)
+        if not grant or grant.get("principal") != principal:
+            return None
+        return workspace_downloads.pop(token)
+
+
+def workspace_download_disposition(name: str) -> str:
+    cleaned = "".join(
+        character for character in str(name or "download")
+        if 31 < ord(character) != 127
+    ).strip() or "download"
+    fallback = cleaned.encode("ascii", "ignore").decode() or "download"
+    fallback = re.sub(r'[^A-Za-z0-9._ -]+', "_", fallback).strip(" .") or "download"
+    return (
+        f'attachment; filename="{fallback[:160]}"; '
+        f"filename*=UTF-8''{quote(cleaned[:240], safe='')}"
+    )
+
+
+def websocket_request_id(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value if 1 <= value <= 2_147_483_647 else 0
+
+
 def http_headers(content_type: str, cache_control: str = "no-cache", extra: list | None = None):
     from websockets.datastructures import Headers
 
@@ -1602,6 +2394,58 @@ async def process_request(connection, request):
         return Response(200, "OK", http_headers("text/plain; charset=utf-8", "no-store"), b"ok\n")
 
     path = (getattr(request, "path", "") or "/").split("?", 1)[0]
+
+    if path == "/api/workspace-download":
+        token = params.get("token", [""])[0]
+        grant = consume_workspace_download(token, auth)
+        if grant is None:
+            return Response(
+                404,
+                "Not Found",
+                http_headers("text/plain; charset=utf-8", "no-store"),
+                b"download link is invalid or expired\n",
+            )
+        try:
+            metadata, data = await asyncio.to_thread(
+                workspace_file_download_for_source,
+                grant["source_id"],
+                grant["path"],
+            )
+        except ValueError as error:
+            log.warning("Workspace download failed: %s", error)
+            return Response(
+                409,
+                "Conflict",
+                http_headers("text/plain; charset=utf-8", "no-store"),
+                b"workspace file is no longer available\n",
+            )
+        if metadata["size"] != grant["size"] or metadata["name"] != grant["name"]:
+            return Response(
+                409,
+                "Conflict",
+                http_headers("text/plain; charset=utf-8", "no-store"),
+                b"workspace file changed before download\n",
+            )
+        remote = getattr(connection, "remote_address", None)
+        ip = remote[0] if isinstance(remote, (tuple, list)) and remote else "unknown"
+        audit(
+            "workspace_download",
+            str(ip),
+            clean_identity_header(request_header(request, "User-Agent"))[:80] or "browser",
+            "",
+            f"source={metadata['source_id']} name={metadata['name']!r} bytes={metadata['size']}",
+        )
+        extra_headers = [
+            ("Content-Disposition", workspace_download_disposition(metadata["name"])),
+            ("Content-Length", str(len(data))),
+        ]
+        return Response(
+            200,
+            "OK",
+            http_headers("application/octet-stream", "no-store", extra_headers),
+            data,
+        )
+
     web_dir = Path(__file__).resolve().parent.parent / "web"
     static_files = {
         "/": ("index.html", "text/html; charset=utf-8", "no-cache"),
@@ -1616,6 +2460,21 @@ async def process_request(connection, request):
         ),
         "/vendor/xterm/addon-fit.js": (
             "vendor/xterm/addon-fit.js", "application/javascript; charset=utf-8", "public, max-age=86400",
+        ),
+        "/vendor/preview/marked-18.0.10.js": (
+            "vendor/preview/marked-18.0.10.js",
+            "application/javascript; charset=utf-8",
+            "public, max-age=31536000, immutable",
+        ),
+        "/vendor/preview/dompurify-3.4.14.min.js": (
+            "vendor/preview/dompurify-3.4.14.min.js",
+            "application/javascript; charset=utf-8",
+            "public, max-age=31536000, immutable",
+        ),
+        "/vendor/preview/highlight-11.12.0.min.js": (
+            "vendor/preview/highlight-11.12.0.min.js",
+            "application/javascript; charset=utf-8",
+            "public, max-age=31536000, immutable",
         ),
         "/vendor/fonts/firacode-nerd-mono-v3.3.0.woff2": (
             "vendor/fonts/firacode-nerd-mono-v3.3.0.woff2",
@@ -1716,6 +2575,7 @@ async def handle_client(ws):
             "features": {
                 "terminal": terminal_enabled,
                 "native_ssh": TAILSCALE_SSH_ENABLED,
+                "workspace_files": True,
             },
             "machine": machine_access_info(),
             "terminal_profiles": configured_terminal_profiles() if terminal_enabled else [],
@@ -1968,6 +2828,68 @@ async def handle_client(ws):
                 run_herdr("pane", "send-text", raw_pane_id, text + "\n", remote=remote)
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)
+            elif msg_type == "list_workspace_files":
+                request_id = websocket_request_id(msg.get("request_id"))
+                try:
+                    listing = await asyncio.to_thread(
+                        workspace_file_listing_for_source,
+                        msg.get("source_id"),
+                        msg.get("path"),
+                    )
+                except ValueError as error:
+                    await ws.send(json.dumps({
+                        "type": "workspace_error",
+                        "operation": "list",
+                        "request_id": request_id,
+                        "source_id": str(msg.get("source_id") or "local"),
+                        "message": str(error),
+                    }))
+                    continue
+                listing["request_id"] = request_id
+                await ws.send(json.dumps(listing))
+            elif msg_type == "read_workspace_file":
+                request_id = websocket_request_id(msg.get("request_id"))
+                try:
+                    workspace_file = await asyncio.to_thread(
+                        workspace_file_read_for_source,
+                        msg.get("source_id"),
+                        msg.get("path", ""),
+                    )
+                except ValueError as error:
+                    await ws.send(json.dumps({
+                        "type": "workspace_error",
+                        "operation": "read",
+                        "request_id": request_id,
+                        "source_id": str(msg.get("source_id") or "local"),
+                        "message": str(error),
+                    }))
+                    continue
+                workspace_file["request_id"] = request_id
+                await ws.send(json.dumps(workspace_file))
+            elif msg_type == "prepare_workspace_download":
+                request_id = websocket_request_id(msg.get("request_id"))
+                try:
+                    metadata = await asyncio.to_thread(
+                        workspace_file_metadata_for_source,
+                        msg.get("source_id"),
+                        msg.get("path", ""),
+                    )
+                    download = create_workspace_download(metadata, auth)
+                except ValueError as error:
+                    await ws.send(json.dumps({
+                        "type": "workspace_error",
+                        "operation": "download",
+                        "request_id": request_id,
+                        "source_id": str(msg.get("source_id") or "local"),
+                        "message": str(error),
+                    }))
+                    continue
+                download.update({
+                    "request_id": request_id,
+                    "source_id": metadata["source_id"],
+                    "source_label": metadata["source_label"],
+                })
+                await ws.send(json.dumps(download))
             elif msg_type == "list_directories":
                 try:
                     listing = await asyncio.to_thread(

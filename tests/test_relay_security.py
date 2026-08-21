@@ -56,6 +56,7 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         relay.last_statuses.clear()
         relay.client_auth.clear()
         relay.active_terminal_sessions.clear()
+        relay.workspace_downloads.clear()
         relay.machine_access_cache = None
         relay.agent_start_in_progress = False
 
@@ -206,12 +207,20 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Host": "127.0.0.1:8375", "Cookie": cookie_pair},
             )
             font_response = await relay.process_request(connection, font_request)
+            preview_request = SimpleNamespace(
+                path="/vendor/preview/marked-18.0.10.js",
+                headers={"Host": "127.0.0.1:8375", "Cookie": cookie_pair},
+            )
+            preview_response = await relay.process_request(connection, preview_request)
 
         self.assertEqual(asset_response.status_code, 200)
         self.assertIn(b"new WebSocket", asset_response.body)
         self.assertEqual(font_response.status_code, 200)
         self.assertEqual(font_response.headers["Content-Type"], "font/woff2")
         self.assertTrue(font_response.body.startswith(b"wOF2"))
+        self.assertEqual(preview_response.status_code, 200)
+        self.assertIn(b"marked v18.0.10", preview_response.body)
+        self.assertIn("immutable", preview_response.headers["Cache-Control"])
 
     def test_web_terminal_requires_a_separate_tailscale_user_allowlist(self):
         tailscale_auth = {
@@ -365,6 +374,7 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         )
         session_message = next(message for message in ws.sent if message["type"] == "session")
         self.assertTrue(session_message["features"]["terminal"])
+        self.assertTrue(session_message["features"]["workspace_files"])
         self.assertEqual(session_message["terminal_profiles"], [profile])
         audit_details = [call.args[4] for call in audit.call_args_list]
         self.assertFalse(any("git status" in detail for detail in audit_details))
@@ -1235,6 +1245,288 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ordinary_listing["git_root"], "")
                 with self.assertRaisesRegex(ValueError, "outside the configured roots"):
                     relay.resolve_workspace_path(str(outside))
+
+    def test_workspace_file_browser_reads_code_and_markdown_safely(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Workspace"
+            project = root / "project"
+            outside = Path(temp_dir) / "outside.py"
+            project.mkdir(parents=True)
+            (project / "README.md").write_text("# Project\n\nHello **world**.\n")
+            (project / "app.py").write_text("print('hello')\n")
+            (project / "image.bin").write_bytes(b"\x00\x01\x02")
+            (project / ".env").write_text("SECRET=value\n")
+            hidden = project / ".private"
+            hidden.mkdir()
+            (hidden / "notes.md").write_text("secret\n")
+            outside.write_text("outside\n")
+            (project / "linked.py").symlink_to(outside)
+
+            with patch.object(relay, "WORKSPACE_ROOTS", [root.resolve()]):
+                listing = relay.workspace_file_listing(str(project))
+                entries = {entry["name"]: entry for entry in listing["entries"]}
+
+                self.assertIn("README.md", entries)
+                self.assertIn("app.py", entries)
+                self.assertIn("image.bin", entries)
+                self.assertNotIn(".env", entries)
+                self.assertNotIn(".private", entries)
+                self.assertNotIn("linked.py", entries)
+                self.assertTrue(entries["README.md"]["previewable"])
+                self.assertEqual(entries["README.md"]["preview_kind"], "markdown")
+                self.assertEqual(entries["app.py"]["language"], "python")
+                self.assertFalse(entries["image.bin"]["previewable"])
+                self.assertTrue(entries["image.bin"]["downloadable"])
+
+                markdown = relay.workspace_file_read(str(project / "README.md"))
+                code = relay.workspace_file_read(str(project / "app.py"))
+                self.assertEqual(markdown["kind"], "markdown")
+                self.assertIn("Hello **world**", markdown["content"])
+                self.assertEqual(code["language"], "python")
+                self.assertEqual(code["line_count"], 2)
+
+                with self.assertRaisesRegex(ValueError, "limited to code and Markdown"):
+                    relay.workspace_file_read(str(project / "image.bin"))
+                with self.assertRaisesRegex(ValueError, "Hidden workspace"):
+                    relay.workspace_file_read(str(project / ".private" / "notes.md"))
+                with self.assertRaisesRegex(ValueError, "symbolic links"):
+                    relay.workspace_file_read(str(project / "linked.py"))
+                with self.assertRaisesRegex(ValueError, "outside the configured roots"):
+                    relay.workspace_file_read(str(outside))
+
+    def test_workspace_file_preview_rejects_binary_and_oversized_code(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Workspace"
+            root.mkdir()
+            binary_code = root / "binary.py"
+            binary_code.write_bytes(b"x\x00y")
+            large_code = root / "large.py"
+            large_code.write_text("x" * 32)
+
+            with (
+                patch.object(relay, "WORKSPACE_ROOTS", [root.resolve()]),
+                patch.object(relay, "WORKSPACE_FILE_PREVIEW_MAX_BYTES", 16),
+            ):
+                with self.assertRaisesRegex(ValueError, "Binary files"):
+                    relay.workspace_file_read(str(binary_code))
+                with self.assertRaisesRegex(ValueError, "too large"):
+                    relay.workspace_file_read(str(large_code))
+
+    def test_remote_workspace_file_requests_keep_paths_in_structured_arguments(self):
+        source = relay.normalize_ssh_profile({
+            "id": "build",
+            "label": "Build Server",
+            "target": "build-host",
+            "agent_enabled": True,
+            "workspace_roots": ["~/Workspace", "/srv/models"],
+        })
+        requested = "/home/dev/Workspace/project/a file.py; touch /tmp/nope"
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps({
+                "path": "/home/dev/Workspace/project",
+                "display_path": "~/Workspace/project",
+                "parent": "/home/dev/Workspace",
+                "entries": [{
+                    "name": "app.py",
+                    "path": "/home/dev/Workspace/project/app.py",
+                    "display_path": "~/Workspace/project/app.py",
+                    "kind": "file",
+                    "size": 12,
+                    "is_repo": False,
+                }],
+                "truncated": False,
+            }),
+            stderr="",
+        )
+        with patch.object(relay, "run_remote_result", return_value=completed) as run_remote:
+            listing = relay.remote_workspace_file_listing(source, requested)
+
+        arguments = run_remote.call_args.args[1]
+        self.assertEqual(arguments[0:2], ["python3", "-c"])
+        self.assertEqual(json.loads(arguments[3]), ["~/Workspace", "/srv/models"])
+        self.assertEqual(arguments[4], "list")
+        self.assertEqual(arguments[5], requested)
+        self.assertEqual(arguments[6], "0")
+        self.assertTrue(listing["entries"][0]["previewable"])
+        self.assertEqual(listing["entries"][0]["language"], "python")
+
+    async def test_workspace_file_websocket_protocol_preserves_request_scope(self):
+        path = "/workspace/project/README.md"
+        listing = {
+            "type": "workspace_listing",
+            "source_id": "local",
+            "source_label": "本机",
+            "path": "/workspace/project",
+            "display_path": "~/Workspace/project",
+            "parent": "/workspace",
+            "entries": [],
+            "truncated": False,
+        }
+        workspace_file = {
+            "type": "workspace_file",
+            "source_id": "local",
+            "source_label": "本机",
+            "path": path,
+            "display_path": "~/Workspace/project/README.md",
+            "name": "README.md",
+            "size": 10,
+            "kind": "markdown",
+            "language": "markdown",
+            "content": "# Project\n",
+            "line_count": 2,
+        }
+        metadata = {
+            "source_id": "local",
+            "source_label": "本机",
+            "path": path,
+            "display_path": "~/Workspace/project/README.md",
+            "name": "README.md",
+            "size": 10,
+        }
+        ws = FakeWebSocket([
+            {
+                "type": "list_workspace_files",
+                "source_id": "local",
+                "path": "/workspace/project",
+                "request_id": 11,
+            },
+            {
+                "type": "read_workspace_file",
+                "source_id": "local",
+                "path": path,
+                "request_id": 12,
+            },
+            {
+                "type": "prepare_workspace_download",
+                "source_id": "local",
+                "path": path,
+                "request_id": 13,
+            },
+        ])
+        relay.client_auth[id(ws)] = {"mode": "token", "login": "", "name": ""}
+
+        with (
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                new=AsyncMock(side_effect=[listing, workspace_file, metadata]),
+            ) as to_thread,
+            patch.object(relay, "machine_access_info", return_value={}),
+        ):
+            await relay.handle_client(ws)
+
+        self.assertEqual(
+            to_thread.await_args_list,
+            [
+                unittest.mock.call(
+                    relay.workspace_file_listing_for_source,
+                    "local",
+                    "/workspace/project",
+                ),
+                unittest.mock.call(
+                    relay.workspace_file_read_for_source,
+                    "local",
+                    path,
+                ),
+                unittest.mock.call(
+                    relay.workspace_file_metadata_for_source,
+                    "local",
+                    path,
+                ),
+            ],
+        )
+        self.assertIn({**listing, "request_id": 11}, ws.sent)
+        self.assertIn({**workspace_file, "request_id": 12}, ws.sent)
+        prepared = next(message for message in ws.sent if message["type"] == "workspace_download_ready")
+        self.assertEqual(prepared["request_id"], 13)
+        self.assertEqual(prepared["source_id"], "local")
+        self.assertTrue(prepared["url"].startswith("/api/workspace-download?token="))
+
+    def test_workspace_download_tokens_are_short_lived_one_time_and_identity_bound(self):
+        metadata = {
+            "source_id": "local",
+            "source_label": "本机",
+            "path": "/workspace/project/readme.md",
+            "name": "readme.md",
+            "size": 12,
+        }
+        owner = {"mode": "tailscale", "login": "Owner@Example.com"}
+        other = {"mode": "tailscale", "login": "other@example.com"}
+        prepared = relay.create_workspace_download(metadata, owner, now=1000)
+        token = prepared["token"]
+
+        self.assertIsNone(relay.consume_workspace_download(token, other, now=1001))
+        grant = relay.consume_workspace_download(token, owner, now=1001)
+        self.assertEqual(grant["path"], metadata["path"])
+        self.assertIsNone(relay.consume_workspace_download(token, owner, now=1001))
+
+        expired = relay.create_workspace_download(metadata, owner, now=2000)["token"]
+        self.assertIsNone(
+            relay.consume_workspace_download(
+                expired,
+                owner,
+                now=2000 + relay.WORKSPACE_DOWNLOAD_TOKEN_TTL_SECONDS + 1,
+            )
+        )
+
+        session_token = relay.create_workspace_download(
+            metadata,
+            {"mode": "token-query"},
+            now=3000,
+        )["token"]
+        self.assertIsNotNone(
+            relay.consume_workspace_download(
+                session_token,
+                {"mode": "web-session"},
+                now=3001,
+            )
+        )
+
+    async def test_workspace_download_http_route_consumes_token_once(self):
+        data = b"# Project\n"
+        metadata = {
+            "source_id": "local",
+            "source_label": "本机",
+            "path": "/workspace/project/\u9879\u76ee.md",
+            "name": "\u9879\u76ee.md",
+            "size": len(data),
+        }
+        auth = {"mode": "token", "login": "", "name": ""}
+        prepared = relay.create_workspace_download(metadata, auth)
+        request = SimpleNamespace(
+            path=prepared["url"],
+            headers={
+                "Authorization": f"Bearer {relay.AUTH_TOKEN}",
+                "Host": "127.0.0.1:8375",
+                "User-Agent": "test-browser",
+            },
+        )
+        connection = SimpleNamespace(remote_address=("127.0.0.1", 43123))
+
+        with (
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                new=AsyncMock(return_value=(metadata, data)),
+            ) as to_thread,
+            patch.object(relay, "audit") as audit,
+        ):
+            response = await relay.process_request(connection, request)
+            replay = await relay.process_request(connection, request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body, data)
+        self.assertEqual(response.headers["Content-Type"], "application/octet-stream")
+        self.assertIn("filename*=UTF-8''", response.headers["Content-Disposition"])
+        self.assertEqual(replay.status_code, 404)
+        to_thread.assert_awaited_once_with(
+            relay.workspace_file_download_for_source,
+            "local",
+            metadata["path"],
+        )
+        audit.assert_called_once()
 
     def test_codex_start_allows_an_ordinary_directory_and_waits_for_the_new_shell(self):
         with tempfile.TemporaryDirectory() as temp_dir:

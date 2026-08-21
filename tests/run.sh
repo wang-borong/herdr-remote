@@ -91,6 +91,17 @@ WEB_JS="$DIR/web/app.js"
   grep -q "agent_prompt_queue" "$WEB_JS" && grep -q "queue-prompt-button" "$WEB" && \
   grep -q 'message.delivery === "queued"' "$WEB_JS" && \
   grep -q "list_directories" "$WEB_JS" && grep -q "start_agent" "$WEB_JS" && \
+  grep -q "list_workspace_files" "$WEB_JS" && grep -q "read_workspace_file" "$WEB_JS" && \
+  grep -q "prepare_workspace_download" "$WEB_JS" && \
+  grep -q 'case "workspace_listing"' "$WEB_JS" && \
+  grep -q 'id="file-workspace"' "$WEB" && grep -q 'data-app-view="files"' "$WEB" && \
+  grep -q 'id="file-markdown-content"' "$WEB" && grep -q 'id="file-code-content"' "$WEB" && \
+  grep -q "renderMarkdownWorkspaceFile" "$WEB_JS" && \
+  grep -q "DOMPurify" "$WEB_JS" && grep -q "hljs.highlight" "$WEB_JS" && \
+  grep -q 'elif msg_type == "list_workspace_files"' "$DIR/relay/herdr_relay.py" && \
+  grep -q 'elif msg_type == "read_workspace_file"' "$DIR/relay/herdr_relay.py" && \
+  grep -q '"workspace_files": True' "$DIR/relay/herdr_relay.py" && \
+  grep -q 'path == "/api/workspace-download"' "$DIR/relay/herdr_relay.py" && \
   grep -q "C-c" "$WEB_JS" && grep -q "terminal_open" "$WEB_JS" && \
   grep -q 'case "terminal_resized"' "$WEB_JS" && \
   grep -q "terminalResizePendingId" "$WEB_JS" && \
@@ -164,6 +175,12 @@ WEB_JS="$DIR/web/app.js"
   [ -f "$DIR/web/vendor/xterm/xterm.css" ] && \
   [ -f "$DIR/web/vendor/xterm/addon-fit.js" ] && \
   [ -f "$DIR/web/vendor/fonts/firacode-nerd-mono-v3.3.0.woff2" ] && \
+  [ -f "$DIR/web/vendor/preview/marked-18.0.10.js" ] && \
+  [ -f "$DIR/web/vendor/preview/dompurify-3.4.14.min.js" ] && \
+  [ -f "$DIR/web/vendor/preview/highlight-11.12.0.min.js" ] && \
+  [ -f "$DIR/web/vendor/preview/LICENSE-marked.txt" ] && \
+  [ -f "$DIR/web/vendor/preview/LICENSE-dompurify-apache.txt" ] && \
+  [ -f "$DIR/web/vendor/preview/LICENSE-highlight.txt" ] && \
   grep -q "firacode-nerd-mono-v3.3.0.woff2" "$DIR/web/app.css" && \
   grep -q "firacode-nerd-mono-v3.3.0.woff2" "$DIR/relay/herdr_relay.py" && \
   node --check "$WEB_JS"

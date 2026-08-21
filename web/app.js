@@ -10,6 +10,7 @@ const elements = {
   reconnectButton: byId("reconnect-button"),
   agentWorkspace: byId("agent-workspace"),
   terminalWorkspace: byId("terminal-workspace"),
+  fileWorkspace: byId("file-workspace"),
   newAgentButton: byId("new-agent-button"),
   emptyNewAgent: byId("empty-new-agent"),
   settingsButton: byId("settings-button"),
@@ -126,6 +127,34 @@ const elements = {
   terminalCopyMeta: byId("terminal-copy-meta"),
   terminalCopySelectAllButton: byId("terminal-copy-select-all-button"),
   terminalCopyConfirmButton: byId("terminal-copy-confirm-button"),
+  fileSourceSelect: byId("file-source-select"),
+  fileSourceStatus: byId("file-source-status"),
+  filePathJumpForm: byId("file-path-jump-form"),
+  filePathJumpInput: byId("file-path-jump-input"),
+  fileRefreshButton: byId("file-refresh-button"),
+  fileUpButton: byId("file-up-button"),
+  fileDirectoryPath: byId("file-directory-path"),
+  fileSearchInput: byId("file-search-input"),
+  fileList: byId("file-list"),
+  fileListNote: byId("file-list-note"),
+  fileDetailEmpty: byId("file-detail-empty"),
+  fileViewer: byId("file-viewer"),
+  mobileFileBack: byId("mobile-file-back"),
+  fileAvatar: byId("file-avatar"),
+  fileTitle: byId("file-title"),
+  fileKindBadge: byId("file-kind-badge"),
+  fileMeta: byId("file-meta"),
+  copyFileButton: byId("copy-file-button"),
+  downloadFileButton: byId("download-file-button"),
+  fileReaderTitle: byId("file-reader-title"),
+  fileReaderMeta: byId("file-reader-meta"),
+  fileReaderStatus: byId("file-reader-status"),
+  fileMarkdownContent: byId("file-markdown-content"),
+  fileCodePreview: byId("file-code-preview"),
+  fileCodeContent: byId("file-code-content"),
+  fileDownloadOnly: byId("file-download-only"),
+  fileDownloadOnlyCopy: byId("file-download-only-copy"),
+  downloadFileEmptyButton: byId("download-file-empty-button"),
   remoteAccessStatus: byId("remote-access-status"),
   openRemoteShellButton: byId("open-remote-shell-button"),
   toastRegion: byId("toast-region"),
@@ -187,6 +216,10 @@ const AGENT_TOUCH_MOVE_THRESHOLD = 8;
 const AGENT_TOUCH_SELECTION_EDGE = 36;
 const AGENT_TOUCH_SELECTION_SCROLL_INTERVAL = 80;
 const NATIVE_SELECTION_RELEASE_GRACE_MS = 900;
+const FILE_HIGHLIGHT_MAX_CHARACTERS = 400_000;
+const MARKDOWN_CODE_HIGHLIGHT_MAX_CHARACTERS = 160_000;
+const WORKSPACE_FILE_REQUEST_TIMEOUT_MS = 30_000;
+const WORKSPACE_FILE_FEATURE_UNAVAILABLE = "Relay 后台尚未加载 Files 协议。请重启 Herdr Relay 服务；仅刷新网页不会更新后台进程。";
 const nativeAgentSelectionControllers = new WeakMap();
 const terminalFontReady = document.fonts && typeof document.fonts.load === "function"
   ? document.fonts.load('400 13px "Herdr FiraCode Nerd"').catch(() => [])
@@ -220,6 +253,22 @@ const state = {
   directory: null,
   selectedDirectory: null,
   directoryPending: false,
+  fileSource: "local",
+  fileListing: null,
+  fileListingPending: false,
+  fileListingRequestId: 0,
+  fileListingError: "",
+  fileQuery: "",
+  activeFile: null,
+  fileReadPending: false,
+  fileReadRequestId: 0,
+  fileDownloadPending: false,
+  fileDownloadRequestId: 0,
+  fileReaderRenderedMode: "",
+  fileReaderRenderedSource: "",
+  fileReaderRenderedPath: "",
+  fileReaderRenderedSignature: "",
+  fileReaderRenderedContent: null,
   promptPending: false,
   pendingPromptText: "",
   pendingPromptMode: "",
@@ -267,7 +316,9 @@ const state = {
 };
 
 const initialUrl = new URL(window.location.href);
-const initialView = initialUrl.searchParams.get("view") === "terminal" ? "terminal" : "agents";
+const initialView = ["terminal", "files"].includes(initialUrl.searchParams.get("view"))
+  ? initialUrl.searchParams.get("view")
+  : "agents";
 const initialTerminalProfile = initialUrl.searchParams.get("terminal");
 
 function removeLegacyCredentials() {
@@ -388,6 +439,7 @@ function connect() {
     state.reconnectAttempt = 0;
     setConnection("online");
     if (state.activePane) refreshOutput();
+    if (state.activeView === "files") ensureWorkspaceFileBrowser();
   });
 
   socket.addEventListener("message", (event) => {
@@ -407,6 +459,9 @@ function connect() {
       || state.interruptPending
       || state.startPending
       || state.directoryPending
+      || state.fileListingPending
+      || state.fileReadPending
+      || state.fileDownloadPending
       || state.sshProfilePending;
     state.ws = null;
     state.promptPending = false;
@@ -415,6 +470,12 @@ function connect() {
     state.interruptPending = false;
     state.startPending = false;
     state.directoryPending = false;
+    state.fileListingPending = false;
+    state.fileReadPending = false;
+    state.fileDownloadPending = false;
+    state.fileListingRequestId += 1;
+    state.fileReadRequestId += 1;
+    state.fileDownloadRequestId += 1;
     state.sshProfilePending = false;
     resetTerminalResizeSync();
     state.terminalSessionId = null;
@@ -422,6 +483,8 @@ function connect() {
     state.terminalConnected = false;
     state.terminalPersistent = false;
     renderDirectoryBrowser();
+    renderWorkspaceFileBrowser();
+    renderWorkspaceFileViewer();
     renderRemoteAccess();
     renderTerminalConnection();
     setConnection("offline");
@@ -469,6 +532,18 @@ function handleMessage(message) {
       break;
     case "directory_listing":
       handleDirectoryListing(message);
+      break;
+    case "workspace_listing":
+      handleWorkspaceListing(message);
+      break;
+    case "workspace_file":
+      handleWorkspaceFile(message);
+      break;
+    case "workspace_download_ready":
+      handleWorkspaceDownloadReady(message);
+      break;
+    case "workspace_error":
+      handleWorkspaceError(message);
       break;
     case "agent_started":
       handleAgentStarted(message);
@@ -589,6 +664,65 @@ function handleDirectoryListing(message) {
   renderDirectoryBrowser();
 }
 
+
+function handleWorkspaceListing(message) {
+  if (message.source_id && message.source_id !== state.fileSource) return;
+  if (message.request_id !== state.fileListingRequestId) return;
+  state.fileListingPending = false;
+  state.fileListingError = "";
+  state.fileListing = message;
+  renderWorkspaceFileBrowser();
+}
+
+function handleWorkspaceFile(message) {
+  if (message.source_id && message.source_id !== state.fileSource) return;
+  if (message.request_id !== state.fileReadRequestId) return;
+  if (!state.activeFile || message.path !== state.activeFile.path) return;
+  state.fileReadPending = false;
+  state.activeFile = {
+    ...state.activeFile,
+    ...message,
+    previewable: true,
+    downloadable: state.activeFile.downloadable !== false,
+    readError: "",
+  };
+  renderWorkspaceFileViewer();
+}
+
+function handleWorkspaceDownloadReady(message) {
+  if (message.source_id && message.source_id !== state.fileSource) return;
+  if (message.request_id !== state.fileDownloadRequestId) return;
+  state.fileDownloadPending = false;
+  renderWorkspaceFileViewer();
+  if (!message.url || typeof message.url !== "string") {
+    showToast("无法下载文件", "Relay 未返回有效的下载地址。", "error");
+    return;
+  }
+  showToast("下载已准备", `${message.name || "文件"} 即将开始下载。`, "success");
+  window.location.assign(message.url);
+}
+
+function handleWorkspaceError(message) {
+  if (message.source_id && message.source_id !== state.fileSource) return;
+  const operation = message.operation || "file";
+  if (operation === "list") {
+    if (message.request_id !== state.fileListingRequestId) return;
+    state.fileListingPending = false;
+    state.fileListingError = message.message || "Workspace 目录无法读取。";
+    renderWorkspaceFileBrowser();
+  } else if (operation === "read") {
+    if (message.request_id !== state.fileReadRequestId) return;
+    state.fileReadPending = false;
+    if (state.activeFile) state.activeFile.readError = message.message || "文件无法预览";
+    renderWorkspaceFileViewer();
+  } else if (operation === "download") {
+    if (message.request_id !== state.fileDownloadRequestId) return;
+    state.fileDownloadPending = false;
+    renderWorkspaceFileViewer();
+  }
+  showToast("文件操作失败", message.message || "Workspace 文件请求失败。", "error");
+}
+
 function handleAgentStarted(message) {
   state.startPending = false;
   refreshActionAvailability();
@@ -612,6 +746,15 @@ function handleSession(message) {
   state.terminalProfiles = Array.isArray(message.terminal_profiles)
     ? message.terminal_profiles
     : [];
+  if (!workspaceFilesSupported()) {
+    state.fileListing = null;
+    state.fileListingPending = false;
+    state.fileListingRequestId += 1;
+    state.fileListingError = WORKSPACE_FILE_FEATURE_UNAVAILABLE;
+    clearWorkspaceFileSelection(false);
+  } else if (state.fileListingError === WORKSPACE_FILE_FEATURE_UNAVAILABLE) {
+    state.fileListingError = "";
+  }
   const requestedProfile = state.terminalRequestedProfile;
   if (
     state.activeView === "terminal"
@@ -627,6 +770,11 @@ function handleSession(message) {
   if (requestedProfile && !terminalProfileById(requestedProfile)) updateAppUrl();
   renderSession();
   renderRemoteAccess();
+  renderWorkspaceFileBrowser();
+  renderWorkspaceFileViewer();
+  if (state.activeView === "files" && workspaceFilesSupported()) {
+    ensureWorkspaceFileBrowser();
+  }
 
   if (
     state.activeView === "terminal"
@@ -652,8 +800,21 @@ function agentSourceUsable(source) {
   return source?.status === "online" && source.can_start_agent !== false;
 }
 
+function fileSourceUsable(source) {
+  return source?.status === "online" && source.can_browse !== false;
+}
+
+function workspaceFilesSupported() {
+  return state.session?.features?.workspace_files === true;
+}
+
+function workspaceFilesUnavailable() {
+  return Boolean(state.session) && !workspaceFilesSupported();
+}
+
 function handleAgentSources(sources) {
   const previousSource = state.selectedSource;
+  const previousFileSource = state.fileSource;
   state.agentSources = sources;
   if (!agentSourceById(state.selectedSource)) {
     state.selectedSource = agentSourceById("local")?.id
@@ -661,12 +822,24 @@ function handleAgentSources(sources) {
       || sources[0]?.id
       || "local";
   }
+  if (!agentSourceById(state.fileSource)) {
+    state.fileSource = agentSourceById("local")?.id
+      || sources.find(fileSourceUsable)?.id
+      || sources[0]?.id
+      || "local";
+  }
   renderAgentSourcePicker();
+  renderFileSourcePicker();
   if (previousSource !== state.selectedSource && elements.newAgentDialog.open) {
     state.directory = null;
     state.selectedDirectory = null;
     browseDirectory(null);
   }
+  if (previousFileSource !== state.fileSource) {
+    state.fileListing = null;
+    clearWorkspaceFileSelection();
+  }
+  if (state.activeView === "files") ensureWorkspaceFileBrowser();
   refreshActionAvailability();
 }
 
@@ -695,6 +868,32 @@ function renderAgentSourcePicker() {
   elements.launchSource.textContent = selected?.label || "本机";
 }
 
+function renderFileSourcePicker() {
+  elements.fileSourceSelect.replaceChildren();
+  for (const source of state.agentSources) {
+    const option = document.createElement("option");
+    option.value = source.id;
+    const stateLabel = source.status === "online"
+      ? `在线 · ${source.kind === "local" ? "本机" : "SSH"}`
+      : (source.status === "offline" ? "离线" : "检查中");
+    option.textContent = `${source.label} · ${stateLabel}`;
+    option.disabled = source.status === "offline";
+    elements.fileSourceSelect.append(option);
+  }
+  if (agentSourceById(state.fileSource)) elements.fileSourceSelect.value = state.fileSource;
+  const selected = agentSourceById(state.fileSource);
+  const featureUnavailable = workspaceFilesUnavailable();
+  elements.fileSourceSelect.disabled = !state.agentSources.length
+    || state.fileListingPending
+    || featureUnavailable;
+  elements.fileSourceStatus.classList.toggle("is-offline", selected?.status === "offline");
+  elements.fileSourceStatus.textContent = featureUnavailable
+    ? "Relay 后台需要重启后才能使用 Files"
+    : (selected?.status === "online"
+      ? `${selected.kind === "local" ? "本机" : "SSH"} Workspace 已就绪`
+      : (selected?.error || "正在等待主机健康检查…"));
+}
+
 function nativeSshCommand() {
   const username = state.machine?.username;
   const host = state.machine?.tailscale_dns || state.machine?.hostname;
@@ -712,11 +911,14 @@ function proxyJumpCommand(profile) {
 }
 
 function setAppView(view, updateHistory = true) {
-  state.activeView = view === "terminal" ? "terminal" : "agents";
+  state.activeView = ["terminal", "files"].includes(view) ? view : "agents";
   const terminalActive = state.activeView === "terminal";
-  elements.agentWorkspace.hidden = terminalActive;
+  const filesActive = state.activeView === "files";
+  elements.agentWorkspace.hidden = terminalActive || filesActive;
   elements.terminalWorkspace.hidden = !terminalActive;
+  elements.fileWorkspace.hidden = !filesActive;
   document.body.classList.toggle("terminal-view", terminalActive);
+  document.body.classList.toggle("files-view", filesActive);
   document.querySelectorAll("[data-app-view]").forEach((button) => {
     const active = button.dataset.appView === state.activeView;
     button.classList.toggle("is-active", active);
@@ -726,6 +928,11 @@ function setAppView(view, updateHistory = true) {
   if (terminalActive) {
     renderRemoteAccess();
     window.requestAnimationFrame(fitWebTerminal);
+  } else if (filesActive) {
+    state.terminalInstance?.blur();
+    renderWorkspaceFileBrowser();
+    renderWorkspaceFileViewer();
+    ensureWorkspaceFileBrowser();
   } else {
     state.terminalInstance?.blur();
     selectInitialAgentIfNeeded();
@@ -740,6 +947,9 @@ function updateAppUrl() {
     url.searchParams.set("view", "terminal");
     if (state.activeTerminalProfile) url.searchParams.set("terminal", state.activeTerminalProfile);
     else url.searchParams.delete("terminal");
+  } else if (state.activeView === "files") {
+    url.searchParams.set("view", "files");
+    url.searchParams.delete("terminal");
   } else {
     url.searchParams.delete("view");
     url.searchParams.delete("terminal");
@@ -3185,6 +3395,519 @@ function createDirectoryEntry(entry) {
   return item;
 }
 
+function scheduleWorkspaceFileRequestTimeout(operation, requestId) {
+  window.setTimeout(() => {
+    if (operation === "list") {
+      if (!state.fileListingPending || state.fileListingRequestId !== requestId) return;
+      state.fileListingPending = false;
+      state.fileListingError = state.fileListing
+        ? ""
+        : "读取 Workspace 超时。请检查主机连接或重启 Relay 后重试。";
+      renderWorkspaceFileBrowser();
+      showToast("Workspace 读取超时", "Relay 未在预期时间内返回目录列表，请检查主机连接后重试。", "error");
+      return;
+    }
+    if (operation === "read") {
+      if (!state.fileReadPending || state.fileReadRequestId !== requestId) return;
+      state.fileReadPending = false;
+      if (state.activeFile) {
+        state.activeFile.readError = "读取超时，请检查主机连接后重试";
+      }
+      renderWorkspaceFileViewer();
+      showToast("文件读取超时", "Relay 未在预期时间内返回文件内容。", "error");
+      return;
+    }
+    if (operation !== "download") return;
+    if (!state.fileDownloadPending || state.fileDownloadRequestId !== requestId) return;
+    state.fileDownloadPending = false;
+    renderWorkspaceFileViewer();
+    showToast("下载准备超时", "Relay 未能及时生成下载地址，请稍后重试。", "error");
+  }, WORKSPACE_FILE_REQUEST_TIMEOUT_MS);
+}
+
+function ensureWorkspaceFileBrowser() {
+  if (state.activeView !== "files" || state.fileListing || state.fileListingPending) return;
+  if (workspaceFilesUnavailable()) {
+    state.fileListingError = WORKSPACE_FILE_FEATURE_UNAVAILABLE;
+    renderWorkspaceFileBrowser();
+    return;
+  }
+  if (!workspaceFilesSupported()) return;
+  const source = agentSourceById(state.fileSource);
+  if (socketReady() && fileSourceUsable(source)) browseWorkspaceFiles(null);
+}
+
+function browseWorkspaceFiles(path) {
+  if (!workspaceFilesSupported()) {
+    if (workspaceFilesUnavailable()) {
+      state.fileListingError = WORKSPACE_FILE_FEATURE_UNAVAILABLE;
+      renderWorkspaceFileBrowser();
+      showToast("Files 后台尚未更新", "请重启 Herdr Relay 服务；刷新网页本身无法热重载后台。", "error");
+    }
+    return;
+  }
+  const source = agentSourceById(state.fileSource);
+  if (!socketReady() || !fileSourceUsable(source)) return;
+  const nextPath = typeof path === "string" ? path : "";
+  const navigating = !state.fileListing || nextPath !== state.fileListing.path;
+  if (navigating) {
+    state.fileListing = null;
+    clearWorkspaceFileSelection(false);
+  }
+  state.fileListingPending = true;
+  state.fileListingError = "";
+  state.fileListingRequestId += 1;
+  const requestId = state.fileListingRequestId;
+  renderWorkspaceFileBrowser();
+  const message = {
+    type: "list_workspace_files",
+    source_id: state.fileSource,
+    request_id: requestId,
+  };
+  if (nextPath) message.path = nextPath;
+  if (!send(message)) {
+    state.fileListingPending = false;
+    renderWorkspaceFileBrowser();
+    return;
+  }
+  scheduleWorkspaceFileRequestTimeout("list", requestId);
+}
+
+function renderWorkspaceFileBrowser() {
+  renderFileSourcePicker();
+  const listing = state.fileListing;
+  const sourceUsable = fileSourceUsable(agentSourceById(state.fileSource));
+  const featureUnavailable = workspaceFilesUnavailable();
+  elements.fileDirectoryPath.textContent = listing?.display_path || "配置的 Workspace 根目录";
+  elements.fileUpButton.disabled = featureUnavailable
+    || state.fileListingPending
+    || !listing
+    || listing.parent === null
+    || listing.parent === undefined;
+  elements.fileRefreshButton.disabled = featureUnavailable
+    || state.fileListingPending
+    || !socketReady()
+    || !sourceUsable;
+  elements.filePathJumpInput.disabled = featureUnavailable || state.fileListingPending;
+  elements.filePathJumpForm.querySelector("button").disabled = featureUnavailable
+    || state.fileListingPending
+    || !socketReady()
+    || !sourceUsable;
+  elements.fileSearchInput.disabled = featureUnavailable;
+  elements.fileListNote.hidden = featureUnavailable || !listing?.truncated;
+  elements.fileList.classList.toggle("is-loading", state.fileListingPending && Boolean(listing));
+  elements.fileList.setAttribute("aria-busy", String(state.fileListingPending));
+
+  const query = state.fileQuery.trim().toLocaleLowerCase();
+  const entries = (listing?.entries || []).filter((entry) => {
+    if (!query) return true;
+    return [entry.name, entry.display_path, entry.language]
+      .filter(Boolean)
+      .some((value) => String(value).toLocaleLowerCase().includes(query));
+  });
+  const nodes = entries.map(createWorkspaceFileEntry);
+  if (!nodes.length) {
+    let text = "此目录中没有可显示的文件。";
+    if (state.fileListingError) text = state.fileListingError;
+    else if (state.fileListingPending && !listing) text = "正在安全读取 Workspace…";
+    else if (!listing) text = "连接主机后会显示允许访问的 Workspace。";
+    else if (query) text = "当前目录中没有匹配的项目。";
+    const messageClass = state.fileListingError
+      ? "is-error"
+      : (state.fileListingPending ? "is-loading" : "");
+    nodes.push(workspaceFileListMessage(text, messageClass));
+  }
+  elements.fileList.replaceChildren(...nodes);
+}
+
+function workspaceFileListMessage(text, extraClass = "") {
+  const item = document.createElement("li");
+  item.className = `file-list-message ${extraClass}`.trim();
+  item.textContent = text;
+  return item;
+}
+
+function createWorkspaceFileEntry(entry) {
+  const item = document.createElement("li");
+  const button = document.createElement("button");
+  const directory = entry.kind === "directory";
+  const selected = !directory && state.activeFile?.path === entry.path;
+  button.type = "button";
+  button.className = `file-entry is-${directory ? "directory" : "file"}${selected ? " is-selected" : ""}`;
+  button.setAttribute(
+    "aria-label",
+    directory ? `打开目录 ${entry.name}` : `查看文件 ${entry.name}`,
+  );
+  button.addEventListener("click", () => {
+    if (directory) browseWorkspaceFiles(entry.path);
+    else selectWorkspaceFile(entry);
+  });
+
+  const icon = document.createElement("span");
+  icon.className = "file-entry-icon";
+  icon.setAttribute("aria-hidden", "true");
+  if (directory) icon.textContent = entry.is_repo ? "⌘" : "▱";
+  else if (entry.preview_kind === "markdown") icon.textContent = "M↓";
+  else if (entry.previewable) icon.textContent = "{ }";
+  else icon.textContent = "↓";
+
+  const main = document.createElement("span");
+  main.className = "file-entry-main";
+  const name = document.createElement("strong");
+  name.textContent = entry.name;
+  const meta = document.createElement("span");
+  if (directory) {
+    meta.textContent = entry.is_repo ? "Git repository" : "文件夹";
+  } else {
+    const preview = entry.preview_kind === "markdown"
+      ? "Markdown"
+      : (entry.language ? entry.language : "仅下载");
+    meta.textContent = `${formatFileSize(entry.size)} · ${preview}`;
+  }
+  main.append(name, meta);
+
+  const badge = document.createElement("span");
+  badge.className = "file-entry-badge";
+  badge.textContent = directory
+    ? (entry.is_repo ? "GIT" : "打开")
+    : (entry.previewable ? "阅读" : (entry.downloadable === false ? "过大" : "下载"));
+  button.append(icon, main, badge);
+  item.append(button);
+  return item;
+}
+
+function resetWorkspaceFileOperations() {
+  state.fileReadPending = false;
+  state.fileReadRequestId += 1;
+  state.fileDownloadPending = false;
+  state.fileDownloadRequestId += 1;
+  resetWorkspaceFileReaderRender();
+}
+
+function resetWorkspaceFileReaderRender() {
+  state.fileReaderRenderedMode = "";
+  state.fileReaderRenderedSource = "";
+  state.fileReaderRenderedPath = "";
+  state.fileReaderRenderedSignature = "";
+  state.fileReaderRenderedContent = null;
+}
+
+function selectWorkspaceFile(entry) {
+  resetWorkspaceFileOperations();
+  state.activeFile = {
+    ...entry,
+    source_id: state.fileSource,
+    source_label: state.fileListing?.source_label || agentSourceById(state.fileSource)?.label || "本机",
+    content: null,
+    readError: "",
+  };
+  document.body.classList.add("file-open");
+  renderWorkspaceFileBrowser();
+  renderWorkspaceFileViewer();
+  if (entry.previewable) readWorkspaceFile(entry.path);
+}
+
+function openWorkspaceFilePath(path) {
+  if (!path) return;
+  resetWorkspaceFileOperations();
+  const name = path.split("/").filter(Boolean).at(-1) || path;
+  const markdown = /\.(?:md|markdown|mdown|mkd)$/i.test(name);
+  state.activeFile = {
+    name,
+    path,
+    display_path: path,
+    kind: "file",
+    size: 0,
+    previewable: true,
+    preview_kind: markdown ? "markdown" : "code",
+    language: "",
+    downloadable: true,
+    source_id: state.fileSource,
+    source_label: agentSourceById(state.fileSource)?.label || "本机",
+    content: null,
+    readError: "",
+  };
+  document.body.classList.add("file-open");
+  renderWorkspaceFileBrowser();
+  renderWorkspaceFileViewer();
+  readWorkspaceFile(path);
+}
+
+function readWorkspaceFile(path) {
+  if (!path || !socketReady()) return;
+  state.fileReadPending = true;
+  state.fileReadRequestId += 1;
+  const requestId = state.fileReadRequestId;
+  renderWorkspaceFileViewer();
+  if (!send({
+    type: "read_workspace_file",
+    source_id: state.fileSource,
+    path,
+    request_id: requestId,
+  })) {
+    state.fileReadPending = false;
+    renderWorkspaceFileViewer();
+    return;
+  }
+  scheduleWorkspaceFileRequestTimeout("read", requestId);
+}
+
+function clearWorkspaceFileSelection(render = true) {
+  resetWorkspaceFileOperations();
+  state.activeFile = null;
+  document.body.classList.remove("file-open");
+  if (render) {
+    renderWorkspaceFileBrowser();
+    renderWorkspaceFileViewer();
+  }
+}
+
+function formatFileSize(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let size = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && size >= 1024; index += 1) {
+    size /= 1024;
+    unit = units[index];
+  }
+  return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${unit}`;
+}
+
+function setWorkspaceReaderStatus(title, detail, spinning = true) {
+  elements.fileReaderStatus.hidden = false;
+  elements.fileReaderStatus.querySelector(".terminal-spinner").hidden = !spinning;
+  elements.fileReaderStatus.querySelector("strong").textContent = title;
+  elements.fileReaderStatus.querySelector("span:last-child").textContent = detail;
+}
+
+function hideWorkspaceReaderContents() {
+  elements.fileReaderStatus.hidden = true;
+  elements.fileMarkdownContent.hidden = true;
+  elements.fileCodePreview.hidden = true;
+  elements.fileDownloadOnly.hidden = true;
+}
+
+function workspaceFileReaderNeedsRender(file, mode, signature, content = null) {
+  const source = String(file.source_id || state.fileSource || "");
+  const path = String(file.path || "");
+  if (
+    state.fileReaderRenderedMode === mode
+    && state.fileReaderRenderedSource === source
+    && state.fileReaderRenderedPath === path
+    && state.fileReaderRenderedSignature === signature
+    && state.fileReaderRenderedContent === content
+  ) {
+    return false;
+  }
+  state.fileReaderRenderedMode = mode;
+  state.fileReaderRenderedSource = source;
+  state.fileReaderRenderedPath = path;
+  state.fileReaderRenderedSignature = signature;
+  state.fileReaderRenderedContent = content;
+  return true;
+}
+
+function renderWorkspaceFileViewer() {
+  const file = state.activeFile;
+  elements.fileDetailEmpty.hidden = Boolean(file);
+  elements.fileViewer.hidden = !file;
+  if (!file) return;
+
+  const kind = file.preview_kind || file.kind || "file";
+  const kindLabel = kind === "markdown"
+    ? "MARKDOWN"
+    : (file.language ? String(file.language).toLocaleUpperCase() : "FILE");
+  elements.fileAvatar.textContent = kind === "markdown" ? "MD" : (file.previewable ? "{ }" : "↓");
+  elements.fileTitle.textContent = file.name || "文件";
+  elements.fileKindBadge.textContent = kindLabel;
+  elements.fileKindBadge.className = `file-kind-badge is-${kind === "markdown" ? "markdown" : (file.previewable ? "code" : "file")}`;
+  elements.fileMeta.textContent = `${file.source_label || "Workspace"} · ${file.display_path || file.path}`;
+  elements.copyFileButton.disabled = typeof file.content !== "string" || state.fileReadPending;
+  elements.downloadFileButton.disabled = !socketReady()
+    || file.downloadable === false
+    || state.fileDownloadPending;
+  elements.downloadFileEmptyButton.disabled = !socketReady()
+    || file.downloadable === false
+    || state.fileDownloadPending;
+  elements.downloadFileButton.querySelector("span").textContent = state.fileDownloadPending ? "准备中…" : "下载";
+
+  if (state.fileReadPending) {
+    const signature = String(file.size || 0);
+    if (!workspaceFileReaderNeedsRender(file, "loading", signature)) return;
+    hideWorkspaceReaderContents();
+    elements.fileReaderTitle.textContent = "Secure preview";
+    elements.fileReaderMeta.textContent = formatFileSize(file.size);
+    setWorkspaceReaderStatus("正在安全读取文件", "内容仍会在 Relay 端校验", true);
+    return;
+  }
+
+  if (typeof file.content === "string") {
+    const details = [
+      `${file.line_count || file.content.split("\n").length} 行`,
+      formatFileSize(file.size || new Blob([file.content]).size),
+    ];
+    if (file.kind === "markdown") {
+      const signature = [file.language || "", ...details].join("\u0000");
+      if (!workspaceFileReaderNeedsRender(file, "markdown", signature, file.content)) return;
+      hideWorkspaceReaderContents();
+      elements.fileReaderTitle.textContent = "Rendered Markdown";
+      elements.fileReaderMeta.textContent = details.join(" · ");
+      renderMarkdownWorkspaceFile(file);
+    } else {
+      const signature = [file.language || "", ...details].join("\u0000");
+      if (!workspaceFileReaderNeedsRender(file, "code", signature, file.content)) return;
+      hideWorkspaceReaderContents();
+      elements.fileReaderTitle.textContent = "Source Preview";
+      elements.fileReaderMeta.textContent = [file.language || "plain text", ...details].join(" · ");
+      renderCodeWorkspaceFile(file);
+    }
+    return;
+  }
+
+  const downloadCopy = file.readError
+    ? `预览失败：${file.readError}。你仍可尝试下载后在本机查看。`
+    : (file.preview_reason || "代码与 Markdown 之外的普通文件可安全下载到本机查看。");
+  const signature = [String(file.size || 0), downloadCopy].join("\u0000");
+  if (!workspaceFileReaderNeedsRender(file, "download", signature)) return;
+  hideWorkspaceReaderContents();
+  elements.fileReaderTitle.textContent = "Download only";
+  elements.fileReaderMeta.textContent = formatFileSize(file.size);
+  elements.fileDownloadOnly.hidden = false;
+  elements.fileDownloadOnlyCopy.textContent = downloadCopy;
+}
+
+function renderCodeWorkspaceFile(file) {
+  elements.fileCodePreview.hidden = false;
+  const code = elements.fileCodeContent;
+  code.className = "";
+  const language = String(file.language || "");
+  const canHighlight = file.content.length <= FILE_HIGHLIGHT_MAX_CHARACTERS
+    && window.hljs?.getLanguage?.(language);
+  if (!canHighlight) {
+    code.textContent = file.content;
+    return;
+  }
+  try {
+    code.innerHTML = window.hljs.highlight(file.content, {
+      language,
+      ignoreIllegals: true,
+    }).value;
+    code.classList.add("hljs", `language-${language}`);
+  } catch (_) {
+    code.textContent = file.content;
+  }
+}
+
+function renderMarkdownWorkspaceFile(file) {
+  const parser = window.marked?.parse;
+  const sanitizer = window.DOMPurify?.sanitize;
+  if (typeof parser !== "function" || typeof sanitizer !== "function") {
+    elements.fileReaderMeta.textContent += " · 原文模式";
+    renderCodeWorkspaceFile({ ...file, language: "markdown" });
+    return;
+  }
+  try {
+    const rendered = parser(file.content, { gfm: true, breaks: false });
+    elements.fileMarkdownContent.innerHTML = sanitizer(rendered, {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: [
+        "audio", "button", "canvas", "embed", "form", "iframe", "img", "input",
+        "math", "object", "option", "script", "select", "style", "svg", "textarea", "video",
+      ],
+      FORBID_ATTR: ["autofocus", "srcset", "style"],
+    });
+    elements.fileMarkdownContent.hidden = false;
+    enhanceWorkspaceMarkdown(elements.fileMarkdownContent, file);
+  } catch (_) {
+    elements.fileReaderMeta.textContent += " · 原文模式";
+    renderCodeWorkspaceFile({ ...file, language: "markdown" });
+  }
+}
+
+function enhanceWorkspaceMarkdown(root, file) {
+  root.querySelectorAll("a[href]").forEach((link) => {
+    const href = link.getAttribute("href") || "";
+    if (href.startsWith("#")) return;
+    if (/^(?:https?:|mailto:)/i.test(href)) {
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      return;
+    }
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("//")) {
+      link.removeAttribute("href");
+      return;
+    }
+    const target = resolveWorkspaceMarkdownPath(file.path, href);
+    if (!target) {
+      link.removeAttribute("href");
+      return;
+    }
+    link.href = "#";
+    link.title = `在文件阅读器中打开 ${target}`;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      openWorkspaceFilePath(target);
+    });
+  });
+
+  root.querySelectorAll("pre code").forEach((code) => {
+    if (!window.hljs || code.textContent.length > MARKDOWN_CODE_HIGHLIGHT_MAX_CHARACTERS) return;
+    try {
+      window.hljs.highlightElement(code);
+    } catch (_) {
+      // Sanitized Markdown remains readable even when a language is unknown.
+    }
+  });
+}
+
+function resolveWorkspaceMarkdownPath(filePath, href) {
+  let requested = String(href || "").split(/[?#]/, 1)[0];
+  if (!requested) return "";
+  try {
+    requested = decodeURIComponent(requested);
+  } catch (_) {
+    return "";
+  }
+  const absolute = requested.startsWith("/");
+  const parts = absolute
+    ? []
+    : String(filePath || "").split("/").filter(Boolean).slice(0, -1);
+  for (const component of requested.split("/")) {
+    if (!component || component === ".") continue;
+    if (component === "..") parts.pop();
+    else parts.push(component);
+  }
+  return parts.length ? `/${parts.join("/")}` : "";
+}
+
+async function copyWorkspaceFile() {
+  const file = state.activeFile;
+  if (!file || typeof file.content !== "string") return;
+  await copyText(file.content, "文件内容已复制", `${file.name} 的原始文本已复制到剪贴板。`);
+}
+
+function downloadWorkspaceFile() {
+  const file = state.activeFile;
+  if (!file || file.downloadable === false || state.fileDownloadPending || !socketReady()) return;
+  state.fileDownloadPending = true;
+  state.fileDownloadRequestId += 1;
+  const requestId = state.fileDownloadRequestId;
+  renderWorkspaceFileViewer();
+  if (!send({
+    type: "prepare_workspace_download",
+    source_id: state.fileSource,
+    path: file.path,
+    request_id: requestId,
+  })) {
+    state.fileDownloadPending = false;
+    renderWorkspaceFileViewer();
+    return;
+  }
+  scheduleWorkspaceFileRequestTimeout("download", requestId);
+}
+
 function selectCurrentDirectory() {
   if (!state.directory?.can_start_agent || !state.directory.path) return;
   state.selectedDirectory = {
@@ -3213,6 +3936,7 @@ function startAgent() {
 function refreshActionAvailability() {
   const connected = socketReady();
   const selectedSource = agentSourceById(state.selectedSource);
+  const selectedFileSource = agentSourceById(state.fileSource);
   elements.newAgentButton.disabled = !connected;
   elements.emptyNewAgent.disabled = !connected;
   elements.refreshOutputButton.disabled = !connected || !state.activePane;
@@ -3225,11 +3949,15 @@ function refreshActionAvailability() {
   elements.startAgentButton.querySelector("span").textContent = state.startPending ? "正在启动…" : "启动 Codex";
   elements.addSshHostButton.disabled = !connected || !state.terminalAuthorized;
   elements.refreshTerminalProfilesButton.disabled = !connected || !state.terminalAuthorized;
+  elements.fileRefreshButton.disabled = !connected
+    || state.fileListingPending
+    || !fileSourceUsable(selectedFileSource);
   renderPromptState();
   renderInterruptState();
   renderPushStatus();
   renderSshProfileForm();
   renderTerminalConnection();
+  renderWorkspaceFileViewer();
 }
 
 function renderSession() {
@@ -3450,6 +4178,37 @@ function bindEvents() {
   });
   elements.startAgentButton.addEventListener("click", startAgent);
 
+  elements.fileSourceSelect.addEventListener("change", () => {
+    state.fileSource = elements.fileSourceSelect.value;
+    state.fileListing = null;
+    state.fileQuery = "";
+    elements.fileSearchInput.value = "";
+    elements.filePathJumpInput.value = "";
+    clearWorkspaceFileSelection(false);
+    renderWorkspaceFileBrowser();
+    renderWorkspaceFileViewer();
+    browseWorkspaceFiles(null);
+  });
+  elements.filePathJumpForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const path = elements.filePathJumpInput.value.trim();
+    if (path) browseWorkspaceFiles(path);
+  });
+  elements.fileRefreshButton.addEventListener("click", () => {
+    browseWorkspaceFiles(state.fileListing?.path || null);
+  });
+  elements.fileUpButton.addEventListener("click", () => {
+    browseWorkspaceFiles(state.fileListing?.parent ?? "");
+  });
+  elements.fileSearchInput.addEventListener("input", () => {
+    state.fileQuery = elements.fileSearchInput.value;
+    renderWorkspaceFileBrowser();
+  });
+  elements.mobileFileBack.addEventListener("click", clearWorkspaceFileSelection);
+  elements.copyFileButton.addEventListener("click", copyWorkspaceFile);
+  elements.downloadFileButton.addEventListener("click", downloadWorkspaceFile);
+  elements.downloadFileEmptyButton.addEventListener("click", downloadWorkspaceFile);
+
   elements.themeSelect.addEventListener("change", () => applyTheme(elements.themeSelect.value));
   elements.pushToggleButton.addEventListener("click", togglePush);
   elements.addSshHostButton.addEventListener("click", () => openSshHostDialog());
@@ -3550,13 +4309,15 @@ function bindEvents() {
   });
   window.addEventListener("popstate", () => {
     const url = new URL(window.location.href);
-    const view = url.searchParams.get("view") === "terminal" ? "terminal" : "agents";
+    const requestedView = url.searchParams.get("view");
+    const view = ["terminal", "files"].includes(requestedView) ? requestedView : "agents";
     setAppView(view, false);
     if (view === "terminal") {
       const profileId = url.searchParams.get("terminal");
       if (profileId && profileId !== state.activeTerminalProfile) openTerminalProfile(profileId);
       return;
     }
+    if (view === "files") return;
     const pane = paneIdFromUrl();
     if (pane && state.agents.some((agent) => agent.pane_id === pane)) selectAgent(pane, false);
     else if (!pane) clearAgentSelection();

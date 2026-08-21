@@ -21,6 +21,8 @@
 - 通过 `herdr agent prompt` 提交 Prompt；Agent 工作中还可用 **Tab 缓存**，把下一条任务明确加入 Codex 队列。
 - 二次确认后发送规范的 `C-c` Interrupt。
 - 在配置的 Workspace 白名单中浏览目录。
+- 独立的 Files 页面可浏览本机或 SSH Agent Source 的 Workspace：Markdown 使用 Marked 渲染并经 DOMPurify 清理，常见代码文件使用 Highlight.js 语法高亮；桌面端为文件列表与阅读器双栏布局，手机端点开文件后进入全屏阅读并可一键返回。
+- 可复制预览文件的原始文本，也可下载普通文件。预览默认限制为 1 MiB，下载默认限制为 25 MiB；下载地址是与当前登录身份绑定、90 秒过期且只能使用一次的随机令牌。
 - 在白名单内的普通目录、Git 仓库或其子目录中安全创建新的 Codex Agent。
 - Agent 阻塞时显示允许、拒绝和 Trust 等上下文操作。
 - 可选完整 Web Terminal：本机 Shell、Git/systemd 维护、tmux 持久会话和手机快捷键。
@@ -38,6 +40,7 @@
 - 旧式 `?token=` 网页访问会换成短时 HttpOnly、SameSite 会话 Cookie；token 不写入 `localStorage`。
 - Prompt 正文不会写入 Relay 日志或审计日志。
 - 工作目录会解析为真实路径，并限制在 `HERDR_WORKSPACE_ROOTS` 中；目录符号链接不会出现在列表中。
+- Files 页面同样限制在 Workspace 白名单中，并额外拒绝隐藏路径、符号链接、二进制预览、非 UTF-8 文本预览和超限文件；Markdown HTML 会在浏览器中清理后再显示，页面不从 CDN 加载预览脚本。
 - 默认 Agent 模式只提供明确的 Herdr RPC。完整 Shell 必须通过 `--remote-shell` 显式启用，并使用不支持 `*` 通配符的独立 `HERDR_TERMINAL_ALLOWED_USERS` 白名单。
 - Relay Token/Web Session 客户端不能打开完整 Shell；Web Terminal 要求经过 Tailscale 身份认证的 WebSocket。
 - Terminal 命令、按键和输出不会写入 Relay 审计日志。
@@ -158,7 +161,7 @@ Clash mixed 端口不同，请替换 `7897`。也可以设置
 3. 用手机浏览器打开安装器输出的 `https://...ts.net` 地址。
 4. 可通过浏览器菜单“添加到主屏幕”，获得接近原生 App 的全屏体验。
 
-手机页面先显示 Agent 列表；点击 Agent 后进入输出与 Prompt 页面。普通发送会立即提交 Prompt；当 Agent 正在工作时，**Tab 缓存**按钮会将内容放入 Codex 队列，等待当前任务完成后处理。左上角返回按钮回到 Dashboard。新建 Agent 按钮在顶栏始终可用。
+手机页面底部可在 Agents、终端和文件之间切换。Files 页面先显示主机与文件列表，点击文件后进入全屏阅读器，左上角返回文件列表；代码和 Markdown 可复制原文，其他普通文件可直接下载。Agent 页面中，普通发送会立即提交 Prompt；当 Agent 正在工作时，**Tab 缓存**按钮会将内容放入 Codex 队列，等待当前任务完成后处理。左上角返回按钮回到 Dashboard。新建 Agent 按钮在顶栏始终可用。
 
 ## 配置
 
@@ -187,6 +190,8 @@ HERDR_SSH_HOSTS_FILE=/home/user/.config/herdr-remote/ssh-hosts.json
 ```bash
 systemctl --user restart herdr-relay
 ```
+
+更新 `relay/herdr_relay.py` 后也必须重启该服务；刷新浏览器只会重新加载网页文件，不会热重载正在运行的 Relay Python 进程。Files 页面会检测后台协议版本，并在 Relay 尚未重启时直接提示，不再无限停留在“正在安全读取 Workspace”。
 
 如果退出桌面或 SSH 后用户服务会停止，可以启用 linger：
 
