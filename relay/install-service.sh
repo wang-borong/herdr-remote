@@ -39,15 +39,99 @@ if [ "$OS" = "unsupported" ]; then
     exit 1
 fi
 
+CURRENT_UID="$(id -u)"
+if [ "$CURRENT_UID" -eq 0 ]; then
+    echo "Error: Do not run install-service.sh with sudo or as root."
+    echo "The relay and Telegram run as user services and must own their configuration files."
+    exit 1
+fi
+
+if [ "$UNINSTALL" = true ]; then
+    echo "Uninstalling herdr-remote services..."
+    if [ "$OS" = "macos" ]; then
+        launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
+        launchctl bootout "gui/$(id -u)/$LABEL_TUNNEL" 2>/dev/null || true
+        launchctl bootout "gui/$(id -u)/$LABEL_TELEGRAM" 2>/dev/null || true
+        rm -f "$HOME/Library/LaunchAgents/$LABEL_RELAY.plist"
+        rm -f "$HOME/Library/LaunchAgents/$LABEL_TUNNEL.plist"
+        rm -f "$HOME/Library/LaunchAgents/$LABEL_TELEGRAM.plist"
+    else
+        systemctl --user stop herdr-relay.service 2>/dev/null || true
+        systemctl --user stop herdr-tunnel.service 2>/dev/null || true
+        systemctl --user stop herdr-telegram.service 2>/dev/null || true
+        systemctl --user disable herdr-relay.service 2>/dev/null || true
+        systemctl --user disable herdr-tunnel.service 2>/dev/null || true
+        systemctl --user disable herdr-telegram.service 2>/dev/null || true
+        rm -f "$HOME/.config/systemd/user/herdr-relay.service"
+        rm -f "$HOME/.config/systemd/user/herdr-tunnel.service"
+        rm -f "$HOME/.config/systemd/user/herdr-telegram.service"
+        systemctl --user daemon-reload
+    fi
+    echo "Done. Configuration and secrets preserved in $CONFIG_DIR"
+    exit 0
+fi
+
+file_owner_uid() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        stat -f '%u' "$1"
+    else
+        stat -c '%u' "$1"
+    fi
+}
+
+file_mode() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        stat -f '%Lp' "$1"
+    else
+        stat -c '%a' "$1"
+    fi
+}
+
 # --- Load existing configuration ---
 
 EXISTING_INSTALL=false
 if [ -f "$CONFIG_FILE" ]; then
+    CONFIG_OWNER_UID="$(file_owner_uid "$CONFIG_FILE")"
+    if [ "$CONFIG_OWNER_UID" != "$CURRENT_UID" ]; then
+        echo "Error: $CONFIG_FILE is not owned by the current user."
+        echo "Repair it with: sudo chown \"$(id -un):$(id -gn)\" \"$CONFIG_FILE\""
+        exit 1
+    fi
+    CONFIG_MODE="$(file_mode "$CONFIG_FILE")"
+    case "$CONFIG_MODE" in
+        600|640|644) ;;
+        *)
+            echo "Error: $CONFIG_FILE must not be group/world writable, found mode 0$CONFIG_MODE."
+            echo "Repair it with: chmod 644 \"$CONFIG_FILE\""
+            exit 1
+            ;;
+    esac
+    if [ ! -r "$CONFIG_FILE" ]; then
+        echo "Error: $CONFIG_FILE is not readable by the current user."
+        exit 1
+    fi
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
     EXISTING_INSTALL=true
 fi
 if [ -f "$SECRETS_FILE" ]; then
+    SECRETS_OWNER_UID="$(file_owner_uid "$SECRETS_FILE")"
+    if [ "$SECRETS_OWNER_UID" != "$CURRENT_UID" ]; then
+        echo "Error: $SECRETS_FILE is not owned by the current user."
+        echo "Repair it with: sudo chown \"$(id -un):$(id -gn)\" \"$SECRETS_FILE\""
+        exit 1
+    fi
+    SECRETS_MODE="$(file_mode "$SECRETS_FILE")"
+    if [ "$SECRETS_MODE" != "600" ]; then
+        echo "Error: $SECRETS_FILE must have mode 0600, found 0$SECRETS_MODE."
+        echo "Repair it with: chmod 600 \"$SECRETS_FILE\""
+        exit 1
+    fi
+    if [ ! -r "$SECRETS_FILE" ]; then
+        echo "Error: $SECRETS_FILE is not readable by the current user."
+        echo "Repair it with: chmod 600 \"$SECRETS_FILE\""
+        exit 1
+    fi
     # shellcheck disable=SC1090
     source "$SECRETS_FILE"
 fi
@@ -130,6 +214,18 @@ remove_telegram_service() {
     else
         systemctl --user disable herdr-telegram.service 2>/dev/null || true
         rm -f "$(telegram_service_file)"
+        systemctl --user daemon-reload
+    fi
+}
+
+remove_managed_tunnel_service() {
+    if [ "$OS" = "macos" ]; then
+        launchctl bootout "gui/$(id -u)/$LABEL_TUNNEL" 2>/dev/null || true
+        rm -f "$HOME/Library/LaunchAgents/$LABEL_TUNNEL.plist"
+    else
+        systemctl --user stop herdr-tunnel.service 2>/dev/null || true
+        systemctl --user disable herdr-tunnel.service 2>/dev/null || true
+        rm -f "$HOME/.config/systemd/user/herdr-tunnel.service"
         systemctl --user daemon-reload
     fi
 }
@@ -285,31 +381,6 @@ if [ "$TELEGRAM_ONLY" = true ] && [ -n "$HERDR_PATH" ] && ! "$HERDR_PATH" agent 
 fi
 
 # --- Handle --uninstall ---
-
-if [ "$UNINSTALL" = true ]; then
-    echo "Uninstalling herdr-remote services..."
-    if [ "$OS" = "macos" ]; then
-        launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
-        launchctl bootout "gui/$(id -u)/$LABEL_TUNNEL" 2>/dev/null || true
-        launchctl bootout "gui/$(id -u)/$LABEL_TELEGRAM" 2>/dev/null || true
-        rm -f "$HOME/Library/LaunchAgents/$LABEL_RELAY.plist"
-        rm -f "$HOME/Library/LaunchAgents/$LABEL_TUNNEL.plist"
-        rm -f "$HOME/Library/LaunchAgents/$LABEL_TELEGRAM.plist"
-    else
-        systemctl --user stop herdr-relay.service 2>/dev/null || true
-        systemctl --user stop herdr-tunnel.service 2>/dev/null || true
-        systemctl --user stop herdr-telegram.service 2>/dev/null || true
-        systemctl --user disable herdr-relay.service 2>/dev/null || true
-        systemctl --user disable herdr-tunnel.service 2>/dev/null || true
-        systemctl --user disable herdr-telegram.service 2>/dev/null || true
-        rm -f "$HOME/.config/systemd/user/herdr-relay.service"
-        rm -f "$HOME/.config/systemd/user/herdr-tunnel.service"
-        rm -f "$HOME/.config/systemd/user/herdr-telegram.service"
-        systemctl --user daemon-reload
-    fi
-    echo "Done. Configuration and secrets preserved in $CONFIG_DIR"
-    exit 0
-fi
 
 # --- Relay authentication ---
 
@@ -487,8 +558,27 @@ if [ -z "$CLOUDFLARED_PATH" ]; then
             echo "  Running: brew install cloudflared"
             brew install cloudflared
         else
-            echo "  Running: curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) -o /tmp/cloudflared"
-            curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" -o /tmp/cloudflared
+            # cloudflared release assets use Go arch names (amd64/arm64/...),
+            # not uname -m output (x86_64/aarch64/...). Linux assets are bare
+            # binaries; macOS assets are .tgz archives.
+            case "$(uname -m)" in
+                x86_64)        CF_ARCH="amd64" ;;
+                aarch64|arm64) CF_ARCH="arm64" ;;
+                armv7l|armv6l) CF_ARCH="arm" ;;
+                i686|i386)     CF_ARCH="386" ;;
+                *)             CF_ARCH="$(uname -m)" ;;
+            esac
+            CF_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+            CF_ASSET="cloudflared-$CF_OS-$CF_ARCH"
+            [ "$CF_OS" = "darwin" ] && CF_ASSET="$CF_ASSET.tgz"
+            echo "  Running: curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/$CF_ASSET -o /tmp/$CF_ASSET"
+            curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/$CF_ASSET" -o "/tmp/$CF_ASSET"
+            if [ "$CF_OS" = "darwin" ]; then
+                tar -xzf "/tmp/$CF_ASSET" -C /tmp
+                rm -f "/tmp/$CF_ASSET"
+            else
+                mv "/tmp/$CF_ASSET" /tmp/cloudflared
+            fi
             chmod +x /tmp/cloudflared
             if [ -w /usr/local/bin ]; then
                 mv /tmp/cloudflared /usr/local/bin/cloudflared
@@ -848,7 +938,16 @@ HERDR_TG_USERNAME="${HERDR_TG_USERNAME:-$TELEGRAM_USERNAME}"
 }
 
 mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_FILE" <<EOF
+CONFIG_TMP="$CONFIG_FILE.tmp.$$"
+SECRETS_TMP="$SECRETS_FILE.tmp.$$"
+cleanup_config_temps() {
+    rm -f "$CONFIG_TMP" "$SECRETS_TMP"
+}
+trap cleanup_config_temps EXIT
+
+(
+    umask 022
+    cat > "$CONFIG_TMP" <<EOF
 # herdr-remote configuration (generated by install-service.sh)
 HERDR_RELAY_PORT=$WS_PORT
 HERDR_RELAY_HOST=127.0.0.1
@@ -876,8 +975,10 @@ HERDR_TG_ALLOW_PERSISTENT_TRUST=${HERDR_TG_ALLOW_PERSISTENT_TRUST:-0}
 HERDR_TG_READ_LINES=${HERDR_TG_READ_LINES:-60}
 HERDR_TG_OUTPUT_MAX_CHARS=${HERDR_TG_OUTPUT_MAX_CHARS:-12000}
 EOF
+)
+chmod 644 "$CONFIG_TMP"
+mv "$CONFIG_TMP" "$CONFIG_FILE"
 
-SECRETS_TMP="$SECRETS_FILE.tmp"
 (
     umask 077
     cat > "$SECRETS_TMP" <<EOF
@@ -891,11 +992,44 @@ EOF
 )
 chmod 600 "$SECRETS_TMP"
 mv "$SECRETS_TMP" "$SECRETS_FILE"
+trap - EXIT
 
 echo ""
 echo "Config saved to $CONFIG_FILE"
 echo "Secrets saved to $SECRETS_FILE (mode 0600)"
 echo ""
+
+# --- launchd helpers (macOS) ---
+
+# Wait until a launchd label is fully torn down. Bootstrapping a label that is
+# still unloading fails with the opaque "Bootstrap failed: 5: Input/output error".
+# HERDR_INSTALL_SERVICE_DELAY=0 skips the wait entirely (used by the test suite).
+wait_for_label_gone() {
+    label="$1"
+    [ "${HERDR_INSTALL_SERVICE_DELAY:-1}" = "0" ] && return 0
+    for _i in $(seq 1 25); do
+        launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || return 0
+        sleep 0.2
+    done
+    return 1
+}
+
+# Bootstrap with retries; launchd can still report the label as busy briefly
+# even after `launchctl print` stops seeing it.
+bootstrap_with_retry() {
+    plist="$1"
+    label="$2"
+    _err=""
+    for _i in 1 2 3 4 5; do
+        if _err=$(launchctl bootstrap "gui/$(id -u)" "$plist" 2>&1); then
+            return 0
+        fi
+        [ "${HERDR_INSTALL_SERVICE_DELAY:-1}" = "0" ] && break
+        sleep 1
+    done
+    echo "  launchctl bootstrap failed for $label: $_err" >&2
+    return 1
+}
 
 # --- Build PATH for the service ---
 
@@ -918,6 +1052,15 @@ if [ -n "$EXISTING_PID" ]; then
         echo "  Aborting. Stop the existing process first."
         exit 1
     fi
+    # If the port holder is our own managed relay, bootout the job first.
+    # Killing the PID directly leaves launchd restarting it (KeepAlive) and
+    # racing the bootstrap below.
+    if [ "$OS" = "macos" ] && launchctl print "gui/$(id -u)/$LABEL_RELAY" >/dev/null 2>&1; then
+        echo "  Stopping managed relay service..."
+        launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
+        wait_for_label_gone "$LABEL_RELAY" || true
+    fi
+
     # Try graceful shutdown first (SIGTERM)
     kill "$EXISTING_PID" 2>/dev/null
     for i in 1 2 3 4 5; do
@@ -953,8 +1096,16 @@ if [ "$OS" = "macos" ]; then
     PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL_RELAY.plist"
     mkdir -p "$HOME/Library/LaunchAgents"
 
+    # Preserve the current plist so a failed install can be rolled back rather
+    # than leaving the machine with no relay at all.
+    PLIST_BACKUP=""
+    if [ -f "$PLIST_PATH" ]; then
+        PLIST_BACKUP="$PLIST_PATH.prev"
+        cp "$PLIST_PATH" "$PLIST_BACKUP"
+    fi
+
     launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
-    sleep "${HERDR_INSTALL_SERVICE_DELAY:-1}"
+    wait_for_label_gone "$LABEL_RELAY" || true
 
     cat > "$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -967,7 +1118,7 @@ if [ "$OS" = "macos" ]; then
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>set -a; source "\$HOME/.config/herdr-remote/config.env"; source "\$HOME/.config/herdr-remote/secrets.env"; set +a; exec "\$HERDR_UV_PATH" run "\$HERDR_RELAY_DIR/herdr_relay.py"</string>
+        <string>set -e; set -a; source "\$HOME/.config/herdr-remote/config.env"; source "\$HOME/.config/herdr-remote/secrets.env"; set +a; exec "\$HERDR_UV_PATH" run "\$HERDR_RELAY_DIR/herdr_relay.py"</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$SCRIPT_DIR</string>
@@ -990,7 +1141,23 @@ if [ "$OS" = "macos" ]; then
 </plist>
 EOF
 
-    launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+    if ! bootstrap_with_retry "$PLIST_PATH" "$LABEL_RELAY"; then
+        echo "  ERROR: could not start the relay service." >&2
+        if [ -n "$PLIST_BACKUP" ] && [ -f "$PLIST_BACKUP" ]; then
+            echo "  Restoring previous relay service..." >&2
+            cp "$PLIST_BACKUP" "$PLIST_PATH"
+            wait_for_label_gone "$LABEL_RELAY" || true
+            if bootstrap_with_retry "$PLIST_PATH" "$LABEL_RELAY"; then
+                echo "  Previous relay restored and running." >&2
+            else
+                echo "  Could not restore the previous relay either." >&2
+                echo "  Start it manually with:" >&2
+                echo "    launchctl bootstrap gui/$(id -u) $PLIST_PATH" >&2
+            fi
+        fi
+        exit 1
+    fi
+    rm -f "$PLIST_PATH.prev"
 
 else
     UNIT_DIR="$HOME/.config/systemd/user"
@@ -1010,7 +1177,7 @@ Restart=always
 RestartSec=5
 Environment=PATH=$SERVICE_PATH
 EnvironmentFile=$CONFIG_FILE
-EnvironmentFile=-$SECRETS_FILE
+EnvironmentFile=$SECRETS_FILE
 
 [Install]
 WantedBy=default.target
@@ -1053,7 +1220,7 @@ if [ "$TELEGRAM_ENABLED" = true ]; then
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>set -a; source "\$HOME/.config/herdr-remote/config.env"; source "\$HOME/.config/herdr-remote/secrets.env"; set +a; exec "\$HERDR_UV_PATH" run "\$HERDR_RELAY_DIR/herdr_telegram.py"</string>
+        <string>set -e; set -a; source "\$HOME/.config/herdr-remote/config.env"; source "\$HOME/.config/herdr-remote/secrets.env"; set +a; exec "\$HERDR_UV_PATH" run "\$HERDR_RELAY_DIR/herdr_telegram.py"</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$SCRIPT_DIR</string>
@@ -1075,7 +1242,8 @@ if [ "$TELEGRAM_ENABLED" = true ]; then
 </dict>
 </plist>
 EOF
-        launchctl bootstrap "gui/$(id -u)" "$PLIST_TELEGRAM"
+        wait_for_label_gone "$LABEL_TELEGRAM" || true
+        bootstrap_with_retry "$PLIST_TELEGRAM" "$LABEL_TELEGRAM" || true
     else
         UNIT_TELEGRAM="$UNIT_DIR/herdr-telegram.service"
         cat > "$UNIT_TELEGRAM" <<EOF
@@ -1091,7 +1259,7 @@ Restart=always
 RestartSec=5
 Environment=PATH=$SERVICE_PATH
 EnvironmentFile=$CONFIG_FILE
-EnvironmentFile=-$SECRETS_FILE
+EnvironmentFile=$SECRETS_FILE
 
 [Install]
 WantedBy=default.target
@@ -1111,9 +1279,12 @@ fi
 
 # --- Install tunnel service (if configured) ---
 
-if [ "$TUNNEL_MODE" = "named-external" ]; then
-    echo "  Tunnel: using existing cloudflared service (not managed by herdr-remote)."
-    echo "  Hostname: ${TUNNEL_HOSTNAME:-unknown}"
+if [ "$TUNNEL_MODE" = "none" ] || [ "$TUNNEL_MODE" = "named-external" ]; then
+    remove_managed_tunnel_service
+    if [ "$TUNNEL_MODE" = "named-external" ]; then
+        echo "  Tunnel: using existing cloudflared service (not managed by herdr-remote)."
+        echo "  Hostname: ${TUNNEL_HOSTNAME:-unknown}"
+    fi
 elif [ "$TUNNEL_MODE" != "none" ] && [ -n "$CLOUDFLARED_PATH" ]; then
     echo "Installing tunnel service (mode: $TUNNEL_MODE)..."
 
@@ -1123,9 +1294,30 @@ elif [ "$TUNNEL_MODE" != "none" ] && [ -n "$CLOUDFLARED_PATH" ]; then
         CF_CONFIG_DIR="$HOME/.cloudflared"
         mkdir -p "$CF_CONFIG_DIR"
         CF_CONFIG="$CF_CONFIG_DIR/config-herdr.yml"
+        # cloudflared writes credentials to <UUID>.json, not <name>.json —
+        # resolve the tunnel's UUID so the config points at a file that exists.
+        TUNNEL_UUID=$("$CLOUDFLARED_PATH" tunnel list --output json 2>/dev/null \
+            | NAME="$TUNNEL_NAME" python3 -c '
+import json, os, sys
+name = os.environ["NAME"]
+try:
+    for t in json.load(sys.stdin):
+        if t.get("name") == name:
+            print(t.get("id", ""))
+            break
+except Exception:
+    pass
+')
+        if [ -n "$TUNNEL_UUID" ] && [ -f "$CF_CONFIG_DIR/${TUNNEL_UUID}.json" ]; then
+            CF_CREDS="$CF_CONFIG_DIR/${TUNNEL_UUID}.json"
+        else
+            CF_CREDS="$CF_CONFIG_DIR/${TUNNEL_NAME}.json"
+            echo "  WARNING: could not resolve credentials file for tunnel '$TUNNEL_NAME'." >&2
+            echo "           Falling back to $CF_CREDS (tunnel may fail to start)." >&2
+        fi
         cat > "$CF_CONFIG" <<EOF
 tunnel: $TUNNEL_NAME
-credentials-file: $CF_CONFIG_DIR/${TUNNEL_NAME}.json
+credentials-file: $CF_CREDS
 
 ingress:
   - hostname: $TUNNEL_HOSTNAME
@@ -1181,7 +1373,8 @@ $ARGS_XML    </array>
 </plist>
 EOF
 
-        launchctl bootstrap "gui/$(id -u)" "$PLIST_TUNNEL"
+        wait_for_label_gone "$LABEL_TUNNEL" || true
+        bootstrap_with_retry "$PLIST_TUNNEL" "$LABEL_TUNNEL" || true
 
     else
         systemctl --user stop herdr-tunnel.service 2>/dev/null || true

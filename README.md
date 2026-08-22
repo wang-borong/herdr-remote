@@ -11,7 +11,7 @@ Download [Herdi.app](https://github.com/dcolinmorgan/herdr-remote/releases/lates
 Monitors all your local herdr agents automatically -- no relay, no config, no account.
 
 ```bash
-curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/latest/download/Herdi-0.7.0.dmg -o /tmp/Herdi.dmg && open /tmp/Herdi.dmg
+curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/latest/download/Herdi-0.7.4.dmg -o /tmp/Herdi.dmg && open /tmp/Herdi.dmg
 ```
 
 ## What you get
@@ -35,6 +35,10 @@ curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/latest/download/H
 
 ## Remote monitoring (phone/Telegram)
 
+The Python relay, web dashboard, TUI, and Telegram client run on macOS, Linux, and Windows.
+
+### macOS/Linux
+
 For monitoring agents across machines or from your phone:
 
 ```bash
@@ -43,6 +47,33 @@ cd herdr-remote/relay && ./start.sh
 ```
 
 Open [herdr-demo.pages.dev](https://herdr-demo.pages.dev) on your phone, paste the tunnel URL.
+
+### Windows
+
+With Git, [uv](https://docs.astral.sh/uv/), and `herdr` installed:
+
+```powershell
+git clone https://github.com/dcolinmorgan/herdr-remote
+Set-Location herdr-remote
+
+herdr plugin link .
+herdr plugin list
+
+./relay/start.ps1
+```
+
+The launcher starts a local-only relay on `127.0.0.1:8375` by default. Set
+`HERDR_RELAY_TOKEN` before enabling a tunnel or binding beyond loopback. Use
+`HERDR_REMOTES` for a comma-separated list of SSH targets and `HERDR_BIN` only
+when `herdr` is not available on `PATH`.
+
+### Security
+
+Browser WebSocket clients must use the relay's own authenticated origin. Native
+clients without an `Origin` header remain supported. The Tailscale console adds
+identity allowlists and same-origin checks on top of relay token authentication.
+An authenticated cross-origin dashboard can be opted in explicitly with the
+exact `HERDR_RELAY_TRUSTED_ORIGINS` allowlist; wildcard origins are not accepted.
 
 ### Private Tailscale web console
 
@@ -164,9 +195,17 @@ uv run relay/herdr_relay.py
 
 The relay listens on `127.0.0.1` by default. Remote binding requires the explicit `HERDR_ALLOW_REMOTE_BIND=1` opt-in and should only be used behind a trusted access layer.
 
+On Windows PowerShell:
+
+```powershell
+$env:HERDR_RELAY_TOKEN = [guid]::NewGuid().ToString("N")
+uv run relay/herdr_relay.py
+```
+
 ## Requirements
 
 - macOS 14+ (menu bar app)
+- Windows 10+ (relay/web/TUI/Telegram; no tray app)
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/) (relay/TUI/bot)
 - `cloudflared` (for remote access)
 - `tailscale` (recommended for the private responsive web console)

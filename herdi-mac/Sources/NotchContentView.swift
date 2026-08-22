@@ -17,7 +17,7 @@ private enum HoverTiming {
 
 struct NotchPanelView: View {
     let relay: RelayConnection
-    let controller: PanelWindowController
+    @ObservedObject var controller: PanelWindowController
     let hasNotch: Bool
     let notchHeight: CGFloat
     let notchW: CGFloat
@@ -58,7 +58,12 @@ struct NotchPanelView: View {
                         expanded: shouldShowExpanded,
                         notchHeight: notchHeight,
                         blocked: blocked,
-                        working: working
+                        working: working,
+                        onShowUpdate: {
+                            withAnimation(NotchAnimation.open) {
+                                controller.surface = .sessionList
+                            }
+                        }
                     )
                     .frame(height: notchHeight)
                 } else {
@@ -177,6 +182,7 @@ private struct CompactBar: View {
     let notchHeight: CGFloat
     let blocked: [Agent]
     let working: [Agent]
+    let onShowUpdate: () -> Void
     private let updater = Updater.shared
 
     var body: some View {
@@ -223,9 +229,13 @@ private struct CompactBar: View {
             // Right wing: update badge + agent count
             HStack(spacing: 4) {
                 if updater.updateAvailable && !expanded {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.cyan)
+                    Button(action: onShowUpdate) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.cyan)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show update")
                 }
                 if !expanded {
                     Text("\(relay.agents.count)")
@@ -466,9 +476,14 @@ private struct AgentSessionRow: View {
             // Actions
             if hovered || style == .blocked {
                 HStack(spacing: 4) {
-                    if style == .blocked {
+                    if style == .blocked,
+                       agent.options?.contains("yes, single permission") == true {
                         Button {
-                            relay.send(response: ResponseMessage(pane_id: agent.id, text: "yes, single permission"))
+                            relay.send(response: ResponseMessage(
+                                pane_id: agent.id,
+                                prompt_id: agent.promptId,
+                                text: "yes, single permission"
+                            ))
                         } label: {
                             Image(systemName: "checkmark.circle.fill")
                                 .font(.system(size: 14))
@@ -588,11 +603,36 @@ private struct ApprovalCard: View {
             )
             .padding(.horizontal, 12)
 
-            // Response buttons — clean grid of common actions
-            ResponseButtonGrid(options: agent.options) { response in
-                respond(response)
+            if agent.isMultiSelect, let promptId = agent.promptId {
+                VStack(spacing: 6) {
+                    ForEach(agent.multiOptions, id: \.self) { option in
+                        Button {
+                            toggle(option, promptId: promptId)
+                        } label: {
+                            HStack {
+                                Image(systemName: agent.selectedOptions.contains(option) ? "checkmark.square.fill" : "square")
+                                Text(option)
+                                Spacer()
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Button {
+                        submit(promptId: promptId)
+                    } label: {
+                        Label("Submit", systemImage: "checkmark.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(.horizontal, 12)
+            } else {
+                ResponseButtonGrid(options: agent.options) { response in
+                    respond(response)
+                }
+                .padding(.horizontal, 12)
             }
-            .padding(.horizontal, 12)
 
             // Custom text input
             HStack(spacing: 6) {
@@ -627,10 +667,30 @@ private struct ApprovalCard: View {
     }
 
     private func respond(_ text: String) {
-        relay.send(response: ResponseMessage(pane_id: agent.id, text: text))
+        relay.send(response: ResponseMessage(pane_id: agent.id, prompt_id: agent.promptId, text: text))
         agent.status = .working
         agent.prompt = nil
+        agent.promptId = nil
         agent.options = nil
+        onDismiss()
+    }
+
+    private func toggle(_ option: String, promptId: String) {
+        relay.toggleQuestionOption(paneId: agent.id, promptId: promptId, option: option)
+        if let index = agent.selectedOptions.firstIndex(of: option) {
+            agent.selectedOptions.remove(at: index)
+        } else {
+            agent.selectedOptions.append(option)
+        }
+    }
+
+    private func submit(promptId: String) {
+        relay.submitQuestion(paneId: agent.id, promptId: promptId)
+        agent.status = .working
+        agent.prompt = nil
+        agent.promptId = nil
+        agent.multiOptions = []
+        agent.selectedOptions = []
         onDismiss()
     }
 }
@@ -644,7 +704,7 @@ private struct ResponseButtonGrid: View {
     let onRespond: (String) -> Void
 
     private var buttons: [ResponseAction] {
-        guard let options else { return defaultActions }
+        guard let options else { return [] }
         return options.map { mapOption($0) }
     }
 
@@ -654,15 +714,6 @@ private struct ResponseButtonGrid: View {
                 ResponseButton(action: btn) { onRespond(btn.rawValue) }
             }
         }
-    }
-
-    // Default actions when no options detected
-    private var defaultActions: [ResponseAction] {
-        [
-            ResponseAction(label: "Allow", icon: "checkmark", tint: .green, shortcut: "⌘Y", rawValue: "yes, single permission"),
-            ResponseAction(label: "Trust", icon: "shield.checkered", tint: .blue, shortcut: "⌘T", rawValue: "trust, always allow"),
-            ResponseAction(label: "Deny", icon: "xmark", tint: .red, shortcut: "⌘N", rawValue: "no (tab to edit)"),
-        ]
     }
 
     private func mapOption(_ option: String) -> ResponseAction {

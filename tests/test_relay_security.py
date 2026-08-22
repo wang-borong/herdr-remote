@@ -1014,7 +1014,16 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             relay.run_herdr_result("agent", "prompt", "w0:p1", prompt, remote="user@example")
 
         command = run.call_args.args[0]
-        self.assertEqual(command[-1], shlex.join([relay.HERDR, "agent", "prompt", "w0:p1", prompt]))
+        self.assertEqual(
+            command[-1],
+            shlex.join([
+                relay.REMOTE_HERDR_BIN,
+                "agent",
+                "prompt",
+                "w0:p1",
+                prompt,
+            ]),
+        )
         self.assertNotIn(prompt, command[:-1])
 
     def test_remote_agents_receive_source_scoped_global_pane_ids(self):

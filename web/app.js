@@ -272,6 +272,7 @@ const state = {
   promptPending: false,
   pendingPromptText: "",
   pendingPromptMode: "",
+  pendingApprovalLabel: "",
   interruptPending: false,
   startPending: false,
   pushSubscription: null,
@@ -589,11 +590,22 @@ function replaceAgentSnapshot(agents) {
   const previous = new Map(state.agents.map((agent) => [agent.pane_id, agent]));
   const nextAgents = agents.map((agent) => {
     const old = previous.get(agent.pane_id) || {};
-    return {
+    const next = {
       ...old,
       ...agent,
+    };
+    const remainsBlocked = normalizedStatus(old) === "blocked"
+      && normalizedStatus(next) === "blocked";
+    if (!remainsBlocked) return clearBlockedPromptState(next);
+    return {
+      ...next,
       options: old.options,
       blockedPrompt: old.blockedPrompt,
+      promptId: old.promptId,
+      interaction: old.interaction,
+      multi: old.multi,
+      multiOptions: old.multiOptions,
+      selectedOptions: old.selectedOptions,
     };
   });
   const changed = JSON.stringify(nextAgents) !== JSON.stringify(state.agents);
@@ -612,9 +624,30 @@ function replaceAgentSnapshot(agents) {
 
 function upsertAgent(agent) {
   const index = state.agents.findIndex((item) => item.pane_id === agent.pane_id);
-  if (index >= 0) state.agents[index] = { ...state.agents[index], ...agent };
-  else state.agents.push(agent);
+  const existing = index >= 0 ? state.agents[index] : {};
+  let merged = { ...existing, ...agent };
+  const enteredBlockedWithoutPrompt = normalizedStatus(existing) !== "blocked"
+    && normalizedStatus(merged) === "blocked"
+    && !agent.promptId;
+  if (normalizedStatus(merged) !== "blocked" || enteredBlockedWithoutPrompt) {
+    merged = clearBlockedPromptState(merged);
+  }
+  if (index >= 0) state.agents[index] = merged;
+  else state.agents.push(merged);
   renderAll();
+}
+
+function clearBlockedPromptState(agent) {
+  return {
+    ...agent,
+    options: [],
+    blockedPrompt: "",
+    promptId: "",
+    interaction: "",
+    multi: false,
+    multiOptions: [],
+    selectedOptions: [],
+  };
 }
 
 function handleBlocked(message) {
@@ -629,6 +662,11 @@ function handleBlocked(message) {
     source_id: message.source_id || existing?.source_id || "local",
     status: "blocked",
     options: Array.isArray(message.options) ? message.options : [],
+    multiOptions: Array.isArray(message.multi_options) ? message.multi_options : [],
+    selectedOptions: Array.isArray(message.selected_options) ? message.selected_options : [],
+    promptId: message.prompt_id || "",
+    interaction: message.interaction || "prompt",
+    multi: Boolean(message.multi),
     blockedPrompt: message.prompt || "",
   });
   if (!wasBlocked) {
@@ -2874,7 +2912,12 @@ async function pasteIntoTerminal() {
 
 function handleCommandResult(message) {
   if (!message.ok) return;
-  if (message.command === "agent_prompt" || message.command === "agent_prompt_queue") {
+  const promptResponse = message.command === "respond" && state.promptPending;
+  if (
+    message.command === "agent_prompt"
+    || message.command === "agent_prompt_queue"
+    || promptResponse
+  ) {
     state.promptPending = false;
     if (elements.promptInput.value.trim() === state.pendingPromptText) {
       elements.promptInput.value = "";
@@ -2883,16 +2926,36 @@ function handleCommandResult(message) {
     state.pendingPromptText = "";
     state.pendingPromptMode = "";
     renderPromptState();
-    const cached = message.command === "agent_prompt_queue" || message.delivery === "cached";
-    const queued = message.delivery === "queued";
+    if (promptResponse) {
+      showToast("回答已发送", "Agent 已收到当前 Prompt 的回答。", "success");
+    } else {
+      const cached = message.command === "agent_prompt_queue" || message.delivery === "cached";
+      const queued = message.delivery === "queued";
+      showToast(
+        cached ? "Prompt 已缓存" : (queued ? "Prompt 已排队" : "Prompt 已发送"),
+        cached
+          ? "已通过 Tab 加入 Codex 队列，将在当前任务完成后处理。"
+          : (queued ? "Agent 正在工作，新任务已提交并将在当前任务后处理。" : "Agent 已收到新的任务。"),
+        "success",
+      );
+    }
+    window.setTimeout(refreshOutput, 500);
+  }
+  if (message.command === "respond" && !promptResponse) {
     showToast(
-      cached ? "Prompt 已缓存" : (queued ? "Prompt 已排队" : "Prompt 已发送"),
-      cached
-        ? "已通过 Tab 加入 Codex 队列，将在当前任务完成后处理。"
-        : (queued ? "Agent 正在工作，新任务已提交并将在当前任务后处理。" : "Agent 已收到新的任务。"),
+      "操作已发送",
+      state.pendingApprovalLabel || "Agent 已收到回答。",
       "success",
     );
-    window.setTimeout(refreshOutput, 500);
+    state.pendingApprovalLabel = "";
+    window.setTimeout(refreshOutput, 450);
+  }
+  if (message.command === "question_toggle") {
+    window.setTimeout(refreshOutput, 250);
+  }
+  if (message.command === "question_submit") {
+    showToast("选择已提交", "Agent 将继续处理。", "success");
+    window.setTimeout(refreshOutput, 350);
   }
   if (message.command === "send_keys" && state.interruptPending) {
     state.interruptPending = false;
@@ -2923,6 +2986,7 @@ function handleCommandResult(message) {
 function handleRelayError(message) {
   state.promptPending = false;
   state.pendingPromptMode = "";
+  state.pendingApprovalLabel = "";
   state.interruptPending = false;
   state.startPending = false;
   state.directoryPending = false;
@@ -3112,16 +3176,33 @@ function renderBlockedBanner(agent) {
   if (!blocked) return;
 
   elements.blockedPrompt.textContent = agent.blockedPrompt || "Agent 需要你的确认后才能继续。";
-  const options = agent.options?.length
-    ? agent.options
-    : ["yes, single permission", "trust, always allow", "no (tab to edit)"];
+  const isMultiQuestion = agent.interaction === "omp_question" && agent.multi;
+  const options = isMultiQuestion
+    ? (agent.multiOptions || [])
+    : (agent.options || []);
+  const selectedOptions = new Set(agent.selectedOptions || []);
   for (const option of options) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `approval-button ${approvalClass(option)}`;
     button.textContent = approvalLabel(option);
-    button.addEventListener("click", () => respondToBlocked(option));
+    if (isMultiQuestion) {
+      const selected = selectedOptions.has(option);
+      button.classList.toggle("is-selected", selected);
+      button.setAttribute("aria-pressed", String(selected));
+      button.addEventListener("click", () => toggleBlockedOption(option, button));
+    } else {
+      button.addEventListener("click", () => respondToBlocked(option));
+    }
     elements.approvalActions.append(button);
+  }
+  if (isMultiQuestion) {
+    const submit = document.createElement("button");
+    submit.type = "button";
+    submit.className = "approval-button is-approve";
+    submit.textContent = "提交选择";
+    submit.addEventListener("click", submitBlockedQuestion);
+    elements.approvalActions.append(submit);
   }
 }
 
@@ -3142,11 +3223,44 @@ function approvalClass(option) {
 }
 
 function respondToBlocked(text) {
-  if (!state.activePane) return;
-  if (send({ type: "respond", pane_id: state.activePane, text })) {
-    showToast("操作已发送", approvalLabel(text), "success");
-    window.setTimeout(refreshOutput, 450);
+  const agent = activeAgent();
+  if (!agent?.promptId) {
+    showToast("Prompt 已变化", "请刷新 Agent 输出后再操作。", "error");
+    return;
   }
+  if (!send({
+    type: "respond",
+    pane_id: agent.pane_id,
+    prompt_id: agent.promptId,
+    text,
+  })) return;
+  state.pendingApprovalLabel = approvalLabel(text);
+}
+
+function toggleBlockedOption(option, button) {
+  const agent = activeAgent();
+  if (!agent?.promptId) return;
+  if (!send({
+    type: "question_toggle",
+    pane_id: agent.pane_id,
+    prompt_id: agent.promptId,
+    option,
+  })) return;
+  const selected = button.getAttribute("aria-pressed") !== "true";
+  button.setAttribute("aria-pressed", String(selected));
+  button.classList.toggle("is-selected", selected);
+}
+
+function submitBlockedQuestion() {
+  const agent = activeAgent();
+  if (!agent?.promptId) return;
+  if (!send({
+    type: "question_submit",
+    pane_id: agent.pane_id,
+    prompt_id: agent.promptId,
+  })) return;
+  showToast("正在提交", "已将多选结果发送给 Agent。", "success");
+  window.setTimeout(refreshOutput, 450);
 }
 
 function renderOutput() {
@@ -3216,9 +3330,9 @@ function renderPromptState() {
   elements.promptInput.disabled = !Boolean(agent) || state.promptPending;
   elements.sendPromptButton.disabled = !ready || !hasText;
   elements.queuePromptButton.disabled = !canCache;
-  elements.sendPromptButton.querySelector("span").textContent = state.promptPending && state.pendingPromptMode === "send"
+  elements.sendPromptButton.querySelector("span").textContent = state.promptPending && state.pendingPromptMode !== "queue"
     ? "正在发送…"
-    : "发送 Prompt";
+    : (normalizedStatus(agent) === "blocked" ? "回答 Prompt" : "发送 Prompt");
   elements.queuePromptButton.querySelector("span").textContent = state.promptPending && state.pendingPromptMode === "queue"
     ? "正在缓存…"
     : "Tab 缓存";
@@ -3242,11 +3356,20 @@ function submitPrompt(mode = "send") {
     showToast("暂时无法缓存", "Agent 当前不在工作中，请使用发送 Prompt。", "error");
     return;
   }
-  const type = queue ? "agent_prompt_queue" : "agent_prompt";
-  if (!send({ type, pane_id: state.activePane, text })) return;
+  const blockedResponse = !queue && normalizedStatus(agent) === "blocked";
+  if (blockedResponse && !agent?.promptId) {
+    showToast("Prompt 尚未就绪", "请刷新最近输出，等待 Relay 返回当前 Prompt 后再回答。", "error");
+    return;
+  }
+  const type = queue
+    ? "agent_prompt_queue"
+    : (blockedResponse ? "respond" : "agent_prompt");
+  const message = { type, pane_id: state.activePane, text };
+  if (blockedResponse) message.prompt_id = agent.promptId;
+  if (!send(message)) return;
   state.promptPending = true;
   state.pendingPromptText = text;
-  state.pendingPromptMode = mode;
+  state.pendingPromptMode = blockedResponse ? "respond" : mode;
   renderPromptState();
 }
 

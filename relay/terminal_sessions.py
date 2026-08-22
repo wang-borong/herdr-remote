@@ -6,21 +6,27 @@ import asyncio
 import base64
 import contextlib
 import errno
-import fcntl
 import hashlib
 import json
 import os
-import pty
 import re
 import secrets
 import shlex
 import signal
 import struct
 import subprocess
-import termios
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+
+try:
+    import fcntl
+    import pty
+    import termios
+except ImportError:  # Windows supports relay clients, but not the Unix PTY terminal.
+    fcntl = None
+    pty = None
+    termios = None
 
 PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9._@:%+\-\[\]]{1,255}$")
@@ -448,6 +454,8 @@ def validated_terminal_dimensions(cols, rows) -> tuple[int, int]:
 
 
 def _set_window_size(descriptor: int, cols: int, rows: int) -> None:
+    if fcntl is None or termios is None:
+        raise TerminalConfigError("PTY-backed web terminals are unavailable on this platform")
     packed = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(descriptor, termios.TIOCSWINSZ, packed)
 
@@ -487,6 +495,10 @@ class TerminalSession:
         self.closing = False
 
     async def spawn(self) -> None:
+        if pty is None:
+            raise TerminalConfigError(
+                "PTY-backed web terminals are unavailable on this platform"
+            )
         command, process_cwd, persistent = terminal_profile_command(
             self.profile,
             shell_binary=self.shell_binary,

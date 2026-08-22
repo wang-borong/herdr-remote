@@ -9,6 +9,7 @@ final class RelayConnection {
     var isConnected = false
     var hostAddress = "ws://127.0.0.1:8375"
     var mode: ConnectionMode = .direct
+    var herdrError: String? = nil  // Surfaces binary-not-found etc.
 
     enum ConnectionMode: String, CaseIterable {
         case direct = "Direct (herdr CLI)"
@@ -20,17 +21,62 @@ final class RelayConnection {
     private var pollTimer: Timer?
     private var reconnectAttempt = 0
     private var reconnecting = false
-    private let herdrPath: String
+    private var herdrPath: String = ""
     var remotes: [String] = [] // SSH targets, e.g. ["user@host"]
 
     init() {
-        herdrPath = ProcessInfo.processInfo.environment["HERDR_BIN"]
-            ?? "/opt/homebrew/bin/herdr"
+        herdrPath = resolveHerdrPath()
         // Load saved remotes
         if let saved = UserDefaults.standard.stringArray(forKey: "herdi_remotes") {
             remotes = saved
         }
         startDirect()
+    }
+
+    /// Resolve herdr binary: UserDefaults override → HERDR_BIN env → PATH lookup → common locations
+    private func resolveHerdrPath() -> String {
+        // 1. UserDefaults override (set via Settings)
+        if let custom = UserDefaults.standard.string(forKey: "herdi_herdr_path"),
+           !custom.isEmpty, FileManager.default.isExecutableFile(atPath: custom) {
+            return custom
+        }
+        // 2. HERDR_BIN environment variable
+        if let envPath = ProcessInfo.processInfo.environment["HERDR_BIN"],
+           FileManager.default.isExecutableFile(atPath: envPath) {
+            return envPath
+        }
+        // 3. Resolve via PATH using /usr/bin/which
+        let whichProcess = Process()
+        whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        whichProcess.arguments = ["herdr"]
+        let pipe = Pipe()
+        whichProcess.standardOutput = pipe
+        whichProcess.standardError = FileHandle.nullDevice
+        do {
+            try whichProcess.run()
+            whichProcess.waitUntilExit()
+            if whichProcess.terminationStatus == 0 {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) {
+                    return path
+                }
+            }
+        } catch {}
+        // 4. Common install locations
+        let commonPaths = [
+            "/opt/homebrew/bin/herdr",
+            "/usr/local/bin/herdr",
+            NSString(string: "~/.local/bin/herdr").expandingTildeInPath,
+            NSString(string: "~/bin/herdr").expandingTildeInPath
+        ]
+        for path in commonPaths {
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        // Not found — return empty and set error in pollHerdr
+        return ""
     }
 
     // MARK: - Direct Mode (polls herdr CLI)
@@ -47,6 +93,16 @@ final class RelayConnection {
 
     private func pollHerdr() {
         DispatchQueue.global(qos: .utility).async { [self] in
+            // Check if herdr binary is found
+            if herdrPath.isEmpty {
+                DispatchQueue.main.async { [self] in
+                    isConnected = false
+                    herdrError = "herdr not found. Install herdr or set path in Settings."
+                    agents = []
+                }
+                return
+            }
+
             // Local
             var allAgents = parseAgents(from: runHerdr("pane", "list"), host: "local")
 
@@ -58,6 +114,7 @@ final class RelayConnection {
 
             DispatchQueue.main.async { [self] in
                 isConnected = true
+                herdrError = nil  // Clear any previous error
                 var seen = Set<String>()
                 for a in allAgents {
                     seen.insert(a.id)
@@ -68,6 +125,7 @@ final class RelayConnection {
                             }
                             existing.status = a.status
                         }
+                        if a.status != .blocked { clearBlockedState(existing) }
                         if existing.project != a.project { existing.project = a.project }
                         if existing.host != a.host { existing.host = a.host }
                     } else {
@@ -85,6 +143,11 @@ final class RelayConnection {
         let id: String, name: String, status: AgentStatus, project: String, cwd: String, host: String
     }
 
+    private struct PaneLocation {
+        let workspaceId: String
+        let tabId: String
+    }
+
     private func parseAgents(from output: String, host: String) -> [ParsedAgent] {
         guard let data = output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -98,6 +161,16 @@ final class RelayConnection {
             let cwd = p["cwd"] as? String ?? ""
             return ParsedAgent(id: paneId, name: agent, status: status, project: (cwd as NSString).lastPathComponent, cwd: cwd, host: host)
         }
+    }
+
+    private func parsePaneLocation(from output: String) -> PaneLocation? {
+        guard let data = output.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = json["result"] as? [String: Any],
+              let pane = result["pane"] as? [String: Any],
+              let workspaceId = pane["workspace_id"] as? String,
+              let tabId = pane["tab_id"] as? String else { return nil }
+        return PaneLocation(workspaceId: workspaceId, tabId: tabId)
     }
 
     private func runSSH(_ remote: String, _ args: String...) -> String {
@@ -227,15 +300,45 @@ final class RelayConnection {
                     _ = runHerdr("pane", "send-text", paneId, response.text + "\n")
                 }
             }
+
         } else {
             guard let data = try? JSONEncoder().encode(response) else { return }
             task?.send(.string(String(data: data, encoding: .utf8)!)) { _ in }
         }
     }
 
+    func toggleQuestionOption(paneId: String, promptId: String, option: String) {
+        guard mode == .relay,
+              let data = try? JSONEncoder().encode(
+                QuestionToggleMessage(pane_id: paneId, prompt_id: promptId, option: option)
+              ) else { return }
+        task?.send(.string(String(data: data, encoding: .utf8)!)) { _ in }
+    }
+
+    func submitQuestion(paneId: String, promptId: String) {
+        guard mode == .relay,
+              let data = try? JSONEncoder().encode(
+                QuestionSubmitMessage(pane_id: paneId, prompt_id: promptId)
+              ) else { return }
+        task?.send(.string(String(data: data, encoding: .utf8)!)) { _ in }
+    }
+
     func focusPane(_ paneId: String) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            _ = runHerdr("pane", "focus", paneId)
+            if let agent = agents.first(where: { $0.id == paneId }), agent.host != "local" {
+                let prefix = agent.host + ":"
+                let remotePaneId = paneId.hasPrefix(prefix) ? String(paneId.dropFirst(prefix.count)) : paneId
+                let output = runSSH(agent.host, "herdr", "pane", "get", remotePaneId)
+                guard let location = parsePaneLocation(from: output) else { return }
+                _ = runSSH(agent.host, "herdr", "workspace", "focus", location.workspaceId)
+                _ = runSSH(agent.host, "herdr", "tab", "focus", location.tabId)
+                return
+            }
+
+            let output = runHerdr("pane", "get", paneId)
+            guard let location = parsePaneLocation(from: output) else { return }
+            _ = runHerdr("workspace", "focus", location.workspaceId)
+            _ = runHerdr("tab", "focus", location.tabId)
         }
     }
 
@@ -296,9 +399,16 @@ final class RelayConnection {
             case "blocked":
                 if let pid = msg.pane_id, let agent = agents.first(where: { $0.id == pid }) {
                     agent.prompt = msg.prompt
+                    agent.promptId = msg.prompt_id
                     agent.options = msg.options
+                    agent.multiOptions = msg.multi_options ?? []
+                    agent.selectedOptions = msg.selected_options ?? []
+                    agent.interaction = msg.interaction
+                    agent.isMultiSelect = msg.multi ?? false
                     agent.status = .blocked
-                    sendNotification(agent: agent.name, project: agent.project)
+                    if msg.update != true {
+                        sendNotification(agent: agent.name, project: agent.project)
+                    }
                 }
             default: break
             }
@@ -308,7 +418,9 @@ final class RelayConnection {
     private func upsertAgent(_ data: AgentMessage.AgentData) {
         if let existing = agents.first(where: { $0.id == data.pane_id }) {
             existing.name = data.agent
-            existing.status = AgentStatus(rawValue: data.status) ?? .unknown
+            let status = AgentStatus(rawValue: data.status) ?? .unknown
+            existing.status = status
+            if status != .blocked { clearBlockedState(existing) }
             existing.project = data.project
             existing.cwd = data.cwd
             existing.host = data.host ?? "local"
@@ -319,6 +431,16 @@ final class RelayConnection {
             status: AgentStatus(rawValue: data.status) ?? .unknown,
             project: data.project, cwd: data.cwd, host: data.host ?? "local"
         ))
+    }
+
+    private func clearBlockedState(_ agent: Agent) {
+        agent.prompt = nil
+        agent.promptId = nil
+        agent.options = nil
+        agent.multiOptions = []
+        agent.selectedOptions = []
+        agent.interaction = nil
+        agent.isMultiSelect = false
     }
 
     private func sendNotification(agent: String, project: String) {
