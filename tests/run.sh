@@ -101,6 +101,17 @@ WEB_JS="$DIR/web/app.js"
   grep -q '"workspace_files": True' "$DIR/relay/herdr_relay.py" && \
   grep -q 'path == "/api/workspace-download"' "$DIR/relay/herdr_relay.py" && \
   grep -q "C-c" "$WEB_JS" && grep -q "terminal_open" "$WEB_JS" && \
+  grep -q 'id="agent-key-toggle"' "$WEB" && \
+  grep -q 'id="agent-keybar"' "$WEB" && \
+  grep -q 'aria-busy="false" hidden' "$WEB" && \
+  grep -q 'data-agent-key="Enter"' "$WEB" && \
+  grep -q 'data-agent-key="Escape"' "$WEB" && \
+  grep -q "sendAgentInteractionKey" "$WEB_JS" && \
+  grep -q "AGENT_KEY_ACK_TIMEOUT_MS" "$WEB_JS" && \
+  ! grep -q 'data-prompt=' "$WEB" && \
+  ! grep -q 'data-terminal-command=' "$WEB" && \
+  grep -q 'data-terminal-key="escape"' "$WEB" && \
+  grep -q 'data-terminal-key="tab"' "$WEB" && \
   grep -q 'case "terminal_resized"' "$WEB_JS" && \
   grep -q "terminalResizePendingId" "$WEB_JS" && \
   grep -q "flushPendingTerminalInput" "$WEB_JS" && \

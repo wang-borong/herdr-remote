@@ -193,11 +193,35 @@
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2m.5 5v-5h-5"/></svg>
                   刷新
                 </button>
+                <button class="toolbar-button agent-key-toggle" id="agent-key-toggle" type="button" aria-expanded="false" aria-controls="agent-keybar" aria-label="显示 Agent 交互按键" title="交互按键">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="3" y="6" width="18" height="12" rx="2"/>
+                    <path d="M7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h.01M11 14h6"/>
+                  </svg>
+                  <span class="sr-only">交互按键</span>
+                </button>
               </div>
             </div>
             <div class="terminal-output" id="terminal-output" role="region" aria-label="Agent 最近输出">
               <div class="agent-output-terminal" id="agent-output-terminal" hidden></div>
               <pre class="terminal-output-fallback" id="terminal-output-fallback" tabindex="0">正在读取 Agent 输出…</pre>
+            </div>
+            <div class="agent-keybar" id="agent-keybar" role="toolbar" aria-label="Agent 交互按键" aria-busy="false" hidden>
+              <span class="sr-only" id="agent-key-status" aria-live="polite">Agent 交互按键已收起</span>
+              <div class="agent-key-buttons">
+                <button class="agent-key-button" type="button" data-agent-key="Up" aria-label="向 Agent 发送上方向键" title="上方向键">
+                  <span class="agent-keycap" aria-hidden="true">↑</span>
+                </button>
+                <button class="agent-key-button" type="button" data-agent-key="Down" aria-label="向 Agent 发送下方向键" title="下方向键">
+                  <span class="agent-keycap" aria-hidden="true">↓</span>
+                </button>
+                <button class="agent-key-button is-confirm" type="button" data-agent-key="Enter" aria-label="向 Agent 发送 Enter 确认键" title="Enter">
+                  <span class="agent-keycap" aria-hidden="true">↵</span>
+                </button>
+                <button class="agent-key-button is-cancel" type="button" data-agent-key="Escape" aria-label="向 Agent 发送 Esc 返回键" title="Esc">
+                  <span class="agent-keycap agent-keycap-wide" aria-hidden="true">Esc</span>
+                </button>
+              </div>
             </div>
           </section>
 
@@ -208,11 +232,6 @@
                 <h3 id="composer-title">发送 Prompt</h3>
               </div>
               <span id="prompt-count">0 / 1000</span>
-            </div>
-            <div class="prompt-shortcuts" aria-label="常用 Prompt">
-              <button type="button" data-prompt="请汇报当前进展、已完成事项和下一步计划。">汇报进展</button>
-              <button type="button" data-prompt="请检查当前改动并运行相关测试，修复发现的问题。">检查并测试</button>
-              <button type="button" data-prompt="请总结当前上下文，列出关键决策和未完成事项。">总结上下文</button>
             </div>
             <form id="prompt-form">
               <label class="sr-only" for="prompt-input">发送给 Agent 的 Prompt</label>
@@ -366,14 +385,6 @@
             </section>
 
             <section class="terminal-utilities" aria-label="终端快捷操作">
-              <div class="terminal-quick-commands">
-                <span>快捷命令</span>
-                <button type="button" data-terminal-command="pwd">pwd</button>
-                <button type="button" data-terminal-command="ls -la">ls -la</button>
-                <button type="button" data-terminal-command="git status">git status</button>
-                <button type="button" data-terminal-command="git diff --stat">git diff --stat</button>
-                <button type="button" data-terminal-command="htop">htop</button>
-              </div>
               <p><span class="security-dot" aria-hidden="true"></span>终端拥有当前 Linux 用户的完整权限。命令与终端内容不会写入 Relay 审计日志。</p>
             </section>
           </article>

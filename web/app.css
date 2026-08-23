@@ -1076,7 +1076,7 @@ input::placeholder {
 .terminal-card {
   min-height: 260px;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
 }
 
@@ -1251,6 +1251,125 @@ input::placeholder {
   scrollbar-width: thin;
 }
 
+.agent-key-toggle {
+  width: 33px;
+  flex: 0 0 33px;
+  padding: 0;
+}
+
+.agent-key-toggle svg {
+  width: 15px;
+  height: 15px;
+}
+
+.agent-key-toggle.is-open {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+}
+
+.agent-key-toggle.is-pending svg {
+  animation: agent-key-pulse 900ms ease-in-out infinite alternate;
+}
+
+@keyframes agent-key-pulse {
+  to { opacity: 0.42; }
+}
+
+.agent-keybar {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--surface-strong) 82%, var(--terminal));
+  border-top: 1px solid var(--border);
+}
+
+.agent-key-buttons {
+  display: grid;
+  grid-template-columns: repeat(4, 42px);
+  gap: 6px;
+}
+
+.agent-key-button {
+  position: relative;
+  width: 42px;
+  min-height: 35px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  touch-action: manipulation;
+  color: var(--text-soft);
+  background: var(--surface-soft);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 9px;
+  font-weight: 720;
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.08);
+  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.agent-key-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-strong));
+  transform: translateY(-1px);
+}
+
+.agent-key-button:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+}
+
+.agent-key-button.is-confirm {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+}
+
+.agent-key-button.is-cancel {
+  color: color-mix(in srgb, var(--red) 76%, var(--text-soft));
+}
+
+.agent-key-button.is-pending {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.agent-key-button.is-pending .agent-keycap {
+  opacity: 0;
+}
+
+.agent-key-button.is-pending::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  content: "";
+  margin: -6px 0 0 -6px;
+  border: 2px solid color-mix(in srgb, var(--accent-strong) 35%, transparent);
+  border-top-color: var(--accent-strong);
+  border-radius: 50%;
+  animation: terminal-spin 700ms linear infinite;
+}
+
+.agent-keycap {
+  display: inline-grid;
+  place-items: center;
+  color: currentColor;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 15px;
+  line-height: 1;
+  transition: opacity 120ms ease;
+}
+
+.agent-keycap-wide {
+  font-size: 10px;
+  font-weight: 780;
+}
+
 .composer-card {
   padding: 15px 16px 14px;
 }
@@ -1277,33 +1396,8 @@ input::placeholder {
   font-size: 9px;
 }
 
-.prompt-shortcuts {
-  display: flex;
-  gap: 6px;
-  margin: 10px 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.prompt-shortcuts::-webkit-scrollbar {
-  display: none;
-}
-
-.prompt-shortcuts button {
-  flex: 0 0 auto;
-  padding: 5px 9px;
-  color: var(--muted);
-  background: var(--surface-soft);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 9px;
-  font-weight: 650;
-}
-
-.prompt-shortcuts button:hover {
-  color: var(--accent-strong);
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+.composer-card form {
+  margin-top: 9px;
 }
 
 textarea,
@@ -1379,29 +1473,7 @@ kbd {
 
 @media (min-width: 901px) {
   .composer-card {
-    display: grid;
-    grid-template-columns: minmax(190px, 0.35fr) minmax(0, 1fr);
-    grid-template-areas:
-      "heading shortcuts"
-      "form form";
-    column-gap: 16px;
-    row-gap: 9px;
     padding: 12px 14px;
-  }
-
-  .composer-heading {
-    grid-area: heading;
-  }
-
-  .prompt-shortcuts {
-    grid-area: shortcuts;
-    align-self: center;
-    justify-content: flex-end;
-    margin: 0;
-  }
-
-  .composer-card form {
-    grid-area: form;
   }
 
   #prompt-input {
@@ -2861,47 +2933,12 @@ dialog {
 .terminal-utilities {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: flex-end;
   min-width: 0;
-  padding: 9px 11px;
+  padding: 7px 11px;
   background: var(--surface-soft);
   border: 1px solid var(--border);
   border-radius: 12px;
-}
-
-.terminal-quick-commands {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.terminal-quick-commands::-webkit-scrollbar {
-  display: none;
-}
-
-.terminal-quick-commands > span {
-  flex: 0 0 auto;
-  margin-right: 3px;
-  color: var(--muted);
-  font-size: 8px;
-  font-weight: 750;
-  text-transform: uppercase;
-}
-
-.terminal-quick-commands button {
-  height: 26px;
-  flex: 0 0 auto;
-  padding: 0 8px;
-  color: var(--text-soft);
-  background: var(--surface-soft);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
 }
 
 .terminal-utilities > p {
@@ -3913,8 +3950,13 @@ dialog {
   }
 
   .detail-console {
+    grid-template-rows: auto minmax(330px, 1fr) auto;
     gap: 10px;
     padding: 12px 12px max(14px, env(safe-area-inset-bottom));
+  }
+
+  .detail-console.has-blocked-banner {
+    grid-template-rows: auto auto minmax(330px, 1fr) auto;
   }
 
   .mobile-back {
@@ -3967,6 +4009,11 @@ dialog {
     flex: 1;
   }
 
+  .terminal-controls .agent-key-toggle {
+    width: 36px;
+    flex: 0 0 36px;
+  }
+
   .terminal-output-fallback {
     font-size: 11px;
   }
@@ -3975,12 +4022,37 @@ dialog {
     inset: 10px 7px 11px 9px;
   }
 
-  .composer-card {
-    padding: 10px 12px;
+  .terminal-card {
+    min-height: 0;
   }
 
-  .prompt-shortcuts {
-    margin: 7px 0;
+  .agent-keybar {
+    min-height: 56px;
+    justify-content: center;
+    padding: 6px 9px;
+  }
+
+  .agent-key-buttons {
+    grid-template-columns: repeat(4, 46px);
+    gap: 8px;
+  }
+
+  .agent-key-button {
+    width: 46px;
+    min-height: 44px;
+    border-radius: 10px;
+  }
+
+  .agent-keycap {
+    font-size: 17px;
+  }
+
+  .agent-keycap-wide {
+    font-size: 10px;
+  }
+
+  .composer-card {
+    padding: 10px 12px;
   }
 
   #prompt-input {
@@ -4232,12 +4304,8 @@ dialog {
     display: none;
   }
 
-  .terminal-utilities > p {
+  .terminal-utilities {
     display: none;
-  }
-
-  .terminal-quick-commands {
-    width: 100%;
   }
 
   .ssh-host-shell {
@@ -4365,15 +4433,6 @@ dialog {
 
   .composer-card {
     padding: 10px 11px;
-  }
-
-  .prompt-shortcuts {
-    gap: 5px;
-    margin: 6px 0;
-  }
-
-  .prompt-shortcuts button {
-    padding: 4px 8px;
   }
 
   #prompt-input {
@@ -4533,10 +4592,6 @@ dialog {
     display: none;
   }
 
-  .terminal-utilities {
-    padding: 7px 8px;
-  }
-
   .ssh-host-fields {
     grid-template-columns: 1fr;
     padding-right: 16px;
@@ -4589,10 +4644,6 @@ dialog {
 
   .terminal-controls select {
     width: 55px;
-  }
-
-  .prompt-shortcuts {
-    margin-top: 8px;
   }
 
   .file-kind-badge {

@@ -2,6 +2,13 @@
 
 const byId = (id) => document.getElementById(id);
 const isDesktop = () => window.matchMedia("(min-width: 901px)").matches;
+const AGENT_INTERACTION_KEYS = Object.freeze({
+  Up: { keycap: "↑", label: "上移" },
+  Down: { keycap: "↓", label: "下移" },
+  Enter: { keycap: "↵", label: "Enter" },
+  Escape: { keycap: "Esc", label: "返回" },
+});
+const AGENT_KEY_ACK_TIMEOUT_MS = 8_000;
 
 const elements = {
   connectionDot: byId("connection-dot"),
@@ -32,6 +39,10 @@ const elements = {
   approvalActions: byId("approval-actions"),
   agentOutputTerminal: byId("agent-output-terminal"),
   terminalOutputFallback: byId("terminal-output-fallback"),
+  agentKeyToggle: byId("agent-key-toggle"),
+  agentKeybar: byId("agent-keybar"),
+  agentKeyStatus: byId("agent-key-status"),
+  agentKeyButtons: [...document.querySelectorAll("[data-agent-key]")],
   lastUpdated: byId("last-updated"),
   lineCount: byId("line-count"),
   autoRefreshButton: byId("auto-refresh-button"),
@@ -273,6 +284,14 @@ const state = {
   pendingPromptText: "",
   pendingPromptMode: "",
   pendingApprovalLabel: "",
+  agentKeyPanelOpen: false,
+  agentKeyPending: null,
+  agentKeyPendingTimer: null,
+  agentKeyFeedback: "",
+  agentKeyFeedbackType: "",
+  agentKeyFeedbackPane: "",
+  agentKeyFeedbackTimer: null,
+  agentKeySequence: 0,
   interruptPending: false,
   startPending: false,
   pushSubscription: null,
@@ -457,6 +476,7 @@ function connect() {
   socket.addEventListener("close", () => {
     if (state.ws !== socket) return;
     const operationWasPending = state.promptPending
+      || Boolean(state.agentKeyPending)
       || state.interruptPending
       || state.startPending
       || state.directoryPending
@@ -468,6 +488,13 @@ function connect() {
     state.promptPending = false;
     state.pendingPromptText = "";
     state.pendingPromptMode = "";
+    window.clearTimeout(state.agentKeyPendingTimer);
+    state.agentKeyPendingTimer = null;
+    window.clearTimeout(state.agentKeyFeedbackTimer);
+    state.agentKeyPending = null;
+    state.agentKeyFeedback = "";
+    state.agentKeyFeedbackType = "";
+    state.agentKeyFeedbackPane = "";
     state.interruptPending = false;
     state.startPending = false;
     state.directoryPending = false;
@@ -579,7 +606,7 @@ function handleMessage(message) {
       renderPushStatus();
       break;
     case "error":
-      handleRelayError(message.message || "Relay 请求失败");
+      handleRelayError(message);
       break;
     default:
       break;
@@ -613,6 +640,7 @@ function replaceAgentSnapshot(agents) {
 
   if (state.activePane && !activeAgent()) {
     state.activePane = null;
+    state.agentKeyPanelOpen = false;
     state.userScrolledUp = false;
     document.body.classList.remove("agent-open");
     updatePaneUrl("");
@@ -2911,7 +2939,38 @@ async function pasteIntoTerminal() {
 }
 
 function handleCommandResult(message) {
-  if (!message.ok) return;
+  if (message.ok === false) return;
+  const pendingAgentKey = state.agentKeyPending;
+  if (
+    message.command === "send_keys"
+    && pendingAgentKey
+    && (
+      message.request_id === pendingAgentKey.requestId
+      // Relays installed before correlated key acknowledgements omit the ID.
+      // Only one Web Agent send_keys operation can be pending, so accepting
+      // that legacy acknowledgement cannot collide with Interrupt.
+      || !message.request_id
+    )
+  ) {
+    const key = AGENT_INTERACTION_KEYS[pendingAgentKey.key];
+    window.clearTimeout(state.agentKeyPendingTimer);
+    state.agentKeyPendingTimer = null;
+    state.agentKeyPending = null;
+    setAgentKeyFeedback(
+      `${key.keycap} ${key.label} 已发送`,
+      "success",
+      pendingAgentKey.paneId,
+    );
+    refreshActionAvailability();
+    showToast(
+      "交互按键已发送",
+      `${key.label} 已送达 ${pendingAgentKey.agentLabel}。`,
+      "success",
+    );
+    window.setTimeout(() => {
+      if (state.activePane === pendingAgentKey.paneId) refreshOutput();
+    }, 220);
+  }
   const promptResponse = message.command === "respond" && state.promptPending;
   if (
     message.command === "agent_prompt"
@@ -2957,9 +3016,9 @@ function handleCommandResult(message) {
     showToast("选择已提交", "Agent 将继续处理。", "success");
     window.setTimeout(refreshOutput, 350);
   }
-  if (message.command === "send_keys" && state.interruptPending) {
+  if (message.command === "send_keys" && state.interruptPending && !message.request_id) {
     state.interruptPending = false;
-    renderInterruptState();
+    refreshActionAvailability();
     if (elements.interruptDialog.open) elements.interruptDialog.close();
     showToast("Interrupt 已发送", "已向当前 Agent 发送 Ctrl+C。", "success");
     window.setTimeout(refreshOutput, 350);
@@ -2983,10 +3042,36 @@ function handleCommandResult(message) {
   }
 }
 
-function handleRelayError(message) {
+function handleRelayError(payload) {
+  const message = typeof payload === "string"
+    ? payload
+    : (payload?.message || "Relay 请求失败");
+  if (
+    state.agentKeyPending
+    && (
+      payload?.request_id === state.agentKeyPending.requestId
+      || !payload?.request_id
+    )
+  ) {
+    const pendingPaneId = state.agentKeyPending.paneId;
+    window.clearTimeout(state.agentKeyPendingTimer);
+    state.agentKeyPendingTimer = null;
+    state.agentKeyPending = null;
+    setAgentKeyFeedback("发送失败，请重试", "error", pendingPaneId);
+    refreshActionAvailability();
+    showToast("交互按键发送失败", message, "error");
+    return;
+  }
   state.promptPending = false;
   state.pendingPromptMode = "";
   state.pendingApprovalLabel = "";
+  window.clearTimeout(state.agentKeyPendingTimer);
+  state.agentKeyPendingTimer = null;
+  window.clearTimeout(state.agentKeyFeedbackTimer);
+  state.agentKeyPending = null;
+  state.agentKeyFeedback = "";
+  state.agentKeyFeedbackType = "";
+  state.agentKeyFeedbackPane = "";
   state.interruptPending = false;
   state.startPending = false;
   state.directoryPending = false;
@@ -3117,6 +3202,7 @@ function selectInitialAgentIfNeeded() {
 function selectAgent(paneId, updateHistory = true, markSeen = false) {
   const shouldMarkSeen = markSeen
     && normalizedStatus(state.agents.find((agent) => agent.pane_id === paneId)) === "done";
+  if (state.activePane !== paneId) state.agentKeyPanelOpen = false;
   state.activePane = paneId;
   state.userScrolledUp = false;
   document.body.classList.add("agent-open");
@@ -3130,6 +3216,7 @@ function selectAgent(paneId, updateHistory = true, markSeen = false) {
 
 function clearAgentSelection() {
   state.activePane = null;
+  state.agentKeyPanelOpen = false;
   document.body.classList.remove("agent-open");
   updatePaneUrl("");
   renderAll();
@@ -3164,6 +3251,7 @@ function renderDetail() {
   elements.detailMeta.textContent = `${agent.agent || "agent"}${host} · ${agent.cwd || agent.pane_id}`;
   renderBlockedBanner(agent);
   renderOutput();
+  renderAgentKeyControls();
   renderPromptState();
   renderInterruptState();
 }
@@ -3374,15 +3462,136 @@ function submitPrompt(mode = "send") {
 }
 
 function renderInterruptState() {
-  elements.confirmInterruptButton.disabled = state.interruptPending || !socketReady();
+  elements.confirmInterruptButton.disabled = state.interruptPending
+    || Boolean(state.agentKeyPending)
+    || !socketReady();
   elements.confirmInterruptButton.textContent = state.interruptPending ? "正在发送…" : "确认 Interrupt";
 }
 
 function confirmInterrupt() {
-  if (!state.activePane || state.interruptPending) return;
+  if (!state.activePane || state.interruptPending || state.agentKeyPending) return;
   if (!send({ type: "send_keys", pane_id: state.activePane, keys: ["C-c"] })) return;
   state.interruptPending = true;
   renderInterruptState();
+  renderAgentKeyControls();
+}
+
+function setAgentKeyFeedback(message, type = "", paneId = state.activePane) {
+  window.clearTimeout(state.agentKeyFeedbackTimer);
+  state.agentKeyFeedback = message;
+  state.agentKeyFeedbackType = type;
+  state.agentKeyFeedbackPane = message ? paneId : "";
+  renderAgentKeyControls();
+  if (!message) return;
+  state.agentKeyFeedbackTimer = window.setTimeout(() => {
+    state.agentKeyFeedback = "";
+    state.agentKeyFeedbackType = "";
+    state.agentKeyFeedbackPane = "";
+    renderAgentKeyControls();
+  }, 2200);
+}
+
+function setAgentKeyPanelOpen(open) {
+  state.agentKeyPanelOpen = Boolean(open && activeAgent());
+  if (state.agentKeyPanelOpen) elements.promptInput.blur();
+  renderAgentKeyControls();
+  if (state.agentKeyPanelOpen && isDesktop()) {
+    window.requestAnimationFrame(() => {
+      elements.agentKeyButtons[0]?.focus({ preventScroll: true });
+    });
+  }
+}
+
+function handleAgentKeyTimeout(requestId) {
+  const pending = state.agentKeyPending;
+  if (!pending || pending.requestId !== requestId) return;
+  state.agentKeyPending = null;
+  state.agentKeyPendingTimer = null;
+  setAgentKeyFeedback("未收到 Relay 确认", "error", pending.paneId);
+  refreshActionAvailability();
+  showToast(
+    "未收到按键确认",
+    "按键可能已经送达。已解除按钮锁定，请先查看 Agent 输出，再决定是否重试。",
+    "error",
+  );
+  if (state.activePane === pending.paneId) refreshOutput();
+}
+
+function renderAgentKeyControls() {
+  const agent = activeAgent();
+  const pending = state.agentKeyPending;
+  const connected = socketReady();
+  const enabled = Boolean(agent) && connected && !pending && !state.interruptPending;
+  const panelOpen = Boolean(agent) && state.agentKeyPanelOpen;
+  let status = panelOpen ? "Agent 交互按键已展开" : "Agent 交互按键已收起";
+  let statusType = "";
+
+  if (!connected) status = "Relay 未连接，暂时无法发送按键";
+  else if (pending) {
+    const key = AGENT_INTERACTION_KEYS[pending.key];
+    status = pending.paneId === state.activePane
+      ? `正在发送 ${key.keycap} ${key.label}…`
+      : `正在向 ${pending.agentLabel} 发送按键…`;
+  } else if (state.interruptPending) status = "正在发送 Interrupt…";
+  else if (state.agentKeyFeedback && state.agentKeyFeedbackPane === state.activePane) {
+    status = state.agentKeyFeedback;
+    statusType = state.agentKeyFeedbackType;
+  }
+
+  elements.agentKeybar.hidden = !panelOpen;
+  elements.agentKeybar.setAttribute("aria-busy", String(Boolean(pending)));
+  elements.agentKeyToggle.disabled = !agent;
+  elements.agentKeyToggle.classList.toggle("is-open", panelOpen);
+  elements.agentKeyToggle.classList.toggle("is-pending", Boolean(pending));
+  elements.agentKeyToggle.setAttribute("aria-expanded", String(panelOpen));
+  elements.agentKeyToggle.setAttribute(
+    "aria-label",
+    panelOpen ? "收起 Agent 交互按键" : "显示 Agent 交互按键",
+  );
+  elements.agentKeyToggle.title = panelOpen ? "收起交互按键" : "交互按键";
+  elements.agentKeyStatus.textContent = status;
+  elements.agentKeyStatus.classList.toggle("is-success", statusType === "success");
+  elements.agentKeyStatus.classList.toggle("is-error", statusType === "error");
+  for (const button of elements.agentKeyButtons) {
+    const isPending = pending?.key === button.dataset.agentKey;
+    button.disabled = !enabled;
+    button.classList.toggle("is-pending", isPending);
+  }
+}
+
+function sendAgentInteractionKey(keyName) {
+  const key = AGENT_INTERACTION_KEYS[keyName];
+  const agent = activeAgent();
+  if (!key || !agent || state.agentKeyPending || state.interruptPending) return;
+
+  // A button tap should close the Android soft keyboard so the Agent output
+  // remains visible while navigating a terminal prompt.
+  elements.promptInput.blur();
+  state.agentKeySequence += 1;
+  const requestId = `agent-key-${Date.now().toString(36)}-${state.agentKeySequence}`;
+  if (!send({
+    type: "send_keys",
+    pane_id: agent.pane_id,
+    keys: [keyName],
+    request_id: requestId,
+  })) return;
+
+  window.clearTimeout(state.agentKeyFeedbackTimer);
+  state.agentKeyFeedback = "";
+  state.agentKeyFeedbackType = "";
+  state.agentKeyFeedbackPane = "";
+  state.agentKeyPending = {
+    requestId,
+    key: keyName,
+    paneId: agent.pane_id,
+    agentLabel: agentLabel(agent),
+  };
+  window.clearTimeout(state.agentKeyPendingTimer);
+  state.agentKeyPendingTimer = window.setTimeout(
+    () => handleAgentKeyTimeout(requestId),
+    AGENT_KEY_ACK_TIMEOUT_MS,
+  );
+  refreshActionAvailability();
 }
 
 async function copyOutput() {
@@ -4064,7 +4273,9 @@ function refreshActionAvailability() {
   elements.emptyNewAgent.disabled = !connected;
   elements.refreshOutputButton.disabled = !connected || !state.activePane;
   elements.copyOutputButton.disabled = !state.activePane;
-  elements.interruptButton.disabled = !connected || !state.activePane;
+  elements.interruptButton.disabled = !connected
+    || !state.activePane
+    || Boolean(state.agentKeyPending);
   elements.startAgentButton.disabled = !connected
     || !agentSourceUsable(selectedSource)
     || !state.selectedDirectory
@@ -4076,6 +4287,7 @@ function refreshActionAvailability() {
     || state.fileListingPending
     || !fileSourceUsable(selectedFileSource);
   renderPromptState();
+  renderAgentKeyControls();
   renderInterruptState();
   renderPushStatus();
   renderSshProfileForm();
@@ -4234,6 +4446,12 @@ function bindEvents() {
   });
   elements.refreshOutputButton.addEventListener("click", refreshOutput);
   elements.copyOutputButton.addEventListener("click", copyOutput);
+  elements.agentKeyToggle.addEventListener("click", () => {
+    setAgentKeyPanelOpen(!state.agentKeyPanelOpen);
+  });
+  elements.agentKeyButtons.forEach((button) => {
+    button.addEventListener("click", () => sendAgentInteractionKey(button.dataset.agentKey));
+  });
   elements.terminalCopySelectAllButton.addEventListener("click", selectAllTerminalCopyText);
   elements.terminalCopyConfirmButton.addEventListener("click", copyFromTerminalDialog);
   ["select", "keyup", "pointerup", "touchend"].forEach((eventName) => {
@@ -4268,14 +4486,6 @@ function bindEvents() {
     submitPrompt();
   });
   elements.queuePromptButton.addEventListener("click", () => submitPrompt("queue"));
-  document.querySelectorAll("[data-prompt]").forEach((button) => {
-    button.addEventListener("click", () => {
-      elements.promptInput.value = button.dataset.prompt;
-      updateCounter(elements.promptInput, elements.promptCount);
-      renderPromptState();
-      elements.promptInput.focus();
-    });
-  });
 
   elements.interruptButton.addEventListener("click", () => elements.interruptDialog.showModal());
   elements.confirmInterruptButton.addEventListener("click", confirmInterrupt);
@@ -4395,12 +4605,6 @@ function bindEvents() {
       sendTerminalShortcutText(TMUX_ACTION_SEQUENCES[action] || "");
     });
   });
-  document.querySelectorAll("[data-terminal-command]").forEach((button) => {
-    button.addEventListener("click", () => {
-      clearTerminalModifierState();
-      sendTerminalShortcutText(`${button.dataset.terminalCommand}\r`);
-    });
-  });
   elements.terminalPasteButton.addEventListener("click", pasteIntoTerminal);
   elements.sshHostForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -4420,6 +4624,21 @@ function bindEvents() {
     dialog.addEventListener("click", (event) => {
       if (event.target === dialog) dialog.close();
     });
+  });
+
+  document.addEventListener("pointerdown", (event) => {
+    if (!state.agentKeyPanelOpen) return;
+    if (
+      elements.agentKeybar.contains(event.target)
+      || elements.agentKeyToggle.contains(event.target)
+    ) return;
+    setAgentKeyPanelOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !state.agentKeyPanelOpen) return;
+    event.preventDefault();
+    setAgentKeyPanelOpen(false);
+    elements.agentKeyToggle.focus({ preventScroll: true });
   });
 
   document.addEventListener("visibilitychange", () => {

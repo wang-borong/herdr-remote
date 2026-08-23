@@ -662,6 +662,47 @@ class RelayQuestionTests(unittest.TestCase):
 
 
 class RelayCommandTests(unittest.TestCase):
+    def test_agent_navigation_keys_do_not_require_prompt_identity(self):
+        for key in ("Up", "Down", "Enter", "Escape"):
+            with self.subTest(key=key), loaded_relay() as relay:
+                pane_id = "pane-1"
+                request_id = f"request-{key.lower()}"
+                relay.known_panes.add(pane_id)
+                ws = _FakeWebSocket(
+                    [json.dumps({
+                        "type": "send_keys",
+                        "pane_id": pane_id,
+                        "keys": [key],
+                        "request_id": request_id,
+                    })],
+                    headers={"X-Herdr-Remote-Command": "1"},
+                )
+                completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+                with mock.patch.object(
+                    relay,
+                    "run_herdr_result",
+                    return_value=completed,
+                ) as run:
+                    asyncio.run(relay.handle_client(ws))
+
+                run.assert_called_once_with(
+                    "pane",
+                    "send-keys",
+                    pane_id,
+                    key,
+                    remote=None,
+                )
+                self.assertEqual(
+                    json.loads(ws.sent[-1]),
+                    {
+                        "type": "command_result",
+                        "command": "send_keys",
+                        "ok": True,
+                        "request_id": request_id,
+                    },
+                )
+
     def test_command_connection_skips_snapshot_and_correlates_ack(self):
         with loaded_relay() as relay:
             pane_id = "pane-1"
