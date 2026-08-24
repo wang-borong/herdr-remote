@@ -1380,10 +1380,9 @@ input::placeholder {
 }
 
 .composer-heading .eyebrow {
-  margin-bottom: 3px;
+  margin: 0;
 }
 
-.composer-heading h3,
 .section-title-row h3 {
   margin: 0;
   font-size: 13px;

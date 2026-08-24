@@ -110,6 +110,7 @@ WEB_JS="$DIR/web/app.js"
   grep -q "AGENT_KEY_ACK_TIMEOUT_MS" "$WEB_JS" && \
   ! grep -q 'data-prompt=' "$WEB" && \
   ! grep -q 'data-terminal-command=' "$WEB" && \
+  ! grep -q 'id="composer-title"' "$WEB" && \
   grep -q 'data-terminal-key="escape"' "$WEB" && \
   grep -q 'data-terminal-key="tab"' "$WEB" && \
   grep -q 'case "terminal_resized"' "$WEB_JS" && \

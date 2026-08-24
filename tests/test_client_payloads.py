@@ -47,6 +47,8 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertNotIn('[data-terminal-command]', source)
         self.assertNotIn(".prompt-shortcuts", styles)
         self.assertNotIn(".terminal-quick-commands", styles)
+        self.assertNotIn('<h3 id="composer-title">', html)
+        self.assertIn('<section class="composer-card" aria-label="发送 Prompt">', html)
         for key in ("escape", "tab", "left", "right"):
             self.assertIn(f'data-terminal-key="{key}"', html)
         self.assertIn('id="terminal-ctrl-button"', html)
