@@ -139,5 +139,64 @@ class AnsiTransportTests(unittest.TestCase):
                 self.assertEqual(args[fmt_idx + 1], requested_format or "text")
 
 
+class CodexSnapshotTests(unittest.TestCase):
+    BACKGROUND = "\x1b[48;2;55;64;68m"
+    RESET = "\x1b[0m"
+
+    def background_line(self, text):
+        return f"{self.BACKGROUND}{text}{self.RESET}"
+
+    def test_submitted_prompt_survives_working_frame_without_status_line(self):
+        snapshot = "\r\n".join([
+            "previous response",
+            self.background_line("› newest submitted prompt"),
+            self.background_line("  wrapped prompt line"),
+            "",
+            "",
+            self.background_line("                    "),
+            self.background_line("› Ask Codex to do anything"),
+            self.background_line("                    "),
+            "gpt-5.6-sol max · ~/repo",
+        ])
+
+        with loaded_relay() as relay:
+            compact = relay.simplify_codex_terminal_snapshot(
+                snapshot,
+                agent_status="working",
+            )
+            plain = relay.plain_terminal_output(compact)
+
+        self.assertIn("previous response", plain)
+        self.assertIn("newest submitted prompt", plain)
+        self.assertIn("wrapped prompt line", plain)
+        self.assertIn("Working", plain)
+        self.assertNotIn("Ask Codex to do anything", plain)
+
+    def test_active_editor_is_removed_when_working_status_is_visible(self):
+        snapshot = "\r\n".join([
+            "previous response",
+            self.background_line("› newest submitted prompt"),
+            "",
+            "• Working (2s • esc to interrupt)",
+            "",
+            self.background_line("                    "),
+            self.background_line("› Ask Codex to do anything"),
+            self.background_line("                    "),
+            "gpt-5.6-sol max · ~/repo",
+        ])
+
+        with loaded_relay() as relay:
+            compact = relay.simplify_codex_terminal_snapshot(
+                snapshot,
+                agent_status="working",
+            )
+            plain = relay.plain_terminal_output(compact)
+
+        self.assertIn("newest submitted prompt", plain)
+        self.assertIn("Working", plain)
+        self.assertNotIn("Working (2s", plain)
+        self.assertNotIn("Ask Codex to do anything", plain)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -528,7 +528,10 @@ def simplify_codex_terminal_snapshot(content: str, agent_status: str = "") -> st
     input_start = model_index
     while input_start > 0:
         previous = input_start - 1
-        if not plain_lines[previous] or ANSI_BACKGROUND_RE.search(lines[previous]):
+        # The submitted prompt and the live editor use the same background.
+        # An unstyled blank line is their boundary, even on spinner frames
+        # where Codex temporarily omits the Working status line.
+        if ANSI_BACKGROUND_RE.search(lines[previous]):
             input_start -= 1
             continue
         break
