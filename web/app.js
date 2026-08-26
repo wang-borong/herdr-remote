@@ -234,21 +234,19 @@ const MARKDOWN_CODE_HIGHLIGHT_MAX_CHARACTERS = 160_000;
 const WORKSPACE_FILE_REQUEST_TIMEOUT_MS = 30_000;
 const WORKSPACE_FILE_FEATURE_UNAVAILABLE = "Relay 后台尚未加载 Files 协议。请重启 Herdr Relay 服务；仅刷新网页不会更新后台进程。";
 const HTML_PREVIEW_CSP = "default-src 'none'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'";
+// Use a stable light document canvas. Legacy HTML commonly hardcodes white table or
+// panel backgrounds while inheriting the document text color, which becomes
+// unreadable if the preview follows a dark system color scheme.
 const HTML_PREVIEW_BASE_STYLE = `
-  :root { color-scheme: light dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   html { min-height: 100%; color: #172033; background: #ffffff; }
-  body { max-width: 1080px; min-height: 100%; margin: 0 auto; padding: 32px 38px 72px; line-height: 1.65; overflow-wrap: anywhere; }
+  body { max-width: 1080px; min-height: 100%; margin: 0 auto; padding: 32px 38px 72px; color: #172033; background: #ffffff; line-height: 1.65; overflow-wrap: anywhere; }
   img, picture, video, canvas, svg { max-width: 100%; height: auto; }
   pre { max-width: 100%; padding: 14px 16px; overflow: auto; background: #f4f6fa; border-radius: 10px; }
   code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
   table { max-width: 100%; border-collapse: collapse; }
   th, td { padding: 7px 10px; border: 1px solid #ccd2df; }
   a:not([href]) { color: #687386; text-decoration: line-through; cursor: not-allowed; }
-  @media (prefers-color-scheme: dark) {
-    html { color: #d7def0; background: #111522; }
-    pre { background: #090d16; }
-    th, td { border-color: #3a4357; }
-  }
   @media (max-width: 700px) { body { padding: 22px 18px 56px; } }
 `;
 const nativeAgentSelectionControllers = new WeakMap();

@@ -91,12 +91,15 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn("function renderHtmlWorkspaceFile(file)", source)
         self.assertIn("WHOLE_DOCUMENT: true", source)
         self.assertIn('FORBID_ATTR: ["autofocus", "formaction", "ping", "poster", "srcset"]', source)
+        self.assertIn(":root { color-scheme: light;", source)
+        self.assertIn("padding: 32px 38px 72px; color: #172033; background: #ffffff;", source)
+        self.assertNotIn("@media (prefers-color-scheme: dark)", source)
         self.assertIn('policy.setAttribute("http-equiv", "Content-Security-Policy")', source)
         self.assertIn("HTML_PREVIEW_CSP", source)
         self.assertIn('"script", "select", "svg"', source)
         self.assertIn("state.fileHtmlSourceMode = !state.fileHtmlSourceMode", source)
         self.assertIn("elements.fileHtmlPreview.srcdoc", source)
-        self.assertIn(".html-preview", styles)
+        self.assertIn(".html-preview {\n  color-scheme: light;", styles)
         self.assertIn(".file-kind-badge.is-html", styles)
 
     def test_swift_models_decode_omp_question_state(self):
