@@ -4184,6 +4184,49 @@ function renderCodeWorkspaceFile(file) {
   }
 }
 
+function prioritizeHtmlPreviewMainContent(previewDocument) {
+  const body = previewDocument.body;
+  const primary = body?.querySelector("main, [role='main']");
+  if (!body || !primary || primary.closest("[hidden], [aria-hidden='true']")) return;
+  if (primary.textContent.trim().length < 160) return;
+
+  let section = primary;
+  while (section.parentElement && section.parentElement !== body) {
+    section = section.parentElement;
+  }
+  if (section.parentElement !== body || section === body.firstElementChild) return;
+
+  section.setAttribute("data-herdr-preview-main", "");
+  body.prepend(section);
+}
+
+function removeHtmlPreviewExternalImage(image, body) {
+  let emptyAncestor = image.parentElement;
+  image.remove();
+  while (
+    emptyAncestor
+    && emptyAncestor !== body
+    && !emptyAncestor.textContent.trim()
+    && emptyAncestor.children.length === 0
+  ) {
+    const parent = emptyAncestor.parentElement;
+    emptyAncestor.remove();
+    emptyAncestor = parent;
+  }
+}
+
+function replaceHtmlPreviewDocument(srcdoc) {
+  // Chromium can leave a sandboxed srcdoc document without a layout tree after
+  // the iframe was hidden for source view and then reused. Replacing the frame
+  // creates a fresh browsing context and makes source/render toggles reliable.
+  const preview = elements.fileHtmlPreview.cloneNode(false);
+  preview.removeAttribute("srcdoc");
+  preview.hidden = false;
+  preview.srcdoc = srcdoc;
+  elements.fileHtmlPreview.replaceWith(preview);
+  elements.fileHtmlPreview = preview;
+}
+
 function renderHtmlWorkspaceFile(file) {
   const sanitizer = window.DOMPurify?.sanitize;
   if (typeof sanitizer !== "function" || typeof DOMParser !== "function") {
@@ -4216,13 +4259,19 @@ function renderHtmlWorkspaceFile(file) {
       const source = node.getAttribute("src") || "";
       const embeddedImage = node.tagName === "IMG"
         && /^data:image\/(?:gif|jpeg|png|webp);base64,/i.test(source);
-      if (!embeddedImage) node.removeAttribute("src");
+      if (embeddedImage) return;
+      if (node.tagName === "IMG") {
+        removeHtmlPreviewExternalImage(node, previewDocument.body);
+        return;
+      }
+      node.removeAttribute("src");
     });
     previewDocument.querySelectorAll("[action], [formaction], [ping], [poster], [srcset]").forEach((node) => {
       for (const attribute of ["action", "formaction", "ping", "poster", "srcset"]) {
         node.removeAttribute(attribute);
       }
     });
+    prioritizeHtmlPreviewMainContent(previewDocument);
 
     const charset = previewDocument.createElement("meta");
     charset.setAttribute("charset", "utf-8");
@@ -4235,8 +4284,7 @@ function renderHtmlWorkspaceFile(file) {
     previewDocument.head.prepend(policy);
     previewDocument.head.prepend(charset);
 
-    elements.fileHtmlPreview.srcdoc = `<!doctype html>\n${previewDocument.documentElement.outerHTML}`;
-    elements.fileHtmlPreview.hidden = false;
+    replaceHtmlPreviewDocument(`<!doctype html>\n${previewDocument.documentElement.outerHTML}`);
   } catch (_) {
     elements.fileReaderMeta.textContent += " · 原文模式";
     renderCodeWorkspaceFile({ ...file, language: file.language || "xml" });
