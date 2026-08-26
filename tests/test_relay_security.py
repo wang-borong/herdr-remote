@@ -1255,7 +1255,7 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(ValueError, "outside the configured roots"):
                     relay.resolve_workspace_path(str(outside))
 
-    def test_workspace_file_browser_reads_code_and_markdown_safely(self):
+    def test_workspace_file_browser_reads_code_markdown_and_html_safely(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "Workspace"
             project = root / "project"
@@ -1263,6 +1263,10 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             project.mkdir(parents=True)
             (project / "README.md").write_text("# Project\n\nHello **world**.\n")
             (project / "app.py").write_text("print('hello')\n")
+            (project / "guide.html").write_text(
+                "<!doctype html><title>Guide</title><h1>Reference</h1>"
+                "<script>window.top.location = 'https://example.com'</script>\n"
+            )
             (project / "image.bin").write_bytes(b"\x00\x01\x02")
             (project / ".env").write_text("SECRET=value\n")
             hidden = project / ".private"
@@ -1284,17 +1288,24 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(entries["README.md"]["previewable"])
                 self.assertEqual(entries["README.md"]["preview_kind"], "markdown")
                 self.assertEqual(entries["app.py"]["language"], "python")
+                self.assertTrue(entries["guide.html"]["previewable"])
+                self.assertEqual(entries["guide.html"]["preview_kind"], "html")
+                self.assertEqual(entries["guide.html"]["language"], "xml")
                 self.assertFalse(entries["image.bin"]["previewable"])
                 self.assertTrue(entries["image.bin"]["downloadable"])
 
                 markdown = relay.workspace_file_read(str(project / "README.md"))
                 code = relay.workspace_file_read(str(project / "app.py"))
+                html = relay.workspace_file_read(str(project / "guide.html"))
                 self.assertEqual(markdown["kind"], "markdown")
                 self.assertIn("Hello **world**", markdown["content"])
                 self.assertEqual(code["language"], "python")
                 self.assertEqual(code["line_count"], 2)
+                self.assertEqual(html["kind"], "html")
+                self.assertEqual(html["language"], "xml")
+                self.assertIn("<h1>Reference</h1>", html["content"])
 
-                with self.assertRaisesRegex(ValueError, "limited to code and Markdown"):
+                with self.assertRaisesRegex(ValueError, "limited to code, Markdown, and HTML"):
                     relay.workspace_file_read(str(project / "image.bin"))
                 with self.assertRaisesRegex(ValueError, "Hidden workspace"):
                     relay.workspace_file_read(str(project / ".private" / "notes.md"))

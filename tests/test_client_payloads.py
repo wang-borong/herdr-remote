@@ -77,6 +77,28 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn('normalizedStatus(merged) !== "blocked"', source)
         self.assertIn('promptId: ""', source)
 
+    def test_web_html_preview_is_sandboxed_and_keeps_source_mode(self):
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "web" / "app.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="file-html-preview"', html)
+        self.assertIn('title="HTML 安全预览" sandbox referrerpolicy="no-referrer"', html)
+        self.assertIn('id="file-html-view-button"', html)
+        self.assertNotIn("allow-scripts", html)
+        self.assertNotIn("allow-forms", html)
+        self.assertNotIn("allow-same-origin", html)
+        self.assertIn("function renderHtmlWorkspaceFile(file)", source)
+        self.assertIn("WHOLE_DOCUMENT: true", source)
+        self.assertIn('FORBID_ATTR: ["autofocus", "formaction", "ping", "poster", "srcset"]', source)
+        self.assertIn('policy.setAttribute("http-equiv", "Content-Security-Policy")', source)
+        self.assertIn("HTML_PREVIEW_CSP", source)
+        self.assertIn('"script", "select", "svg"', source)
+        self.assertIn("state.fileHtmlSourceMode = !state.fileHtmlSourceMode", source)
+        self.assertIn("elements.fileHtmlPreview.srcdoc", source)
+        self.assertIn(".html-preview", styles)
+        self.assertIn(".file-kind-badge.is-html", styles)
+
     def test_swift_models_decode_omp_question_state(self):
         for relative_path in (
             "herdi-ios/Sources/Models/Agent.swift",

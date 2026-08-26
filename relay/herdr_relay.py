@@ -653,6 +653,7 @@ def display_workspace_path(path: Path) -> str:
 
 
 WORKSPACE_MARKDOWN_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
+WORKSPACE_HTML_SUFFIXES = {".htm", ".html"}
 WORKSPACE_CODE_LANGUAGES = {
     ".bash": "bash",
     ".bat": "dos",
@@ -739,6 +740,8 @@ def safe_workspace_entry_name(name: str) -> bool:
 def workspace_file_preview_info(name: str) -> dict | None:
     normalized = str(name or "").casefold()
     suffix = Path(normalized).suffix
+    if suffix in WORKSPACE_HTML_SUFFIXES:
+        return {"kind": "html", "language": "xml"}
     if suffix in WORKSPACE_MARKDOWN_SUFFIXES:
         return {"kind": "markdown", "language": "markdown"}
     language = WORKSPACE_CODE_FILENAMES.get(normalized) or WORKSPACE_CODE_LANGUAGES.get(suffix)
@@ -821,7 +824,7 @@ def workspace_file_entry(path: Path, *, kind: str, size: int = 0) -> dict:
     if preview and size > WORKSPACE_FILE_PREVIEW_MAX_BYTES:
         entry["preview_reason"] = "File is too large to preview"
     elif not preview:
-        entry["preview_reason"] = "Preview is limited to code and Markdown files"
+        entry["preview_reason"] = "Preview is limited to code, Markdown, and HTML files"
     if size > WORKSPACE_FILE_DOWNLOAD_MAX_BYTES:
         entry["download_reason"] = "File is too large to download"
     return entry
@@ -918,7 +921,7 @@ def workspace_file_read(value: str) -> dict:
     metadata = workspace_file_metadata(value)
     preview = workspace_file_preview_info(metadata["name"])
     if not preview:
-        raise ValueError("Preview is limited to code and Markdown files")
+        raise ValueError("Preview is limited to code, Markdown, and HTML files")
     if metadata["size"] > WORKSPACE_FILE_PREVIEW_MAX_BYTES:
         raise ValueError("Workspace file is too large to preview")
     raw = read_workspace_file_bytes(
@@ -1528,7 +1531,7 @@ def remote_workspace_file_listing(source: dict, value: str | None = None) -> dic
         if preview and size > WORKSPACE_FILE_PREVIEW_MAX_BYTES:
             entry["preview_reason"] = "File is too large to preview"
         elif not preview:
-            entry["preview_reason"] = "Preview is limited to code and Markdown files"
+            entry["preview_reason"] = "Preview is limited to code, Markdown, and HTML files"
         if size > WORKSPACE_FILE_DOWNLOAD_MAX_BYTES:
             entry["download_reason"] = "File is too large to download"
         entries.append(entry)
@@ -1549,7 +1552,7 @@ def remote_workspace_file_metadata(source: dict, value: str) -> dict:
 def remote_workspace_file_read(source: dict, value: str) -> dict:
     preview = workspace_file_preview_info(Path(value).name)
     if not preview:
-        raise ValueError("Preview is limited to code and Markdown files")
+        raise ValueError("Preview is limited to code, Markdown, and HTML files")
     response = remote_workspace_file_request(
         source,
         "read",

@@ -155,12 +155,14 @@ const elements = {
   fileTitle: byId("file-title"),
   fileKindBadge: byId("file-kind-badge"),
   fileMeta: byId("file-meta"),
+  fileHtmlViewButton: byId("file-html-view-button"),
   copyFileButton: byId("copy-file-button"),
   downloadFileButton: byId("download-file-button"),
   fileReaderTitle: byId("file-reader-title"),
   fileReaderMeta: byId("file-reader-meta"),
   fileReaderStatus: byId("file-reader-status"),
   fileMarkdownContent: byId("file-markdown-content"),
+  fileHtmlPreview: byId("file-html-preview"),
   fileCodePreview: byId("file-code-preview"),
   fileCodeContent: byId("file-code-content"),
   fileDownloadOnly: byId("file-download-only"),
@@ -231,6 +233,24 @@ const FILE_HIGHLIGHT_MAX_CHARACTERS = 400_000;
 const MARKDOWN_CODE_HIGHLIGHT_MAX_CHARACTERS = 160_000;
 const WORKSPACE_FILE_REQUEST_TIMEOUT_MS = 30_000;
 const WORKSPACE_FILE_FEATURE_UNAVAILABLE = "Relay 后台尚未加载 Files 协议。请重启 Herdr Relay 服务；仅刷新网页不会更新后台进程。";
+const HTML_PREVIEW_CSP = "default-src 'none'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'";
+const HTML_PREVIEW_BASE_STYLE = `
+  :root { color-scheme: light dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  html { min-height: 100%; color: #172033; background: #ffffff; }
+  body { max-width: 1080px; min-height: 100%; margin: 0 auto; padding: 32px 38px 72px; line-height: 1.65; overflow-wrap: anywhere; }
+  img, picture, video, canvas, svg { max-width: 100%; height: auto; }
+  pre { max-width: 100%; padding: 14px 16px; overflow: auto; background: #f4f6fa; border-radius: 10px; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  table { max-width: 100%; border-collapse: collapse; }
+  th, td { padding: 7px 10px; border: 1px solid #ccd2df; }
+  a:not([href]) { color: #687386; text-decoration: line-through; cursor: not-allowed; }
+  @media (prefers-color-scheme: dark) {
+    html { color: #d7def0; background: #111522; }
+    pre { background: #090d16; }
+    th, td { border-color: #3a4357; }
+  }
+  @media (max-width: 700px) { body { padding: 22px 18px 56px; } }
+`;
 const nativeAgentSelectionControllers = new WeakMap();
 const terminalFontReady = document.fonts && typeof document.fonts.load === "function"
   ? document.fonts.load('400 13px "Herdr FiraCode Nerd"').catch(() => [])
@@ -280,6 +300,7 @@ const state = {
   fileReaderRenderedPath: "",
   fileReaderRenderedSignature: "",
   fileReaderRenderedContent: null,
+  fileHtmlSourceMode: false,
   promptPending: false,
   pendingPromptText: "",
   pendingPromptMode: "",
@@ -3880,6 +3901,7 @@ function createWorkspaceFileEntry(entry) {
   icon.setAttribute("aria-hidden", "true");
   if (directory) icon.textContent = entry.is_repo ? "⌘" : "▱";
   else if (entry.preview_kind === "markdown") icon.textContent = "M↓";
+  else if (entry.preview_kind === "html") icon.textContent = "<>";
   else if (entry.previewable) icon.textContent = "{ }";
   else icon.textContent = "↓";
 
@@ -3893,7 +3915,7 @@ function createWorkspaceFileEntry(entry) {
   } else {
     const preview = entry.preview_kind === "markdown"
       ? "Markdown"
-      : (entry.language ? entry.language : "仅下载");
+      : (entry.preview_kind === "html" ? "HTML" : (entry.language ? entry.language : "仅下载"));
     meta.textContent = `${formatFileSize(entry.size)} · ${preview}`;
   }
   main.append(name, meta);
@@ -3922,10 +3944,12 @@ function resetWorkspaceFileReaderRender() {
   state.fileReaderRenderedPath = "";
   state.fileReaderRenderedSignature = "";
   state.fileReaderRenderedContent = null;
+  elements.fileHtmlPreview.srcdoc = "";
 }
 
 function selectWorkspaceFile(entry) {
   resetWorkspaceFileOperations();
+  state.fileHtmlSourceMode = false;
   state.activeFile = {
     ...entry,
     source_id: state.fileSource,
@@ -3944,6 +3968,8 @@ function openWorkspaceFilePath(path) {
   resetWorkspaceFileOperations();
   const name = path.split("/").filter(Boolean).at(-1) || path;
   const markdown = /\.(?:md|markdown|mdown|mkd)$/i.test(name);
+  const html = /\.html?$/i.test(name);
+  state.fileHtmlSourceMode = false;
   state.activeFile = {
     name,
     path,
@@ -3951,8 +3977,8 @@ function openWorkspaceFilePath(path) {
     kind: "file",
     size: 0,
     previewable: true,
-    preview_kind: markdown ? "markdown" : "code",
-    language: "",
+    preview_kind: markdown ? "markdown" : (html ? "html" : "code"),
+    language: html ? "xml" : "",
     downloadable: true,
     source_id: state.fileSource,
     source_label: agentSourceById(state.fileSource)?.label || "本机",
@@ -4017,6 +4043,7 @@ function setWorkspaceReaderStatus(title, detail, spinning = true) {
 function hideWorkspaceReaderContents() {
   elements.fileReaderStatus.hidden = true;
   elements.fileMarkdownContent.hidden = true;
+  elements.fileHtmlPreview.hidden = true;
   elements.fileCodePreview.hidden = true;
   elements.fileDownloadOnly.hidden = true;
 }
@@ -4050,12 +4077,25 @@ function renderWorkspaceFileViewer() {
   const kind = file.preview_kind || file.kind || "file";
   const kindLabel = kind === "markdown"
     ? "MARKDOWN"
-    : (file.language ? String(file.language).toLocaleUpperCase() : "FILE");
-  elements.fileAvatar.textContent = kind === "markdown" ? "MD" : (file.previewable ? "{ }" : "↓");
+    : (kind === "html" ? "HTML" : (file.language ? String(file.language).toLocaleUpperCase() : "FILE"));
+  elements.fileAvatar.textContent = kind === "markdown"
+    ? "MD"
+    : (kind === "html" ? "<>" : (file.previewable ? "{ }" : "↓"));
   elements.fileTitle.textContent = file.name || "文件";
   elements.fileKindBadge.textContent = kindLabel;
-  elements.fileKindBadge.className = `file-kind-badge is-${kind === "markdown" ? "markdown" : (file.previewable ? "code" : "file")}`;
+  elements.fileKindBadge.className = `file-kind-badge is-${kind === "markdown"
+    ? "markdown"
+    : (kind === "html" ? "html" : (file.previewable ? "code" : "file"))}`;
   elements.fileMeta.textContent = `${file.source_label || "Workspace"} · ${file.display_path || file.path}`;
+  elements.fileHtmlViewButton.hidden = kind !== "html";
+  elements.fileHtmlViewButton.disabled = state.fileReadPending || typeof file.content !== "string";
+  elements.fileHtmlViewButton.setAttribute("aria-pressed", String(state.fileHtmlSourceMode));
+  elements.fileHtmlViewButton.setAttribute(
+    "aria-label",
+    state.fileHtmlSourceMode ? "渲染 HTML" : "查看 HTML 源码",
+  );
+  elements.fileHtmlViewButton.title = state.fileHtmlSourceMode ? "渲染 HTML" : "查看 HTML 源码";
+  elements.fileHtmlViewButton.querySelector("span").textContent = state.fileHtmlSourceMode ? "渲染" : "源码";
   elements.copyFileButton.disabled = typeof file.content !== "string" || state.fileReadPending;
   elements.downloadFileButton.disabled = !socketReady()
     || file.downloadable === false
@@ -4087,6 +4127,20 @@ function renderWorkspaceFileViewer() {
       elements.fileReaderTitle.textContent = "Rendered Markdown";
       elements.fileReaderMeta.textContent = details.join(" · ");
       renderMarkdownWorkspaceFile(file);
+    } else if (file.kind === "html") {
+      const mode = state.fileHtmlSourceMode ? "html-source" : "html-rendered";
+      const signature = [file.language || "", ...details].join("\u0000");
+      if (!workspaceFileReaderNeedsRender(file, mode, signature, file.content)) return;
+      hideWorkspaceReaderContents();
+      if (state.fileHtmlSourceMode) {
+        elements.fileReaderTitle.textContent = "HTML Source";
+        elements.fileReaderMeta.textContent = ["HTML", ...details].join(" · ");
+        renderCodeWorkspaceFile({ ...file, language: file.language || "xml" });
+      } else {
+        elements.fileReaderTitle.textContent = "Sandboxed HTML";
+        elements.fileReaderMeta.textContent = [...details, "脚本与外部资源已禁用"].join(" · ");
+        renderHtmlWorkspaceFile(file);
+      }
     } else {
       const signature = [file.language || "", ...details].join("\u0000");
       if (!workspaceFileReaderNeedsRender(file, "code", signature, file.content)) return;
@@ -4100,7 +4154,7 @@ function renderWorkspaceFileViewer() {
 
   const downloadCopy = file.readError
     ? `预览失败：${file.readError}。你仍可尝试下载后在本机查看。`
-    : (file.preview_reason || "代码与 Markdown 之外的普通文件可安全下载到本机查看。");
+    : (file.preview_reason || "代码、Markdown 与 HTML 之外的普通文件可安全下载到本机查看。");
   const signature = [String(file.size || 0), downloadCopy].join("\u0000");
   if (!workspaceFileReaderNeedsRender(file, "download", signature)) return;
   hideWorkspaceReaderContents();
@@ -4129,6 +4183,65 @@ function renderCodeWorkspaceFile(file) {
     code.classList.add("hljs", `language-${language}`);
   } catch (_) {
     code.textContent = file.content;
+  }
+}
+
+function renderHtmlWorkspaceFile(file) {
+  const sanitizer = window.DOMPurify?.sanitize;
+  if (typeof sanitizer !== "function" || typeof DOMParser !== "function") {
+    elements.fileReaderMeta.textContent += " · 原文模式";
+    renderCodeWorkspaceFile({ ...file, language: file.language || "xml" });
+    return;
+  }
+  try {
+    const sanitized = sanitizer(file.content, {
+      WHOLE_DOCUMENT: true,
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: [
+        "audio", "base", "button", "canvas", "embed", "form", "iframe", "input",
+        "link", "math", "meta", "object", "option", "script", "select", "svg",
+        "textarea", "video",
+      ],
+      FORBID_ATTR: ["autofocus", "formaction", "ping", "poster", "srcset"],
+    });
+    const previewDocument = new DOMParser().parseFromString(sanitized, "text/html");
+
+    previewDocument.querySelectorAll("a[href]").forEach((link) => {
+      const href = link.getAttribute("href") || "";
+      if (href.startsWith("#")) return;
+      link.removeAttribute("href");
+      link.title = href
+        ? `安全预览已禁用链接：${href}`
+        : "安全预览已禁用此链接";
+    });
+    previewDocument.querySelectorAll("[src]").forEach((node) => {
+      const source = node.getAttribute("src") || "";
+      const embeddedImage = node.tagName === "IMG"
+        && /^data:image\/(?:gif|jpeg|png|webp);base64,/i.test(source);
+      if (!embeddedImage) node.removeAttribute("src");
+    });
+    previewDocument.querySelectorAll("[action], [formaction], [ping], [poster], [srcset]").forEach((node) => {
+      for (const attribute of ["action", "formaction", "ping", "poster", "srcset"]) {
+        node.removeAttribute(attribute);
+      }
+    });
+
+    const charset = previewDocument.createElement("meta");
+    charset.setAttribute("charset", "utf-8");
+    const policy = previewDocument.createElement("meta");
+    policy.setAttribute("http-equiv", "Content-Security-Policy");
+    policy.setAttribute("content", HTML_PREVIEW_CSP);
+    const baseStyle = previewDocument.createElement("style");
+    baseStyle.textContent = HTML_PREVIEW_BASE_STYLE;
+    previewDocument.head.prepend(baseStyle);
+    previewDocument.head.prepend(policy);
+    previewDocument.head.prepend(charset);
+
+    elements.fileHtmlPreview.srcdoc = `<!doctype html>\n${previewDocument.documentElement.outerHTML}`;
+    elements.fileHtmlPreview.hidden = false;
+  } catch (_) {
+    elements.fileReaderMeta.textContent += " · 原文模式";
+    renderCodeWorkspaceFile({ ...file, language: file.language || "xml" });
   }
 }
 
@@ -4538,6 +4651,12 @@ function bindEvents() {
     renderWorkspaceFileBrowser();
   });
   elements.mobileFileBack.addEventListener("click", clearWorkspaceFileSelection);
+  elements.fileHtmlViewButton.addEventListener("click", () => {
+    if (state.activeFile?.kind !== "html" || typeof state.activeFile.content !== "string") return;
+    state.fileHtmlSourceMode = !state.fileHtmlSourceMode;
+    resetWorkspaceFileReaderRender();
+    renderWorkspaceFileViewer();
+  });
   elements.copyFileButton.addEventListener("click", copyWorkspaceFile);
   elements.downloadFileButton.addEventListener("click", downloadWorkspaceFile);
   elements.downloadFileEmptyButton.addEventListener("click", downloadWorkspaceFile);

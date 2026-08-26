@@ -442,7 +442,7 @@
             </div>
             <p class="eyebrow">SAFE FILE VIEWER</p>
             <h2>选择文件开始阅读</h2>
-            <p>Markdown 会安全渲染，常见代码文件会自动高亮；其他普通文件仍可直接下载。</p>
+            <p>Markdown 与 HTML 会安全渲染，常见代码文件会自动高亮；其他普通文件仍可直接下载。</p>
           </div>
 
           <article class="file-viewer" id="file-viewer" hidden>
@@ -459,6 +459,10 @@
                 <p id="file-meta">—</p>
               </div>
               <div class="file-actions">
+                <button class="secondary-button compact-button" id="file-html-view-button" type="button" aria-label="查看 HTML 源码" title="查看 HTML 源码" aria-pressed="false" hidden>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 9-3 3 3 3m8-6 3 3-3 3m-5 3 2-12"/></svg>
+                  <span>源码</span>
+                </button>
                 <button class="secondary-button compact-button" id="copy-file-button" type="button" aria-label="复制文件内容" title="复制文件内容">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                   <span>复制</span>
@@ -485,13 +489,14 @@
                   <span>内容仍会在 Relay 端校验</span>
                 </div>
                 <article class="markdown-body" id="file-markdown-content" hidden></article>
+                <iframe class="html-preview" id="file-html-preview" title="HTML 安全预览" sandbox referrerpolicy="no-referrer" hidden></iframe>
                 <pre class="code-preview" id="file-code-preview" hidden><code id="file-code-content"></code></pre>
                 <div class="file-download-only" id="file-download-only" hidden>
                   <span class="file-download-icon" aria-hidden="true">
                     <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v5h5M9 13h6"/></svg>
                   </span>
                   <h3>这个文件不提供网页预览</h3>
-                  <p id="file-download-only-copy">代码与 Markdown 之外的普通文件可安全下载到本机查看。</p>
+                  <p id="file-download-only-copy">代码、Markdown 与 HTML 之外的普通文件可安全下载到本机查看。</p>
                   <button class="primary-button" id="download-file-empty-button" type="button">下载文件</button>
                 </div>
               </div>
