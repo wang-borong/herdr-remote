@@ -2,6 +2,7 @@
 
 const byId = (id) => document.getElementById(id);
 const isDesktop = () => window.matchMedia("(min-width: 901px)").matches;
+const systemDarkThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 const AGENT_INTERACTION_KEYS = Object.freeze({
   Up: { keycap: "↑", label: "上移" },
   Down: { keycap: "↓", label: "下移" },
@@ -234,20 +235,41 @@ const MARKDOWN_CODE_HIGHLIGHT_MAX_CHARACTERS = 160_000;
 const WORKSPACE_FILE_REQUEST_TIMEOUT_MS = 30_000;
 const WORKSPACE_FILE_FEATURE_UNAVAILABLE = "Relay 后台尚未加载 Files 协议。请重启 Herdr Relay 服务；仅刷新网页不会更新后台进程。";
 const HTML_PREVIEW_CSP = "default-src 'none'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'";
-// Use a stable light document canvas. Legacy HTML commonly hardcodes white table or
-// panel backgrounds while inheriting the document text color, which becomes
-// unreadable if the preview follows a dark system color scheme.
-const HTML_PREVIEW_BASE_STYLE = `
-  :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  html { min-height: 100%; color: #172033; background: #ffffff; }
-  body { max-width: 1080px; min-height: 100%; margin: 0 auto; padding: 32px 38px 72px; color: #172033; background: #ffffff; line-height: 1.65; overflow-wrap: anywhere; }
+const HTML_PREVIEW_COMMON_STYLE = `
+  :root { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  html { min-height: 100%; }
+  body { max-width: 1080px; min-height: 100%; margin: 0 auto; padding: 32px 38px 72px; line-height: 1.65; overflow-wrap: anywhere; }
   img, picture, video, canvas, svg { max-width: 100%; height: auto; }
-  pre { max-width: 100%; padding: 14px 16px; overflow: auto; background: #f4f6fa; border-radius: 10px; }
+  pre { max-width: 100%; padding: 14px 16px; overflow: auto; border-radius: 10px; }
   code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
   table { max-width: 100%; border-collapse: collapse; }
-  th, td { padding: 7px 10px; border: 1px solid #ccd2df; }
-  a:not([href]) { color: #687386; text-decoration: line-through; cursor: not-allowed; }
+  th, td { padding: 7px 10px; border: 1px solid; }
+  a:not([href]) { text-decoration: line-through; cursor: not-allowed; }
   @media (max-width: 700px) { body { padding: 22px 18px 56px; } }
+`;
+const HTML_PREVIEW_LIGHT_STYLE = `
+  :root { color-scheme: light; }
+  html, body { color: #172033; background: #ffffff; }
+  pre { background: #f4f6fa; }
+  th, td { border-color: #ccd2df; }
+  a:not([href]) { color: #687386; }
+`;
+const HTML_PREVIEW_DARK_STYLE = `
+  :root { color-scheme: dark; }
+  html, body { color: #e6ebf5 !important; background: #0b1020 !important; }
+  body * {
+    color: inherit !important;
+    background-color: transparent !important;
+    background-image: none !important;
+    border-color: #34405a !important;
+  }
+  pre { color: #e6ebf5 !important; background: #111827 !important; border: 1px solid #34405a; }
+  code { color: inherit !important; }
+  table, thead, tbody, tfoot, tr { color: #e6ebf5 !important; background: #111a2c !important; }
+  th, td { color: #e6ebf5 !important; background: #151f33 !important; border-color: #3a4660 !important; }
+  thead th, thead td { color: #f8fafc !important; background: #233250 !important; }
+  a { color: #8fb4ff !important; }
+  a:not([href]) { color: #9aa6be !important; }
 `;
 const nativeAgentSelectionControllers = new WeakMap();
 const terminalFontReady = document.fonts && typeof document.fonts.load === "function"
@@ -375,6 +397,28 @@ function applyTheme(theme) {
   elements.themeSelect.value = selected;
   localStorage.setItem("herdr_theme", selected);
   applyTerminalTheme();
+  refreshActiveHtmlPreviewTheme();
+}
+
+function resolvedTheme() {
+  const selected = document.documentElement.dataset.theme;
+  if (selected === "dark" || selected === "light") return selected;
+  return systemDarkThemeQuery.matches ? "dark" : "light";
+}
+
+function refreshActiveHtmlPreviewTheme() {
+  if (
+    state.activeFile?.kind !== "html"
+    || state.fileHtmlSourceMode
+    || typeof state.activeFile.content !== "string"
+  ) return;
+  renderWorkspaceFileViewer();
+}
+
+function handleSystemThemeChange() {
+  if (document.documentElement.dataset.theme !== "system") return;
+  applyTerminalTheme();
+  refreshActiveHtmlPreviewTheme();
 }
 
 function terminalTheme() {
@@ -4127,7 +4171,11 @@ function renderWorkspaceFileViewer() {
       renderMarkdownWorkspaceFile(file);
     } else if (file.kind === "html") {
       const mode = state.fileHtmlSourceMode ? "html-source" : "html-rendered";
-      const signature = [file.language || "", ...details].join("\u0000");
+      const signature = [
+        file.language || "",
+        ...details,
+        state.fileHtmlSourceMode ? "source" : resolvedTheme(),
+      ].join("\u0000");
       if (!workspaceFileReaderNeedsRender(file, mode, signature, file.content)) return;
       hideWorkspaceReaderContents();
       if (state.fileHtmlSourceMode) {
@@ -4246,6 +4294,8 @@ function renderHtmlWorkspaceFile(file) {
       FORBID_ATTR: ["autofocus", "formaction", "ping", "poster", "srcset"],
     });
     const previewDocument = new DOMParser().parseFromString(sanitized, "text/html");
+    const previewTheme = resolvedTheme();
+    previewDocument.documentElement.dataset.herdrPreviewTheme = previewTheme;
 
     previewDocument.querySelectorAll("a[href]").forEach((link) => {
       const href = link.getAttribute("href") || "";
@@ -4279,10 +4329,12 @@ function renderHtmlWorkspaceFile(file) {
     policy.setAttribute("http-equiv", "Content-Security-Policy");
     policy.setAttribute("content", HTML_PREVIEW_CSP);
     const baseStyle = previewDocument.createElement("style");
-    baseStyle.textContent = HTML_PREVIEW_BASE_STYLE;
-    previewDocument.head.prepend(baseStyle);
+    baseStyle.textContent = `${HTML_PREVIEW_COMMON_STYLE}\n${previewTheme === "dark"
+      ? HTML_PREVIEW_DARK_STYLE
+      : HTML_PREVIEW_LIGHT_STYLE}`;
     previewDocument.head.prepend(policy);
     previewDocument.head.prepend(charset);
+    previewDocument.head.append(baseStyle);
 
     replaceHtmlPreviewDocument(`<!doctype html>\n${previewDocument.documentElement.outerHTML}`);
   } catch (_) {
@@ -4708,6 +4760,11 @@ function bindEvents() {
   elements.downloadFileEmptyButton.addEventListener("click", downloadWorkspaceFile);
 
   elements.themeSelect.addEventListener("change", () => applyTheme(elements.themeSelect.value));
+  if (typeof systemDarkThemeQuery.addEventListener === "function") {
+    systemDarkThemeQuery.addEventListener("change", handleSystemThemeChange);
+  } else {
+    systemDarkThemeQuery.addListener(handleSystemThemeChange);
+  }
   elements.pushToggleButton.addEventListener("click", togglePush);
   elements.addSshHostButton.addEventListener("click", () => openSshHostDialog());
   elements.sshHostAgentEnabled.addEventListener("change", renderSshProfileForm);
