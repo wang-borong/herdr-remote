@@ -10,6 +10,14 @@ const AGENT_INTERACTION_KEYS = Object.freeze({
   Escape: { keycap: "Esc", label: "返回" },
 });
 const AGENT_KEY_ACK_TIMEOUT_MS = 8_000;
+const PROMPT_IMAGE_TYPES = Object.freeze({
+  "image/png": "PNG",
+  "image/jpeg": "JPEG",
+  "image/webp": "WebP",
+});
+const PROMPT_IMAGE_MAX_COUNT = 4;
+const PROMPT_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const PROMPT_IMAGE_TOTAL_MAX_BYTES = 20 * 1024 * 1024;
 
 const elements = {
   connectionDot: byId("connection-dot"),
@@ -53,6 +61,9 @@ const elements = {
   promptForm: byId("prompt-form"),
   promptInput: byId("prompt-input"),
   promptCount: byId("prompt-count"),
+  promptImageInput: byId("prompt-image-input"),
+  attachImageButton: byId("attach-image-button"),
+  promptAttachments: byId("prompt-attachments"),
   queuePromptButton: byId("queue-prompt-button"),
   sendPromptButton: byId("send-prompt-button"),
   newAgentDialog: byId("new-agent-dialog"),
@@ -324,6 +335,11 @@ const state = {
   promptPending: false,
   pendingPromptText: "",
   pendingPromptMode: "",
+  pendingPromptImageIds: [],
+  pendingPromptSubmissionId: 0,
+  promptSubmissionSequence: 0,
+  promptImages: [],
+  promptImageSequence: 0,
   pendingApprovalLabel: "",
   agentKeyPanelOpen: false,
   agentKeyPending: null,
@@ -491,8 +507,13 @@ function send(message) {
     showToast("连接不可用", "Relay 尚未连接，请稍后重试。", "error");
     return false;
   }
-  state.ws.send(JSON.stringify(message));
-  return true;
+  try {
+    state.ws.send(JSON.stringify(message));
+    return true;
+  } catch (_) {
+    showToast("发送失败", "浏览器无法提交这条消息，请减少附件大小后重试。", "error");
+    return false;
+  }
 }
 
 function setConnection(status) {
@@ -551,6 +572,9 @@ function connect() {
     state.promptPending = false;
     state.pendingPromptText = "";
     state.pendingPromptMode = "";
+    state.pendingPromptImageIds = [];
+    state.pendingPromptSubmissionId = 0;
+    renderPromptAttachments();
     window.clearTimeout(state.agentKeyPendingTimer);
     state.agentKeyPendingTimer = null;
     window.clearTimeout(state.agentKeyFeedbackTimer);
@@ -705,6 +729,7 @@ function replaceAgentSnapshot(agents) {
     state.activePane = null;
     state.agentKeyPanelOpen = false;
     state.userScrolledUp = false;
+    if (state.promptImages.length) clearPromptImages();
     document.body.classList.remove("agent-open");
     updatePaneUrl("");
   }
@@ -1988,7 +2013,7 @@ function ensureAgentOutputTerminal() {
         ? TERMINAL_FONT_FAMILY
         : TERMINAL_FALLBACK_FONT_FAMILY,
       fontSize: isDesktop() ? 13 : 11,
-      lineHeight: 1.35,
+      lineHeight: 1.1,
       scrollback: 1000,
       screenReaderMode: true,
       theme: terminalTheme(),
@@ -3040,13 +3065,26 @@ function handleCommandResult(message) {
     || message.command === "agent_prompt_queue"
     || promptResponse
   ) {
+    const submittedImageIds = state.pendingPromptImageIds;
     state.promptPending = false;
     if (elements.promptInput.value.trim() === state.pendingPromptText) {
       elements.promptInput.value = "";
       updateCounter(elements.promptInput, elements.promptCount);
     }
+    if (
+      submittedImageIds.length
+      && submittedImageIds.length === state.promptImages.length
+      && submittedImageIds.every((imageId, index) => state.promptImages[index]?.id === imageId)
+    ) {
+      for (const image of state.promptImages) URL.revokeObjectURL(image.url);
+      state.promptImages = [];
+      elements.promptImageInput.value = "";
+    }
     state.pendingPromptText = "";
     state.pendingPromptMode = "";
+    state.pendingPromptImageIds = [];
+    state.pendingPromptSubmissionId = 0;
+    renderPromptAttachments();
     renderPromptState();
     if (promptResponse) {
       showToast("回答已发送", "Agent 已收到当前 Prompt 的回答。", "success");
@@ -3126,7 +3164,10 @@ function handleRelayError(payload) {
     return;
   }
   state.promptPending = false;
+  state.pendingPromptText = "";
   state.pendingPromptMode = "";
+  state.pendingPromptImageIds = [];
+  state.pendingPromptSubmissionId = 0;
   state.pendingApprovalLabel = "";
   window.clearTimeout(state.agentKeyPendingTimer);
   state.agentKeyPendingTimer = null;
@@ -3139,6 +3180,7 @@ function handleRelayError(payload) {
   state.startPending = false;
   state.directoryPending = false;
   state.sshProfilePending = false;
+  renderPromptAttachments();
   renderPromptState();
   renderInterruptState();
   renderDirectoryBrowser();
@@ -3265,8 +3307,10 @@ function selectInitialAgentIfNeeded() {
 function selectAgent(paneId, updateHistory = true, markSeen = false) {
   const shouldMarkSeen = markSeen
     && normalizedStatus(state.agents.find((agent) => agent.pane_id === paneId)) === "done";
-  if (state.activePane !== paneId) state.agentKeyPanelOpen = false;
+  const changedPane = state.activePane !== paneId;
+  if (changedPane) state.agentKeyPanelOpen = false;
   state.activePane = paneId;
+  if (changedPane && state.promptImages.length) clearPromptImages();
   state.userScrolledUp = false;
   document.body.classList.add("agent-open");
   if (updateHistory) updatePaneUrl(paneId);
@@ -3280,6 +3324,7 @@ function selectAgent(paneId, updateHistory = true, markSeen = false) {
 function clearAgentSelection() {
   state.activePane = null;
   state.agentKeyPanelOpen = false;
+  if (state.promptImages.length) clearPromptImages();
   document.body.classList.remove("agent-open");
   updatePaneUrl("");
   renderAll();
@@ -3472,35 +3517,188 @@ function refreshOutput() {
   send({ type: "read_pane", pane_id: state.activePane, lines: state.lines });
 }
 
+function formatPromptImageSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderPromptAttachments() {
+  elements.promptAttachments.replaceChildren();
+  elements.promptAttachments.hidden = state.promptImages.length === 0;
+  elements.attachImageButton.querySelector("span").textContent = state.promptImages.length
+    ? `图片 ${state.promptImages.length}`
+    : "图片";
+
+  for (const image of state.promptImages) {
+    const item = document.createElement("div");
+    item.className = "prompt-attachment";
+
+    const thumbnail = document.createElement("img");
+    thumbnail.src = image.url;
+    thumbnail.alt = "";
+
+    const copy = document.createElement("div");
+    copy.className = "prompt-attachment-copy";
+    const name = document.createElement("strong");
+    name.textContent = image.file.name || "剪贴板图片";
+    name.title = name.textContent;
+    const meta = document.createElement("span");
+    meta.textContent = `${PROMPT_IMAGE_TYPES[image.mediaType]} · ${formatPromptImageSize(image.file.size)}`;
+    copy.append(name, meta);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "prompt-attachment-remove";
+    remove.textContent = "×";
+    remove.disabled = state.promptPending;
+    remove.setAttribute("aria-label", `移除图片 ${name.textContent}`);
+    remove.addEventListener("click", () => removePromptImage(image.id));
+
+    item.append(thumbnail, copy, remove);
+    elements.promptAttachments.append(item);
+  }
+}
+
+function clearPromptImages() {
+  for (const image of state.promptImages) URL.revokeObjectURL(image.url);
+  state.promptImages = [];
+  elements.promptImageInput.value = "";
+  renderPromptAttachments();
+  renderPromptState();
+}
+
+function removePromptImage(imageId) {
+  if (state.promptPending) return;
+  const image = state.promptImages.find((item) => item.id === imageId);
+  if (!image) return;
+  URL.revokeObjectURL(image.url);
+  state.promptImages = state.promptImages.filter((item) => item.id !== imageId);
+  renderPromptAttachments();
+  renderPromptState();
+}
+
+function addPromptImages(files) {
+  const agent = activeAgent();
+  if (String(agent?.agent || "").toLowerCase() !== "codex") {
+    showToast("无法添加图片", "图片 Prompt 仅适用于 Codex Agent。", "error");
+    return;
+  }
+
+  const reasons = new Set();
+  let totalBytes = state.promptImages.reduce((total, image) => total + image.file.size, 0);
+  for (const file of Array.from(files || [])) {
+    if (state.promptImages.length >= PROMPT_IMAGE_MAX_COUNT) {
+      reasons.add(`一次最多添加 ${PROMPT_IMAGE_MAX_COUNT} 张图片`);
+      break;
+    }
+    const mediaType = String(file?.type || "").toLowerCase();
+    if (!Object.hasOwn(PROMPT_IMAGE_TYPES, mediaType)) {
+      reasons.add("仅支持 PNG、JPEG 和 WebP");
+      continue;
+    }
+    if (!Number.isFinite(file.size) || file.size <= 0 || file.size > PROMPT_IMAGE_MAX_BYTES) {
+      reasons.add(`单张图片不能超过 ${PROMPT_IMAGE_MAX_BYTES / (1024 * 1024)} MB`);
+      continue;
+    }
+    if (totalBytes + file.size > PROMPT_IMAGE_TOTAL_MAX_BYTES) {
+      reasons.add(`图片总大小不能超过 ${PROMPT_IMAGE_TOTAL_MAX_BYTES / (1024 * 1024)} MB`);
+      continue;
+    }
+    state.promptImageSequence += 1;
+    state.promptImages.push({
+      id: state.promptImageSequence,
+      file,
+      mediaType,
+      url: URL.createObjectURL(file),
+    });
+    totalBytes += file.size;
+  }
+  elements.promptImageInput.value = "";
+  renderPromptAttachments();
+  renderPromptState();
+  if (reasons.size) showToast("部分图片未添加", [...reasons].join("；"), "error");
+}
+
+function encodePromptImage(image) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      const value = typeof reader.result === "string" ? reader.result : "";
+      const separator = value.indexOf(",");
+      if (separator < 0) {
+        reject(new Error("图片编码失败"));
+        return;
+      }
+      resolve({
+        name: image.file.name || "image",
+        media_type: image.mediaType,
+        data: value.slice(separator + 1),
+      });
+    }, { once: true });
+    reader.addEventListener("error", () => reject(reader.error || new Error("图片读取失败")), { once: true });
+    reader.readAsDataURL(image.file);
+  });
+}
+
+function resetPendingPromptState() {
+  state.promptPending = false;
+  state.pendingPromptText = "";
+  state.pendingPromptMode = "";
+  state.pendingPromptImageIds = [];
+  state.pendingPromptSubmissionId = 0;
+  renderPromptAttachments();
+  renderPromptState();
+}
+
 function renderPromptState() {
   const agent = activeAgent();
   const ready = Boolean(agent) && socketReady() && !state.promptPending;
   const hasText = Boolean(elements.promptInput.value.trim());
+  const hasImages = state.promptImages.length > 0;
   const isCodex = String(agent?.agent || "").toLowerCase() === "codex";
-  const canCache = ready && isCodex && normalizedStatus(agent) === "working" && hasText;
+  const blocked = normalizedStatus(agent) === "blocked";
+  const canCache = ready && isCodex && !hasImages && normalizedStatus(agent) === "working" && hasText;
   elements.promptInput.disabled = !Boolean(agent) || state.promptPending;
-  elements.sendPromptButton.disabled = !ready || !hasText;
+  elements.promptImageInput.disabled = !Boolean(agent) || !isCodex || state.promptPending;
+  elements.attachImageButton.disabled = elements.promptImageInput.disabled;
+  elements.attachImageButton.title = !isCodex
+    ? "图片 Prompt 仅适用于 Codex Agent"
+    : `最多 ${PROMPT_IMAGE_MAX_COUNT} 张，每张 ${PROMPT_IMAGE_MAX_BYTES / (1024 * 1024)} MB`;
+  elements.sendPromptButton.disabled = !ready || (!hasText && !hasImages) || (blocked && hasImages);
   elements.queuePromptButton.disabled = !canCache;
   elements.sendPromptButton.querySelector("span").textContent = state.promptPending && state.pendingPromptMode !== "queue"
     ? "正在发送…"
-    : (normalizedStatus(agent) === "blocked" ? "回答 Prompt" : "发送 Prompt");
+    : (blocked ? "回答 Prompt" : "发送 Prompt");
   elements.queuePromptButton.querySelector("span").textContent = state.promptPending && state.pendingPromptMode === "queue"
     ? "正在缓存…"
     : "Tab 缓存";
   elements.queuePromptButton.title = !isCodex
     ? "Tab 缓存仅适用于 Codex Agent"
+    : (hasImages
+      ? "附图 Prompt 请使用发送按钮"
     : (normalizedStatus(agent) === "working"
       ? "通过 Tab 缓存到 Codex 队列"
-      : "仅在 Agent 工作中可用");
+      : "仅在 Agent 工作中可用"));
 }
 
-function submitPrompt(mode = "send") {
+async function submitPrompt(mode = "send") {
   const text = elements.promptInput.value.trim();
-  if (!text || !state.activePane || state.promptPending) return;
+  const images = [...state.promptImages];
+  if ((!text && !images.length) || !state.activePane || state.promptPending) return;
   const queue = mode === "queue";
   const agent = activeAgent();
+  const isCodex = String(agent?.agent || "").toLowerCase() === "codex";
   if (queue && String(agent?.agent || "").toLowerCase() !== "codex") {
     showToast("暂时无法缓存", "Tab 缓存仅适用于 Codex Agent。", "error");
+    return;
+  }
+  if (images.length && !isCodex) {
+    showToast("无法发送图片", "图片 Prompt 仅适用于 Codex Agent。", "error");
+    return;
+  }
+  if (queue && images.length) {
+    showToast("无法缓存图片", "附图 Prompt 请使用发送按钮。", "error");
     return;
   }
   if (queue && normalizedStatus(agent) !== "working") {
@@ -3508,6 +3706,10 @@ function submitPrompt(mode = "send") {
     return;
   }
   const blockedResponse = !queue && normalizedStatus(agent) === "blocked";
+  if (blockedResponse && images.length) {
+    showToast("当前不能发送图片", "Agent 正在等待交互回答，请先用文字完成当前 Prompt。", "error");
+    return;
+  }
   if (blockedResponse && !agent?.promptId) {
     showToast("Prompt 尚未就绪", "请刷新最近输出，等待 Relay 返回当前 Prompt 后再回答。", "error");
     return;
@@ -3515,13 +3717,32 @@ function submitPrompt(mode = "send") {
   const type = queue
     ? "agent_prompt_queue"
     : (blockedResponse ? "respond" : "agent_prompt");
-  const message = { type, pane_id: state.activePane, text };
-  if (blockedResponse) message.prompt_id = agent.promptId;
-  if (!send(message)) return;
+  const paneId = state.activePane;
+  const submissionId = state.promptSubmissionSequence + 1;
+  state.promptSubmissionSequence = submissionId;
   state.promptPending = true;
   state.pendingPromptText = text;
   state.pendingPromptMode = blockedResponse ? "respond" : mode;
+  state.pendingPromptImageIds = images.map((image) => image.id);
+  state.pendingPromptSubmissionId = submissionId;
+  renderPromptAttachments();
   renderPromptState();
+
+  let encodedImages = [];
+  try {
+    encodedImages = await Promise.all(images.map(encodePromptImage));
+  } catch (_) {
+    if (state.pendingPromptSubmissionId !== submissionId) return;
+    resetPendingPromptState();
+    showToast("图片读取失败", "浏览器无法读取所选图片，请移除后重试。", "error");
+    return;
+  }
+  if (!state.promptPending || state.pendingPromptSubmissionId !== submissionId) return;
+
+  const message = { type, pane_id: paneId, text };
+  if (encodedImages.length) message.images = encodedImages;
+  if (blockedResponse) message.prompt_id = agent.promptId;
+  if (!send(message)) resetPendingPromptState();
 }
 
 function renderInterruptState() {
@@ -4595,7 +4816,7 @@ function urlBase64ToUint8Array(value) {
 }
 
 function updateCounter(input, output) {
-  output.textContent = `${input.value.length} / ${input.maxLength}`;
+  output.textContent = `${input.value.length.toLocaleString()} 字`;
 }
 
 function showToast(title, detail, type = "info") {
@@ -4685,6 +4906,31 @@ function bindEvents() {
   elements.promptInput.addEventListener("input", () => {
     updateCounter(elements.promptInput, elements.promptCount);
     renderPromptState();
+  });
+  elements.attachImageButton.addEventListener("click", () => elements.promptImageInput.click());
+  elements.promptImageInput.addEventListener("change", () => addPromptImages(elements.promptImageInput.files));
+  elements.promptInput.addEventListener("paste", (event) => {
+    const files = [...(event.clipboardData?.files || [])].filter((file) => file.type.startsWith("image/"));
+    if (!files.length) return;
+    if (!event.clipboardData?.getData("text")) event.preventDefault();
+    addPromptImages(files);
+  });
+  elements.promptForm.addEventListener("dragover", (event) => {
+    if (![...(event.dataTransfer?.items || [])].some((item) => item.kind === "file")) return;
+    event.preventDefault();
+    elements.promptForm.classList.add("is-dragging");
+  });
+  elements.promptForm.addEventListener("dragleave", (event) => {
+    if (!elements.promptForm.contains(event.relatedTarget)) {
+      elements.promptForm.classList.remove("is-dragging");
+    }
+  });
+  elements.promptForm.addEventListener("drop", (event) => {
+    elements.promptForm.classList.remove("is-dragging");
+    const files = [...(event.dataTransfer?.files || [])];
+    if (!files.length) return;
+    event.preventDefault();
+    addPromptImages(files);
   });
   elements.promptInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -4905,6 +5151,7 @@ function initialize() {
   setAppView(initialView, false);
   updateCounter(elements.promptInput, elements.promptCount);
   updateCounter(elements.initialPromptInput, elements.initialPromptCount);
+  renderPromptAttachments();
   renderAll();
   renderRemoteAccess();
   connect();

@@ -333,8 +333,8 @@ async def start_codex_from_relay(
 
 async def send_agent_prompt_to_relay(pane_id: str, text: str):
     """Submit a prompt through herdr's semantic agent API."""
-    if not text or len(text) > 1000:
-        raise ValueError("text must contain 1-1000 characters")
+    if not text:
+        raise ValueError("text must not be empty")
     response = await relay_request(
         {"type": "agent_prompt", "pane_id": pane_id, "text": text},
         "command_result",
@@ -1003,9 +1003,6 @@ async def start_codex_for_chat(
     prompt: str = "",
     source_id: str | None = None,
 ):
-    if len(prompt) > 1000:
-        await message.reply_text("Prompt must contain at most 1000 characters.")
-        return None
     source_id = source_id or selected_agent_source_id(chat.id)
     source_label = agent_source_label(source_id)
     await message.reply_text(f"Starting Codex on {source_label} in {cwd} …")

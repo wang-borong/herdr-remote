@@ -215,6 +215,10 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(asset_response.status_code, 200)
         self.assertIn(b"new WebSocket", asset_response.body)
+        self.assertIn(
+            "img-src 'self' data: blob:",
+            asset_response.headers["Content-Security-Policy"],
+        )
         self.assertEqual(font_response.status_code, 200)
         self.assertEqual(font_response.headers["Content-Type"], "font/woff2")
         self.assertTrue(font_response.body.startswith(b"wOF2"))
@@ -426,6 +430,11 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             patch.object(relay, "configured_terminal_profiles", return_value=[saved]),
             patch.object(relay, "machine_access_info", return_value={}),
             patch.object(relay, "audit"),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                new=AsyncMock(side_effect=lambda function, *args: function(*args)),
+            ),
         ):
             await relay.handle_client(ws)
 
@@ -472,6 +481,215 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         detail = audit.call_args.args[4]
         self.assertIn(f"chars={len(prompt)}", detail)
         self.assertNotIn("secret-token-123", detail)
+
+    async def test_agent_prompt_accepts_long_text_without_an_arbitrary_character_limit(self):
+        pane_id = "w0:p1"
+        prompt = "x" * 5000
+        relay.known_panes.add(pane_id)
+        relay.pane_remote_map[pane_id] = None
+        ws = FakeWebSocket([{"type": "agent_prompt", "pane_id": pane_id, "text": prompt}])
+
+        with (
+            patch.object(relay, "submit_agent_prompt") as submit_prompt,
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                new=AsyncMock(return_value="confirmed"),
+            ) as to_thread,
+            patch.object(relay, "audit"),
+        ):
+            await relay.handle_client(ws)
+
+        to_thread.assert_awaited_once_with(submit_prompt, pane_id, prompt, None)
+        self.assertIn(
+            {
+                "type": "command_result",
+                "command": "agent_prompt",
+                "ok": True,
+                "delivery": "confirmed",
+            },
+            ws.sent,
+        )
+
+    async def test_agent_prompt_routes_validated_images_to_codex_session_queue(self):
+        pane_id = "w0:p1"
+        prompt = "Inspect this screenshot"
+        png = b"\x89PNG\r\n\x1a\nimage-data"
+        relay.known_panes.add(pane_id)
+        relay.pane_remote_map[pane_id] = None
+        ws = FakeWebSocket([{
+            "type": "agent_prompt",
+            "pane_id": pane_id,
+            "text": prompt,
+            "images": [{
+                "name": "screen.png",
+                "media_type": "image/png",
+                "data": base64.b64encode(png).decode("ascii"),
+            }],
+        }])
+
+        with (
+            patch.object(relay, "submit_codex_image_prompt") as submit_images,
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                new=AsyncMock(return_value="confirmed"),
+            ) as to_thread,
+            patch.object(relay, "audit") as audit,
+        ):
+            await relay.handle_client(ws)
+
+        to_thread.assert_awaited_once_with(
+            submit_images,
+            pane_id,
+            prompt,
+            [{"media_type": "image/png", "data": png}],
+            None,
+        )
+        self.assertIn(
+            {
+                "type": "command_result",
+                "command": "agent_prompt",
+                "ok": True,
+                "delivery": "confirmed",
+            },
+            ws.sent,
+        )
+        self.assertIn("images=1", audit.call_args.args[4])
+
+    async def test_agent_prompt_rejects_spoofed_image_content_before_submission(self):
+        pane_id = "w0:p1"
+        relay.known_panes.add(pane_id)
+        ws = FakeWebSocket([{
+            "type": "agent_prompt",
+            "pane_id": pane_id,
+            "text": "Inspect this",
+            "images": [{
+                "media_type": "image/png",
+                "data": base64.b64encode(b"not-a-png").decode("ascii"),
+            }],
+        }])
+
+        with patch.object(relay.asyncio, "to_thread", new=AsyncMock()) as to_thread:
+            await relay.handle_client(ws)
+
+        to_thread.assert_not_awaited()
+        self.assertTrue(any("does not match" in message.get("message", "") for message in ws.sent))
+
+    def test_decode_prompt_images_limits_count_and_accepts_supported_magic(self):
+        png = b"\x89PNG\r\n\x1a\nimage-data"
+        payload = {"media_type": "image/png", "data": base64.b64encode(png).decode("ascii")}
+
+        self.assertEqual(
+            relay.decode_prompt_images([payload]),
+            [{"media_type": "image/png", "data": png}],
+        )
+        with self.assertRaisesRegex(ValueError, "at most"):
+            relay.decode_prompt_images([payload] * (relay.PROMPT_IMAGE_MAX_COUNT + 1))
+
+    def test_local_codex_image_prompt_uses_session_queue_and_cleans_temporary_files(self):
+        png = b"\x89PNG\r\n\x1a\nimage-data"
+        agent = {
+            "agent": "codex",
+            "agent_status": "idle",
+            "agent_session": {
+                "agent": "codex",
+                "kind": "id",
+                "source": "herdr:codex",
+                "value": "01a0467e-11a9-7963-a359-c169979eaffd",
+            },
+        }
+        observed_paths = []
+
+        def run_codex(arguments, **kwargs):
+            image_paths = [
+                arguments[index + 1]
+                for index, value in enumerate(arguments)
+                if value == "--image"
+            ]
+            self.assertEqual(len(image_paths), 1)
+            self.assertEqual(Path(image_paths[0]).read_bytes(), png)
+            observed_paths.extend(image_paths)
+            return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
+
+        with (
+            patch.object(relay, "CODEX", "/usr/bin/codex"),
+            patch.object(relay, "get_agent_info", return_value=agent),
+            patch.object(relay.subprocess, "run", side_effect=run_codex) as run,
+        ):
+            delivery = relay.submit_codex_image_prompt(
+                "w0:p1",
+                "Inspect this screenshot",
+                [{"media_type": "image/png", "data": png}],
+            )
+
+        self.assertEqual(delivery, "confirmed")
+        self.assertEqual(run.call_count, 1)
+        arguments = run.call_args.args[0]
+        self.assertEqual(arguments[:6], [
+            "/usr/bin/codex",
+            "queue",
+            "--thread",
+            agent["agent_session"]["value"],
+            "--message",
+            "Inspect this screenshot",
+        ])
+        self.assertTrue(observed_paths)
+        self.assertFalse(Path(observed_paths[0]).exists())
+
+    def test_remote_codex_image_prompt_uploads_queues_and_cleans_private_files(self):
+        png = b"\x89PNG\r\n\x1a\nimage-data"
+        source = {
+            "kind": "ssh",
+            "target": "builder@example",
+            "port": 22,
+            "codex_bin": "/home/dev/bin/codex",
+        }
+        agent = {
+            "agent": "codex",
+            "agent_status": "working",
+            "agent_session": {"value": "01a0467e-11a9-7963-a359-c169979eaffd"},
+        }
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        with (
+            patch.object(relay, "get_agent_info", return_value=agent),
+            patch.object(relay.secrets, "token_hex", return_value="abc123"),
+            patch.object(relay, "run_remote_result", return_value=completed) as run_remote,
+        ):
+            delivery = relay.submit_codex_image_prompt(
+                "w0:p1",
+                "Compare this image",
+                [{"media_type": "image/png", "data": png}],
+                remote=source,
+            )
+
+        self.assertEqual(delivery, "queued")
+        remote_path = "/tmp/herdr-prompt-images-abc123/image-1.png"
+        self.assertEqual(
+            run_remote.call_args_list[1],
+            unittest.mock.call(
+                source,
+                ["sh", "-c", 'umask 077; cat > "$1"', "herdr-image-upload", remote_path],
+                timeout=20,
+                input_data=png,
+            ),
+        )
+        queue_arguments = run_remote.call_args_list[2].args[1]
+        self.assertEqual(queue_arguments[:6], [
+            "/home/dev/bin/codex",
+            "queue",
+            "--thread",
+            agent["agent_session"]["value"],
+            "--message",
+            "Compare this image",
+        ])
+        self.assertIn(["--image", remote_path], [queue_arguments[-2:]])
+        self.assertEqual(run_remote.call_args_list[3].args[1], ["rm", "-f", remote_path])
+        self.assertEqual(
+            run_remote.call_args_list[4].args[1],
+            ["rmdir", "/tmp/herdr-prompt-images-abc123"],
+        )
 
     async def test_agent_prompt_queue_uses_tab_cache_and_redacts_audit_content(self):
         pane_id = "w0:p1"
@@ -890,7 +1108,7 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             "--lines",
             "200",
             "--source",
-            "recent",
+            "recent-unwrapped",
             "--format",
             "ansi",
             remote=None,
@@ -913,11 +1131,16 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         unsupported = subprocess.CompletedProcess([], 2, stdout="", stderr="unknown option")
 
         with (
-            patch.object(relay, "run_herdr_result", return_value=unsupported),
+            patch.object(relay, "run_herdr_result", return_value=unsupported) as run_result,
             patch.object(relay, "run_herdr", return_value="plain output") as run_herdr,
         ):
             await relay.handle_client(ws)
 
+        self.assertEqual(run_result.call_count, 2)
+        self.assertEqual(
+            [call.args[6] for call in run_result.call_args_list],
+            ["recent-unwrapped", "recent"],
+        )
         run_herdr.assert_called_once_with(
             "pane", "read", pane_id, "--lines", "60", "--source", "recent", remote=None
         )
@@ -1087,7 +1310,7 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             "--lines",
             "40",
             "--source",
-            "recent",
+            "recent-unwrapped",
             "--format",
             "ansi",
             remote=source,
@@ -1618,7 +1841,7 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir) / "repo"
             repo.mkdir()
-            prompt = "use private-token-456 to inspect the project"
+            prompt = "use private-token-456 to inspect the project " + ("x" * 1500)
             ws = FakeWebSocket([{
                 "type": "start_agent",
                 "kind": "codex",

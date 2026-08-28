@@ -24,8 +24,10 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import unicodedata
 from email.header import decode_header, make_header
 from http.cookies import CookieError, SimpleCookie
 from logging.handlers import RotatingFileHandler
@@ -128,6 +130,14 @@ ANSI_ESCAPE_RE = re.compile(
 ANSI_BACKGROUND_RE = re.compile(
     r"\x1B\[(?:[0-9]+;)*(?:4[0-8]|10[0-7])(?:;[0-9]+)*m"
 )
+ANSI_TRAILING_BACKGROUND_PADDING_RE = re.compile(
+    r"(?P<background>\x1B\[(?:[0-9]+;)*(?:4[0-8]|10[0-7])(?:;[0-9]+)*m)"
+    r"[ \t]+"
+    r"(?P<suffix>(?:\x1B\[[0-?]*[ -/]*[@-~])*)"
+    r"(?=\r?$)",
+    re.MULTILINE,
+)
+ANSI_SGR_RE = re.compile(r"\x1B\[(?P<parameters>[0-9;]*)m")
 CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 MODEL_PATH_RE = re.compile(r"^[^·]+?\s*·\s*(?:~|/).+$")
 WORKED_FOR_RE = re.compile(
@@ -140,12 +150,23 @@ BACKGROUND_TERMINAL_RE = re.compile(
     re.IGNORECASE,
 )
 DIVIDER_LINE_RE = re.compile(r"^[─━═—–_\-=]+$")
+CODEX_LIST_ITEM_RE = re.compile(r"^(?P<indent> *)(?:[-+*]|\d+[.)])\s+")
+CODEX_STRUCTURAL_TEXT_RE = re.compile(
+    r"^(?:#{1,6}\s|>|```|~~~|\||[┌┐└┘├┤┬┴┼│┃╭╮╰╯])"
+)
+CODEX_REFLOW_MIN_WIDTH = 40
+CODEX_REFLOW_MIN_FILL_RATIO = 0.88
 
 
 HERDR = (
     os.environ.get("HERDR_BIN")
     or shutil.which("herdr")
     or ("herdr" if sys.platform == "win32" else "/opt/homebrew/bin/herdr")
+)
+CODEX = (
+    os.environ.get("HERDR_CODEX_BIN")
+    or shutil.which("codex")
+    or "codex"
 )
 RELAY_HOST = os.environ.get("HERDR_RELAY_HOST", "127.0.0.1").strip() or "127.0.0.1"
 WS_PORT = int(os.environ.get("HERDR_RELAY_PORT", "8375"))
@@ -197,6 +218,7 @@ PUSH_SUBS_FILE = os.path.join(LOG_DIR, "push_subs.json")
 # Remote hosts: comma-separated SSH targets
 REMOTES = [r.strip() for r in os.environ.get("HERDR_REMOTES", "").split(",") if r.strip()]
 REMOTE_HERDR_BIN = os.environ.get("HERDR_REMOTE_BIN", "herdr").strip() or "herdr"
+REMOTE_CODEX_BIN = os.environ.get("HERDR_REMOTE_CODEX_BIN", "codex").strip() or "codex"
 
 
 def configured_workspace_roots() -> list[Path]:
@@ -228,6 +250,15 @@ AGENT_PROMPT_CONFIRM_ATTEMPTS = 15
 AGENT_PROMPT_CONFIRM_INTERVAL_SECONDS = 0.2
 AGENT_START_PANE_READY_TIMEOUT_SECONDS = 10
 AGENT_START_PANE_READY_INTERVAL_SECONDS = 0.1
+PROMPT_IMAGE_MAX_COUNT = 4
+PROMPT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+PROMPT_IMAGE_TOTAL_MAX_BYTES = 20 * 1024 * 1024
+PROMPT_IMAGE_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
+WEBSOCKET_MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 CONVERSATION_HISTORY_MAX_MESSAGES = 200
 CONVERSATION_HISTORY_CONTENT_MAX_CHARS = 20_000
 
@@ -435,7 +466,13 @@ def ssh_command_prefix(*, connect_timeout: int = 5, batch_mode: bool = True) -> 
     return command
 
 
-def run_remote_result(source: dict | str, args: list[str], *, timeout: int = 15):
+def run_remote_result(
+    source: dict | str,
+    args: list[str],
+    *,
+    timeout: int = 15,
+    input_data: bytes | None = None,
+):
     if isinstance(source, str):
         source = {
             "target": source,
@@ -452,15 +489,20 @@ def run_remote_result(source: dict | str, args: list[str], *, timeout: int = 15)
             remote_lock = threading.Lock()
             _remote_locks[lock_key] = remote_lock
     with remote_lock:
-        return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
+        options = {
+            "capture_output": True,
+            "timeout": timeout,
+            "check": False,
+        }
+        if input_data is None:
+            options.update({
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
+            })
+        else:
+            options["input"] = input_data
+        return subprocess.run(command, **options)
 
 
 def run_herdr_result(*args, remote=None, timeout=15):
@@ -498,10 +540,263 @@ def _mutate_herdr(*args, remote=None) -> bool:
         return False
 
 
-def plain_terminal_output(content: str) -> str:
+def terminal_text_without_controls(content: str) -> str:
     cleaned = ANSI_ESCAPE_RE.sub("", str(content or ""))
     cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
-    return CONTROL_CHARACTER_RE.sub("", cleaned).strip()
+    return CONTROL_CHARACTER_RE.sub("", cleaned)
+
+
+def plain_terminal_output(content: str) -> str:
+    return terminal_text_without_controls(content).strip()
+
+
+def terminal_display_width(content: str) -> int:
+    """Return the terminal-cell width of text after ANSI/control removal."""
+    width = 0
+    for character in terminal_text_without_controls(content):
+        if character in "\r\n":
+            continue
+        if character == "\t":
+            width += 8 - (width % 8)
+            continue
+        category = unicodedata.category(character)
+        if category in {"Mn", "Me", "Cf"}:
+            continue
+        width += 2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+    return width
+
+
+def infer_codex_snapshot_width(content: str) -> int:
+    """Infer the source pane width from Codex's full-width painted rows."""
+    candidates = []
+    for line in re.split(r"\r\n|\r|\n", str(content or "")):
+        visible = terminal_text_without_controls(line)
+        width = terminal_display_width(visible)
+        if width < CODEX_REFLOW_MIN_WIDTH:
+            continue
+        stripped = visible.strip()
+        background_blank = ANSI_BACKGROUND_RE.search(line) and not stripped
+        divider_cells = sum(character in "─━═—–_-=" for character in stripped)
+        divider = divider_cells >= 20 and divider_cells >= len(stripped) * 0.6
+        if background_blank or divider:
+            candidates.append(width)
+    if not candidates:
+        return 0
+    counts = {width: candidates.count(width) for width in set(candidates)}
+    return max(candidates, key=lambda width: (counts[width], width))
+
+
+def _sgr_codes(sequence: str):
+    parameters = ANSI_SGR_RE.fullmatch(sequence)
+    if not parameters:
+        return
+    values = [int(value or 0) for value in parameters.group("parameters").split(";")]
+    index = 0
+    while index < len(values):
+        code = values[index]
+        yield code
+        if code in {38, 48, 58} and index + 1 < len(values):
+            mode = values[index + 1]
+            if mode == 2:
+                index += 5
+                continue
+            if mode == 5:
+                index += 3
+                continue
+        index += 1
+
+
+def _codex_assistant_message_start(line: str) -> bool:
+    position = 0
+    dim = False
+    while True:
+        match = ANSI_ESCAPE_RE.match(line, position)
+        if not match:
+            break
+        sequence = match.group(0)
+        for code in _sgr_codes(sequence) or ():
+            if code == 0:
+                dim = False
+            elif code == 2:
+                dim = True
+            elif code == 22:
+                dim = False
+        position = match.end()
+    return dim and line[position:].startswith("• ")
+
+
+def _top_level_bullet(line: str) -> bool:
+    position = 0
+    while True:
+        match = ANSI_ESCAPE_RE.match(line, position)
+        if not match:
+            break
+        position = match.end()
+    return line[position:].startswith("• ")
+
+
+def _remove_leading_spaces_preserving_ansi(line: str, count: int) -> str:
+    if count <= 0:
+        return line
+    position = 0
+    removed = 0
+    prefix = []
+    while position < len(line) and removed < count:
+        match = ANSI_ESCAPE_RE.match(line, position)
+        if match:
+            prefix.append(match.group(0))
+            position = match.end()
+            continue
+        if line[position] != " ":
+            return line
+        removed += 1
+        position += 1
+    return "".join(prefix) + line[position:] if removed == count else line
+
+
+def _codex_reflow_separator(left: str, right: str) -> str:
+    left = terminal_text_without_controls(left).rstrip()
+    right = terminal_text_without_controls(right).lstrip()
+    if not left or not right:
+        return ""
+    left_character = left[-1]
+    right_character = right[0]
+    if right_character in ",.;:!?%)]}，。；：！？、）】》」』”’":
+        return ""
+    if left_character in "([{（【《「『“‘/\\@#_-":
+        return ""
+    left_wide = unicodedata.east_asian_width(left_character) in {"W", "F"}
+    right_wide = unicodedata.east_asian_width(right_character) in {"W", "F"}
+    return "" if left_wide and right_wide else " "
+
+
+def _codex_reflow_paragraph(
+    lines: list[str],
+    source_width: int,
+    assistant_start: bool,
+) -> list[str]:
+    if len(lines) < 2 or any(ANSI_BACKGROUND_RE.search(line) for line in lines):
+        return lines
+
+    visible = [terminal_text_without_controls(line) for line in lines]
+    first_text = (
+        visible[0][2:]
+        if assistant_start and visible[0].startswith("• ")
+        else visible[0].lstrip()
+    )
+    first_indent = (
+        0
+        if assistant_start
+        else len(visible[0]) - len(visible[0].lstrip(" "))
+    )
+    list_match = CODEX_LIST_ITEM_RE.match(visible[0])
+    if CODEX_STRUCTURAL_TEXT_RE.match(first_text) or (first_indent >= 4 and not list_match):
+        return lines
+
+    threshold = max(
+        CODEX_REFLOW_MIN_WIDTH - 1,
+        int(source_width * CODEX_REFLOW_MIN_FILL_RATIO),
+    )
+    output = [lines[0]]
+    previous_physical = lines[0]
+    item_indent = list_match.end() if list_match else None
+
+    for index in range(1, len(lines)):
+        current = lines[index]
+        current_visible = visible[index]
+        current_indent = len(current_visible) - len(current_visible.lstrip(" "))
+        current_list = CODEX_LIST_ITEM_RE.match(current_visible)
+        if current_list:
+            output.append(current)
+            previous_physical = current
+            item_indent = current_list.end()
+            continue
+
+        expected_indent = item_indent if item_indent is not None else (
+            2 if assistant_start else first_indent
+        )
+        structural = CODEX_STRUCTURAL_TEXT_RE.match(current_visible.lstrip())
+        should_join = (
+            not structural
+            and expected_indent > 0
+            and current_indent == expected_indent
+            and terminal_display_width(previous_physical) >= threshold
+        )
+        if should_join:
+            output[-1] += _codex_reflow_separator(previous_physical, current)
+            output[-1] += _remove_leading_spaces_preserving_ansi(
+                current,
+                expected_indent,
+            )
+        else:
+            output.append(current)
+        previous_physical = current
+    return output
+
+
+def reflow_codex_terminal_snapshot(content: str, source_width: int = 0) -> str:
+    """Turn Codex TUI prose rows back into logical lines for browser reflow.
+
+    Codex renders Markdown to physical rows at the source pane width, so tmux's
+    wrapped-line metadata cannot recover these boundaries. Only nearly-full
+    prose rows inside a dim Codex assistant message are joined. Structural
+    Markdown, code, tables, terminal events, and ANSI background rows remain
+    physical lines.
+    """
+    raw = str(content or "")
+    if not raw:
+        return ""
+    width = source_width or infer_codex_snapshot_width(raw)
+    if width < CODEX_REFLOW_MIN_WIDTH:
+        return raw
+
+    lines = re.split(r"\r\n|\r|\n", raw)
+    output = []
+    index = 0
+    inside_assistant_message = False
+    while index < len(lines):
+        line = lines[index]
+        assistant_start = _codex_assistant_message_start(line)
+        visible = terminal_text_without_controls(line)
+        if assistant_start:
+            inside_assistant_message = True
+        elif inside_assistant_message and (
+            (_top_level_bullet(line) and visible.strip())
+            or WORKED_FOR_RE.search(visible)
+            or WORKING_RE.search(visible)
+            or MODEL_PATH_RE.match(visible.strip())
+        ):
+            inside_assistant_message = False
+
+        if not inside_assistant_message or not visible.strip():
+            output.append(line)
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(lines) and terminal_text_without_controls(lines[end]).strip():
+            if _top_level_bullet(lines[end]):
+                break
+            end += 1
+        output.extend(
+            _codex_reflow_paragraph(lines[index:end], width, assistant_start)
+        )
+        index = end
+    return "\r\n".join(output)
+
+
+def compact_ansi_background_padding(content: str) -> str:
+    """Replace source-width color padding with erase-to-end terminal commands.
+
+    Codex paints diff rows by appending background-colored spaces up to the
+    source terminal width. A narrower browser terminal wraps those invisible
+    spaces onto another row, which makes every diff line look double-spaced.
+    CSI K preserves the full-row background without adding wrap-width cells.
+    """
+    return ANSI_TRAILING_BACKGROUND_PADDING_RE.sub(
+        lambda match: f"{match.group('background')}\x1b[K{match.group('suffix')}",
+        str(content or ""),
+    )
 
 
 def simplify_codex_terminal_snapshot(content: str, agent_status: str = "") -> str:
@@ -599,23 +894,40 @@ def read_pane_snapshot(
         "--lines",
         str(lines),
         "--source",
-        "recent",
     )
-    try:
-        result = run_herdr_result(*args, "--format", "ansi", remote=remote)
-    except Exception:
-        result = None
+    result = None
+    for source in ("recent-unwrapped", "recent"):
+        try:
+            candidate = run_herdr_result(
+                *args,
+                source,
+                "--format",
+                "ansi",
+                remote=remote,
+            )
+        except Exception:
+            candidate = None
+        if candidate is not None and candidate.returncode == 0:
+            result = candidate
+            break
 
     if result is not None and result.returncode == 0:
-        ansi_content = simplify_codex_terminal_snapshot(
-            str(result.stdout or "").strip(),
-            agent_status=agent_status,
+        raw_content = str(result.stdout or "").strip()
+        source_width = infer_codex_snapshot_width(raw_content)
+        ansi_content = compact_ansi_background_padding(
+            reflow_codex_terminal_snapshot(
+                simplify_codex_terminal_snapshot(
+                    raw_content,
+                    agent_status=agent_status,
+                ),
+                source_width=source_width,
+            )
         )
         return plain_terminal_output(ansi_content), ansi_content
 
     # Herdr versions predating ANSI pane snapshots still receive the original
     # plain-text request instead of leaving the Agent output window empty.
-    return run_herdr(*args, remote=remote), ""
+    return run_herdr(*args, "recent", remote=remote), ""
 
 
 def path_within_workspace_roots(path: Path) -> bool:
@@ -1844,9 +2156,147 @@ def cache_agent_prompt_with_tab(pane_id: str, text: str, remote=None) -> str:
     return "cached"
 
 
+def prompt_image_matches_media_type(data: bytes, media_type: str) -> bool:
+    if media_type == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "image/jpeg":
+        return data.startswith(b"\xff\xd8\xff")
+    if media_type == "image/webp":
+        return len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP"
+    return False
+
+
+def decode_prompt_images(value) -> list[dict]:
+    if value in (None, []):
+        return []
+    if not isinstance(value, list) or len(value) > PROMPT_IMAGE_MAX_COUNT:
+        raise ValueError(f"Prompt images must contain at most {PROMPT_IMAGE_MAX_COUNT} files")
+
+    decoded = []
+    total_bytes = 0
+    maximum_encoded_bytes = ((PROMPT_IMAGE_MAX_BYTES + 2) // 3) * 4 + 4
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Prompt image is invalid")
+        media_type = str(item.get("media_type") or "").casefold()
+        encoded = item.get("data")
+        if media_type not in PROMPT_IMAGE_EXTENSIONS or not isinstance(encoded, str):
+            raise ValueError("Prompt image type is not supported")
+        if not encoded or len(encoded) > maximum_encoded_bytes:
+            raise ValueError("Prompt image is too large")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise ValueError("Prompt image data is invalid") from error
+        if not data or len(data) > PROMPT_IMAGE_MAX_BYTES:
+            raise ValueError("Prompt image is too large")
+        if not prompt_image_matches_media_type(data, media_type):
+            raise ValueError("Prompt image content does not match its type")
+        total_bytes += len(data)
+        if total_bytes > PROMPT_IMAGE_TOTAL_MAX_BYTES:
+            raise ValueError("Prompt images are too large")
+        decoded.append({"media_type": media_type, "data": data})
+    return decoded
+
+
+def codex_session_id(agent: dict) -> str:
+    if str(agent.get("agent") or "").casefold() != "codex":
+        raise ValueError("Image prompts are only available for Codex agents")
+    session = agent.get("agent_session") or {}
+    value = session.get("value") if isinstance(session, dict) else ""
+    if (
+        not isinstance(value, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}", value)
+    ):
+        raise ValueError("Codex session is not available yet; refresh and try again")
+    return value
+
+
+def codex_queue_arguments(session_id: str, text: str, image_paths: list[str], remote=None) -> list[str]:
+    binary = (
+        remote.get("codex_bin", REMOTE_CODEX_BIN)
+        if isinstance(remote, dict)
+        else (REMOTE_CODEX_BIN if remote else CODEX)
+    )
+    arguments = [binary, "queue", "--thread", session_id, "--message", text]
+    for path in image_paths:
+        arguments.extend(["--image", path])
+    return arguments
+
+
+def write_remote_prompt_image(remote, path: str, data: bytes):
+    result = run_remote_result(
+        remote,
+        ["sh", "-c", 'umask 077; cat > "$1"', "herdr-image-upload", path],
+        timeout=20,
+        input_data=data,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Could not upload prompt image to the Agent host")
+
+
+def submit_codex_image_prompt(pane_id: str, text: str, images: list[dict], remote=None) -> str:
+    if not images:
+        raise ValueError("At least one prompt image is required")
+    agent = get_agent_info(pane_id, remote=remote)
+    session_id = codex_session_id(agent)
+    message = text.strip() or "请查看并分析附加图片。"
+    status = str(agent.get("agent_status", "unknown")).casefold()
+    if status == "blocked":
+        raise ValueError("Agent is blocked; answer the current prompt before sending images")
+    delivery = (
+        "queued"
+        if status == "working"
+        else "confirmed"
+    )
+
+    if not remote:
+        with tempfile.TemporaryDirectory(prefix="herdr-prompt-images-") as directory:
+            paths = []
+            for index, image in enumerate(images, start=1):
+                path = Path(directory) / f"image-{index}{PROMPT_IMAGE_EXTENSIONS[image['media_type']]}"
+                path.write_bytes(image["data"])
+                paths.append(str(path))
+            result = subprocess.run(
+                codex_queue_arguments(session_id, message, paths),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError("Codex rejected the image prompt")
+        return delivery
+
+    remote_directory = f"/tmp/herdr-prompt-images-{secrets.token_hex(12)}"
+    remote_paths = [
+        f"{remote_directory}/image-{index}{PROMPT_IMAGE_EXTENSIONS[image['media_type']]}"
+        for index, image in enumerate(images, start=1)
+    ]
+    created = run_remote_result(remote, ["mkdir", "-m", "700", remote_directory], timeout=10)
+    if created.returncode != 0:
+        raise RuntimeError("Could not prepare prompt images on the Agent host")
+    try:
+        for path, image in zip(remote_paths, images):
+            write_remote_prompt_image(remote, path, image["data"])
+        result = run_remote_result(
+            remote,
+            codex_queue_arguments(session_id, message, remote_paths, remote=remote),
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("Codex rejected the image prompt")
+    finally:
+        run_remote_result(remote, ["rm", "-f", *remote_paths], timeout=10)
+        run_remote_result(remote, ["rmdir", remote_directory], timeout=10)
+    return delivery
+
+
 def start_codex_on_source(cwd: str, prompt: str, source: dict) -> dict:
-    if not isinstance(prompt, str) or len(prompt) > 1000:
-        raise ValueError("Prompt must contain at most 1000 characters")
+    if not isinstance(prompt, str):
+        raise ValueError("Prompt must be text")
 
     remote = source if source["kind"] != "local" else None
     if remote:
@@ -2851,7 +3301,7 @@ def http_headers(content_type: str, cache_control: str = "no-cache", extra: list
     values = [
         ("Content-Type", content_type),
         ("Cache-Control", cache_control),
-        ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
+        ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
         ("Cross-Origin-Opener-Policy", "same-origin"),
         ("Cross-Origin-Resource-Policy", "same-origin"),
         ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"),
@@ -3387,9 +3837,9 @@ async def handle_client(ws):
                     )))
                     continue
                 text = raw_text.strip()
-                if not text or len(text) > 1000:
+                if not text:
                     await ws.send(json.dumps(command_error(
-                        "response empty or too long", request_id
+                        "response empty", request_id
                     )))
                     continue
                 raw_pane_id, remote = pane_route(pane_id)
@@ -3512,8 +3962,8 @@ async def handle_client(ws):
                     continue
                 cwd = msg.get("cwd", "")
                 prompt = msg.get("prompt", "")
-                if not isinstance(prompt, str) or len(prompt) > 1000:
-                    await ws.send(json.dumps({"type": "error", "message": "Prompt must contain at most 1000 characters"}))
+                if not isinstance(prompt, str):
+                    await ws.send(json.dumps({"type": "error", "message": "Prompt must be text"}))
                     continue
                 try:
                     source = agent_source(msg.get("source_id"))
@@ -3721,16 +4171,39 @@ async def handle_client(ws):
                     await ws.send(json.dumps(command_error("unknown pane_id", request_id)))
                     continue
                 text = msg.get("text", "")
-                if not isinstance(text, str) or not text or len(text) > 1000:
+                try:
+                    images = decode_prompt_images(msg.get("images", []))
+                except ValueError as error:
+                    await ws.send(json.dumps(command_error(str(error), request_id)))
+                    continue
+                if not isinstance(text, str) or (not text and not images):
                     await ws.send(json.dumps(command_error(
-                        "text empty or too long", request_id
+                        "prompt is empty", request_id
                     )))
                     continue
                 raw_pane_id, remote = pane_route(pane_id)
-                log.info("Agent prompt from %s (%s): pane=%s chars=%d", ip, device, pane_id, len(text))
-                audit("agent_prompt", ip, device, pane_id, sensitive_detail(text))
+                log.info(
+                    "Agent prompt from %s (%s): pane=%s chars=%d images=%d",
+                    ip, device, pane_id, len(text), len(images),
+                )
+                audit(
+                    "agent_prompt", ip, device, pane_id,
+                    f"{sensitive_detail(text)} images={len(images)}",
+                )
                 try:
-                    delivery = await asyncio.to_thread(submit_agent_prompt, raw_pane_id, text, remote)
+                    if images:
+                        delivery = await asyncio.to_thread(
+                            submit_codex_image_prompt,
+                            raw_pane_id,
+                            text,
+                            images,
+                            remote,
+                        )
+                    else:
+                        delivery = await asyncio.to_thread(submit_agent_prompt, raw_pane_id, text, remote)
+                except ValueError as error:
+                    await ws.send(json.dumps(command_error(str(error), request_id)))
+                    continue
                 except Exception as e:
                     # Exception strings from subprocess may embed the full prompt command.
                     log.warning("agent_prompt command failed for pane %s (%s)", pane_id, type(e).__name__)
@@ -3748,8 +4221,8 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
                 text = msg.get("text", "")
-                if not isinstance(text, str) or not text or len(text) > 1000:
-                    await ws.send(json.dumps({"type": "error", "message": "text empty or too long"}))
+                if not isinstance(text, str) or not text:
+                    await ws.send(json.dumps({"type": "error", "message": "text empty"}))
                     continue
                 raw_pane_id, remote = pane_route(pane_id)
                 log.info("Agent prompt cache from %s (%s): pane=%s chars=%d", ip, device, pane_id, len(text))
@@ -3788,8 +4261,8 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
                 text = msg.get("text", "")
-                if not isinstance(text, str) or not text or len(text) > 1000:
-                    await ws.send(json.dumps({"type": "error", "message": "text empty or too long"}))
+                if not isinstance(text, str) or not text:
+                    await ws.send(json.dumps({"type": "error", "message": "text empty"}))
                     continue
                 raw_pane_id, remote = pane_route(pane_id)
                 log.info("Text from %s (%s): pane=%s chars=%d", ip, device, pane_id, len(text))
@@ -3953,7 +4426,7 @@ async def main():
             RELAY_HOST,
             WS_PORT,
             process_request=process_request,
-            max_size=64 * 1024,
+            max_size=WEBSOCKET_MAX_MESSAGE_BYTES,
             max_queue=32,
         )
         sources = configured_agent_sources()

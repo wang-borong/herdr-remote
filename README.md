@@ -84,7 +84,7 @@ cd relay
 ./install-tailscale-web.sh
 ```
 
-The web console includes the Agent Dashboard, live pane output, semantic Prompt submission, Tab-to-queue for a working Codex agent, confirmed Interrupt, safe workspace-directory browsing, a responsive local/SSH file reader with sanitized Markdown, sandboxed HTML, and syntax highlighting, one-time file downloads, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
+The web console includes the Agent Dashboard, live pane output, semantic Prompt submission with pasted, dropped, or selected image attachments for Codex, Tab-to-queue for a working Codex agent, confirmed Interrupt, safe workspace-directory browsing, a responsive local/SSH file reader with sanitized Markdown, sandboxed HTML, and syntax highlighting, one-time file downloads, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
 
 For full workstation maintenance, enable official Tailscale SSH plus the responsive Web Terminal:
 

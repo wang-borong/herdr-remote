@@ -1243,7 +1243,7 @@ input::placeholder {
   background: transparent;
   font-family: "SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", monospace;
   font-size: clamp(11px, 1.1vw, 13px);
-  line-height: 1.65;
+  line-height: 1.45;
   tab-size: 2;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1428,6 +1428,84 @@ textarea:focus {
   line-height: 1.55;
 }
 
+#prompt-form.is-dragging #prompt-input {
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--surface-soft));
+  border-color: color-mix(in srgb, var(--accent) 72%, transparent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.prompt-attachments {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.prompt-attachment {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--accent-soft) 48%, var(--surface-soft));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 10px;
+}
+
+.prompt-attachment img {
+  width: 42px;
+  height: 42px;
+  display: block;
+  object-fit: cover;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.prompt-attachment-copy {
+  min-width: 0;
+}
+
+.prompt-attachment-copy strong,
+.prompt-attachment-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-attachment-copy strong {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.prompt-attachment-copy span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.prompt-attachment-remove {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.prompt-attachment-remove:hover:not(:disabled) {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
 .composer-footer {
   display: flex;
   align-items: center;
@@ -1445,6 +1523,15 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.attach-image-button {
+  min-width: 88px;
+}
+
+.attach-image-button svg {
+  width: 15px;
+  height: 15px;
 }
 
 .queue-prompt-button {
@@ -4458,18 +4545,32 @@ dialog {
   .composer-actions {
     width: 100%;
     display: grid;
-    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    grid-template-columns: auto minmax(0, 0.9fr) minmax(0, 1.1fr);
     gap: 6px;
   }
 
   .send-button,
-  .queue-prompt-button {
+  .queue-prompt-button,
+  .attach-image-button {
     width: 100%;
     min-width: 0;
     min-height: 38px;
     padding-right: 10px;
     padding-left: 10px;
     font-size: 12px;
+  }
+
+  .attach-image-button {
+    width: 42px;
+    padding: 0;
+  }
+
+  .attach-image-button span {
+    display: none;
+  }
+
+  .prompt-attachments {
+    grid-template-columns: 1fr;
   }
 
   .modal-header,

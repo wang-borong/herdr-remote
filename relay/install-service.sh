@@ -334,6 +334,7 @@ generate_pairing_code() {
 
 UV_PATH="$(find_binary uv)"
 HERDR_PATH="$(find_binary herdr)"
+CODEX_PATH="$(find_binary codex)"
 HERDR_PUSH_PATH="$(find_binary herdr-push)"
 if [ "$TELEGRAM_ONLY" = true ] || [ "${HERDR_INSTALL_SKIP_CLOUDFLARED:-0}" = "1" ]; then
     CLOUDFLARED_PATH=""
@@ -347,6 +348,7 @@ echo ""
 echo "  OS:          $OS"
 echo "  uv:          ${UV_PATH:-NOT FOUND}"
 echo "  herdr:       ${HERDR_PATH:-NOT FOUND}"
+echo "  codex:       ${CODEX_PATH:-NOT FOUND}"
 echo "  herdr-push:  ${HERDR_PUSH_PATH:-NOT FOUND}"
 echo "  cloudflared: ${CLOUDFLARED_PATH:-NOT FOUND}"
 echo "  relay:       $SCRIPT_DIR/herdr_relay.py"
@@ -958,6 +960,8 @@ HERDR_WORKSPACE_ROOTS=${HERDR_WORKSPACE_ROOTS:-$HOME/Workspace}
 HERDR_TAILSCALE_WEB=${HERDR_TAILSCALE_WEB:-0}
 HERDR_TAILSCALE_ALLOWED_USERS=${HERDR_TAILSCALE_ALLOWED_USERS:-}
 HERDR_BIN=${HERDR_PATH:-herdr}
+HERDR_CODEX_BIN=${CODEX_PATH:-codex}
+HERDR_REMOTE_CODEX_BIN=${HERDR_REMOTE_CODEX_BIN:-codex}
 HERDR_SSH_CONFIG_FILE=${HERDR_SSH_CONFIG_FILE:-$HOME/.ssh/config}
 HERDR_LOG_DIR=$LOG_DIR
 HERDR_TUNNEL_MODE=$CONFIG_TUNNEL_MODE

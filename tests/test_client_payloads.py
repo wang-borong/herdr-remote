@@ -85,8 +85,8 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn('id="file-html-preview"', html)
         self.assertIn('title="HTML 安全预览" sandbox referrerpolicy="no-referrer"', html)
         self.assertIn('id="file-html-view-button"', html)
-        self.assertIn('href="/app.css?v=20260826-7"', html)
-        self.assertIn('src="/app.js?v=20260826-7"', html)
+        self.assertIn('href="/app.css?v=20260828-1"', html)
+        self.assertIn('src="/app.js?v=20260828-1"', html)
         self.assertNotIn("allow-scripts", html)
         self.assertNotIn("allow-forms", html)
         self.assertNotIn("allow-same-origin", html)
@@ -121,6 +121,28 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn(".html-preview {\n  color-scheme: inherit;", styles)
         self.assertIn("background: var(--surface-strong);", styles)
         self.assertIn(".file-kind-badge.is-html", styles)
+
+    def test_web_prompt_supports_images_without_an_arbitrary_text_limit(self):
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "web" / "app.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="prompt-image-input"', html)
+        self.assertIn('accept="image/png,image/jpeg,image/webp" multiple', html)
+        self.assertIn('id="attach-image-button"', html)
+        self.assertIn('id="prompt-attachments"', html)
+        self.assertNotIn('maxlength="1000"', html)
+        self.assertNotIn("0 / 1000", html)
+        self.assertIn("const PROMPT_IMAGE_MAX_COUNT = 4", source)
+        self.assertIn('addEventListener("paste"', source)
+        self.assertIn('addEventListener("drop"', source)
+        self.assertIn("message.images = encodedImages", source)
+        self.assertIn("new FileReader()", source)
+        self.assertIn("pendingPromptSubmissionId !== submissionId", source)
+        self.assertIn("lineHeight: 1.1", source)
+        self.assertNotIn("lineHeight: 1.35", source)
+        self.assertIn(".prompt-attachment", styles)
+        self.assertIn("#prompt-form.is-dragging #prompt-input", styles)
 
     def test_swift_models_decode_omp_question_state(self):
         for relative_path in (

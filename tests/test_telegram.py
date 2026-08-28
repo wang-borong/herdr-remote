@@ -1552,7 +1552,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         read_pane.assert_not_awaited()
         self.assertIn("no longer available", callback.message.replies[0][0].lower())
 
-    async def test_oversized_native_reply_is_rejected_before_relay_send(self):
+    async def test_long_native_reply_is_forwarded_to_relay(self):
         tg.relay_connected = True
         tg.agents = make_agents(1)
         tg.register_pending(42, 77, "w0:p1")
@@ -1560,11 +1560,16 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         message.reply_to_message = SimpleNamespace(message_id=77)
         message.text = "x" * 1001
 
-        with patch.object(tg, "relay_request", AsyncMock()) as relay_request:
+        with patch.object(
+            tg,
+            "relay_request",
+            AsyncMock(return_value={"command": "agent_prompt", "ok": True}),
+        ) as relay_request:
             await tg.handle_text(make_update(message=message), SimpleNamespace())
 
-        relay_request.assert_not_awaited()
-        self.assertIn("1-1000", message.replies[0][0])
+        relay_request.assert_awaited_once()
+        self.assertEqual(relay_request.await_args.args[0]["text"], message.text)
+        self.assertEqual(message.replies[0][0], "Sent")
 
 
 if __name__ == "__main__":

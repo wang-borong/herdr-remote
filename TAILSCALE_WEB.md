@@ -161,7 +161,7 @@ Clash mixed 端口不同，请替换 `7897`。也可以设置
 3. 用手机浏览器打开安装器输出的 `https://...ts.net` 地址。
 4. 可通过浏览器菜单“添加到主屏幕”，获得接近原生 App 的全屏体验。
 
-手机页面底部可在 Agents、终端和文件之间切换。Files 页面先显示主机与文件列表，点击文件后进入全屏阅读器，左上角返回文件列表；代码、Markdown 和 HTML 可复制原文，HTML 还可在安全渲染与源码模式间切换，其他普通文件可直接下载。Agent 页面中，普通发送会立即提交 Prompt；当 Agent 正在工作时，**Tab 缓存**按钮会将内容放入 Codex 队列，等待当前任务完成后处理。左上角返回按钮回到 Dashboard。新建 Agent 按钮在顶栏始终可用。
+手机页面底部可在 Agents、终端和文件之间切换。Files 页面先显示主机与文件列表，点击文件后进入全屏阅读器，左上角返回文件列表；代码、Markdown 和 HTML 可复制原文，HTML 还可在安全渲染与源码模式间切换，其他普通文件可直接下载。Agent 页面中，普通发送会立即提交 Prompt；Codex Prompt 可通过图片按钮、剪贴板粘贴或拖放附加 PNG、JPEG、WebP 图片。当 Agent 正在工作时，纯文本的 **Tab 缓存**按钮会将内容放入 Codex 队列，等待当前任务完成后处理。左上角返回按钮回到 Dashboard。新建 Agent 按钮在顶栏始终可用。
 
 ## 配置
 
@@ -179,6 +179,8 @@ HERDR_RELAY_HOST=127.0.0.1
 HERDR_TAILSCALE_WEB=1
 HERDR_TAILSCALE_ALLOWED_USERS=you@example.com
 HERDR_WORKSPACE_ROOTS=/home/user/Workspace:/srv/repos
+HERDR_CODEX_BIN=/home/user/.local/bin/codex
+HERDR_REMOTE_CODEX_BIN=codex
 HERDR_TAILSCALE_SSH=1
 HERDR_WEB_TERMINAL=1
 HERDR_TERMINAL_ALLOWED_USERS=you@example.com
