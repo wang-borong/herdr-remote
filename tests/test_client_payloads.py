@@ -85,8 +85,8 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn('id="file-html-preview"', html)
         self.assertIn('title="HTML 安全预览" sandbox referrerpolicy="no-referrer"', html)
         self.assertIn('id="file-html-view-button"', html)
-        self.assertIn('href="/app.css?v=20260828-2"', html)
-        self.assertIn('src="/app.js?v=20260828-2"', html)
+        self.assertIn('href="/app.css?v=20260828-3"', html)
+        self.assertIn('src="/app.js?v=20260828-3"', html)
         self.assertNotIn("allow-scripts", html)
         self.assertNotIn("allow-forms", html)
         self.assertNotIn("allow-same-origin", html)
@@ -153,6 +153,15 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn("outputRenderedColumns: 0", source)
         self.assertIn("state.outputRenderedColumns === terminal.cols", source)
         self.assertIn("fitAgentOutputDividers(snapshot, terminal.cols)", source)
+
+    def test_web_agent_output_reserves_desktop_scrollbar_gutter(self):
+        styles = (ROOT / "web" / "app.css").read_text(encoding="utf-8")
+
+        self.assertRegex(
+            styles,
+            r"@media \(min-width: 901px\) \{\s*"
+            r"\.agent-output-terminal \.xterm \{[^}]*padding-right: 8px;",
+        )
 
     def test_swift_models_decode_omp_question_state(self):
         for relative_path in (
