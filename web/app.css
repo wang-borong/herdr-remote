@@ -1196,13 +1196,8 @@ input::placeholder {
 
 .agent-output-terminal .xterm {
   height: 100%;
-}
-
-@media (min-width: 901px) {
-  .agent-output-terminal .xterm {
-    /* FitAddon reserves 14px, but some native desktop scrollbars are wider. */
-    padding-right: 8px;
-  }
+  /* Keep xterm's repeated-glyph width probe consistent with rendered CJK punctuation. */
+  text-spacing-trim: space-all;
 }
 
 .agent-output-terminal .xterm.is-touch-selecting {
