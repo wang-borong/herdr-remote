@@ -18,6 +18,11 @@ const PROMPT_IMAGE_TYPES = Object.freeze({
 const PROMPT_IMAGE_MAX_COUNT = 4;
 const PROMPT_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const PROMPT_IMAGE_TOTAL_MAX_BYTES = 20 * 1024 * 1024;
+const ANSI_ESCAPE_SEQUENCE_RE = /\x1B(?:\][^\x07]*(?:\x07|\x1B\\)|[@-_][0-?]*[ -/]*[@-~])/g;
+const AGENT_DIVIDER_TEXT_RE = /^[─━═—–_\-=]+$/u;
+const AGENT_DIVIDER_RUN_RE = /[─━═—–_\-=]+/gu;
+const AGENT_DIVIDER_GLYPH_RE = /[─━═—–_\-=]/gu;
+const UNICODE_MARK_RE = /\p{Mark}/u;
 
 const elements = {
   connectionDot: byId("connection-dot"),
@@ -306,8 +311,11 @@ const state = {
   outputTerminalInstance: null,
   outputTerminalFitAddon: null,
   outputTerminalResizeObserver: null,
+  outputTerminalSurfaceWidth: 0,
+  outputTerminalSurfaceHeight: 0,
   outputRenderedPane: null,
   outputRenderedSnapshot: null,
+  outputRenderedColumns: 0,
   outputRenderId: 0,
   autoRefresh: true,
   lines: 120,
@@ -2042,11 +2050,11 @@ function ensureAgentOutputTerminal() {
       if (state.outputTerminalInstance !== terminal) return;
       terminal.options.fontFamily = TERMINAL_FONT_FAMILY;
       terminal.refresh(0, Math.max(0, terminal.rows - 1));
-      window.requestAnimationFrame(fitAgentOutputTerminal);
+      window.requestAnimationFrame(() => refitAgentOutputTerminal(true));
     });
 
     if ("ResizeObserver" in window) {
-      state.outputTerminalResizeObserver = new ResizeObserver(() => fitAgentOutputTerminal());
+      state.outputTerminalResizeObserver = new ResizeObserver(() => refitAgentOutputTerminal());
       state.outputTerminalResizeObserver.observe(elements.agentOutputTerminal);
     }
     window.requestAnimationFrame(fitAgentOutputTerminal);
@@ -2059,18 +2067,83 @@ function ensureAgentOutputTerminal() {
   }
 }
 
+function agentOutputTextCellWidth(text) {
+  let width = 0;
+  for (const character of String(text || "")) {
+    const codePoint = character.codePointAt(0);
+    if (UNICODE_MARK_RE.test(character) || codePoint === 0x200d || codePoint === 0xfeff) continue;
+    const wide = (
+      (codePoint >= 0x1100 && codePoint <= 0x115f)
+      || codePoint === 0x2329
+      || codePoint === 0x232a
+      || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+      || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+      || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+      || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+      || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+      || (codePoint >= 0xff00 && codePoint <= 0xff60)
+      || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+      || (codePoint >= 0x1f300 && codePoint <= 0x1faff)
+      || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+    );
+    width += wide ? 2 : 1;
+  }
+  return width;
+}
+
+function fitAgentOutputDividers(snapshot, columns) {
+  const width = Math.max(1, Math.trunc(Number(columns) || 0));
+  return String(snapshot || "").replace(/[^\r\n]+/g, (line) => {
+    const visible = line.replace(ANSI_ESCAPE_SEQUENCE_RE, "");
+    const dividerCells = [...visible.matchAll(AGENT_DIVIDER_GLYPH_RE)].length;
+    const dividerDominated = dividerCells >= 20 && dividerCells >= [...visible].length * 0.6;
+    if (!AGENT_DIVIDER_TEXT_RE.test(visible) && !dividerDominated) return line;
+
+    let divider = null;
+    for (const match of line.matchAll(AGENT_DIVIDER_RUN_RE)) {
+      if (!divider || match[0].length > divider[0].length) divider = match;
+    }
+    if (!divider) return line;
+    const glyph = [...divider[0]][0] || "─";
+    const fixedWidth = agentOutputTextCellWidth(visible) - [...divider[0]].length;
+    const dividerWidth = Math.max(1, width - fixedWidth);
+    return `${line.slice(0, divider.index)}${glyph.repeat(dividerWidth)}${line.slice(divider.index + divider[0].length)}`;
+  });
+}
+
 function fitAgentOutputTerminal() {
   const terminal = state.outputTerminalInstance;
-  if (!terminal || !state.outputTerminalFitAddon || elements.agentOutputTerminal.hidden) return;
-  if (agentOutputSelectionLocked(terminal)) return;
-  if (elements.agentOutputTerminal.clientWidth < 80 || elements.agentOutputTerminal.clientHeight < 80) return;
+  if (!terminal || !state.outputTerminalFitAddon || elements.agentOutputTerminal.hidden) return false;
+  if (agentOutputSelectionLocked(terminal)) return false;
+  if (elements.agentOutputTerminal.clientWidth < 80 || elements.agentOutputTerminal.clientHeight < 80) return false;
   const fontSize = isDesktop() ? 13 : 11;
   if (terminal.options.fontSize !== fontSize) terminal.options.fontSize = fontSize;
+  const previousColumns = terminal.cols;
   try {
     state.outputTerminalFitAddon.fit();
   } catch (_) {
-    return;
+    return false;
   }
+  return terminal.cols !== previousColumns;
+}
+
+function refitAgentOutputTerminal(force = false) {
+  const terminal = state.outputTerminalInstance;
+  if (!terminal) return;
+  const bounds = elements.agentOutputTerminal.getBoundingClientRect();
+  const surfaceWidth = Math.round(bounds.width);
+  const surfaceHeight = Math.round(bounds.height);
+  if (
+    !force
+    && surfaceWidth === state.outputTerminalSurfaceWidth
+    && surfaceHeight === state.outputTerminalSurfaceHeight
+  ) return;
+  state.outputTerminalSurfaceWidth = surfaceWidth;
+  state.outputTerminalSurfaceHeight = surfaceHeight;
+  const columnsChanged = fitAgentOutputTerminal();
+  if (!columnsChanged || state.outputRenderedSnapshot === null) return;
+  state.outputRenderedColumns = 0;
+  renderOutput();
 }
 
 function clearTerminalResizeAckTimer() {
@@ -2232,7 +2305,7 @@ function syncVisualViewportLayout() {
   document.documentElement.style.setProperty("--app-viewport-offset-top", `${viewportOffsetTop}px`);
   const keyboardChanged = setShellKeyboardOpen(keyboardOpen);
   if (!keyboardChanged) scheduleWebTerminalFit();
-  if (state.activeView !== "terminal") fitAgentOutputTerminal();
+  if (state.activeView !== "terminal") refitAgentOutputTerminal();
 }
 
 function initializeMobileViewportHandling() {
@@ -3470,8 +3543,10 @@ function renderOutput() {
 
   if (ensureAgentOutputTerminal()) {
     const terminal = state.outputTerminalInstance;
+    fitAgentOutputTerminal();
     const unchanged = state.outputRenderedPane === state.activePane
-      && state.outputRenderedSnapshot === snapshot;
+      && state.outputRenderedSnapshot === snapshot
+      && state.outputRenderedColumns === terminal.cols;
     const selectionLocksSnapshot = agentOutputSelectionLocked(terminal)
       && state.outputRenderedPane === state.activePane;
     if (!unchanged && !selectionLocksSnapshot) {
@@ -3484,10 +3559,13 @@ function renderOutput() {
       const renderId = ++state.outputRenderId;
       state.outputRenderedPane = state.activePane;
       state.outputRenderedSnapshot = snapshot;
+      state.outputRenderedColumns = terminal.cols;
       window.requestAnimationFrame(() => {
         if (renderId !== state.outputRenderId) return;
         fitAgentOutputTerminal();
-        terminal.write(`\x1bc${snapshot}`, () => {
+        const fittedSnapshot = fitAgentOutputDividers(snapshot, terminal.cols);
+        state.outputRenderedColumns = terminal.cols;
+        terminal.write(`\x1bc${fittedSnapshot}`, () => {
           if (renderId !== state.outputRenderId) return;
           if (preserveScroll && distanceFromBottom > 0) {
             terminal.scrollToLine(Math.max(0, terminal.buffer.active.baseY - distanceFromBottom));

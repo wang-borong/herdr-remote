@@ -85,8 +85,8 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn('id="file-html-preview"', html)
         self.assertIn('title="HTML 安全预览" sandbox referrerpolicy="no-referrer"', html)
         self.assertIn('id="file-html-view-button"', html)
-        self.assertIn('href="/app.css?v=20260828-1"', html)
-        self.assertIn('src="/app.js?v=20260828-1"', html)
+        self.assertIn('href="/app.css?v=20260828-2"', html)
+        self.assertIn('src="/app.js?v=20260828-2"', html)
         self.assertNotIn("allow-scripts", html)
         self.assertNotIn("allow-forms", html)
         self.assertNotIn("allow-same-origin", html)
@@ -143,6 +143,16 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertNotIn("lineHeight: 1.35", source)
         self.assertIn(".prompt-attachment", styles)
         self.assertIn("#prompt-form.is-dragging #prompt-input", styles)
+
+    def test_web_agent_output_fits_dividers_to_current_terminal_width(self):
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function fitAgentOutputDividers(snapshot, columns)", source)
+        self.assertIn("glyph.repeat(dividerWidth)", source)
+        self.assertIn("const dividerDominated =", source)
+        self.assertIn("outputRenderedColumns: 0", source)
+        self.assertIn("state.outputRenderedColumns === terminal.cols", source)
+        self.assertIn("fitAgentOutputDividers(snapshot, terminal.cols)", source)
 
     def test_swift_models_decode_omp_question_state(self):
         for relative_path in (
