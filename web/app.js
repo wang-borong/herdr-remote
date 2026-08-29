@@ -4729,6 +4729,14 @@ function requestWorkspaceUploadFiles() {
   }
   if (state.fileUploadPending) return;
   state.fileUploadTarget = target;
+  try {
+    if (typeof elements.fileUploadInput.showPicker === "function") {
+      elements.fileUploadInput.showPicker();
+      return;
+    }
+  } catch (_) {
+    // Fall back to click() when a browser exposes showPicker() but declines it.
+  }
   elements.fileUploadInput.click();
 }
 

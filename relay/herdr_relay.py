@@ -15,6 +15,7 @@ import ipaddress
 import json
 import logging
 import os
+import queue as thread_queue
 import re
 import secrets
 import shlex
@@ -276,6 +277,9 @@ AGENT_START_PANE_READY_INTERVAL_SECONDS = 0.1
 PROMPT_IMAGE_MAX_COUNT = 4
 PROMPT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 PROMPT_IMAGE_TOTAL_MAX_BYTES = 20 * 1024 * 1024
+CODEX_APP_SERVER_INITIALIZE_TIMEOUT_SECONDS = 10
+CODEX_APP_SERVER_QUEUE_TIMEOUT_SECONDS = 30
+CODEX_APP_SERVER_STOP_TIMEOUT_SECONDS = 2
 PROMPT_IMAGE_EXTENSIONS = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -511,6 +515,19 @@ def ssh_command_prefix(*, connect_timeout: int = 5, batch_mode: bool = True) -> 
     return command
 
 
+def remote_command_arguments(source: dict | str, args: list[str]) -> list[str]:
+    if isinstance(source, str):
+        source = {
+            "target": source,
+            "port": 22,
+        }
+    command = ssh_command_prefix()
+    if source.get("port", 22) != 22:
+        command.extend(["-p", str(source["port"])])
+    command.extend([source["target"], shlex.join(args)])
+    return command
+
+
 def run_remote_result(
     source: dict | str,
     args: list[str],
@@ -523,10 +540,7 @@ def run_remote_result(
             "target": source,
             "port": 22,
         }
-    command = ssh_command_prefix()
-    if source.get("port", 22) != 22:
-        command.extend(["-p", str(source["port"])])
-    command.extend([source["target"], shlex.join(args)])
+    command = remote_command_arguments(source, args)
     lock_key = (str(source["target"]), int(source.get("port", 22)))
     with _remote_locks_guard:
         remote_lock = _remote_locks.get(lock_key)
@@ -2705,16 +2719,223 @@ def codex_session_id(agent: dict) -> str:
     return value
 
 
-def codex_queue_arguments(session_id: str, text: str, image_paths: list[str], remote=None) -> list[str]:
-    binary = (
+class CodexAppServerUnavailable(RuntimeError):
+    """Raised when an older Codex host cannot accept app-server requests."""
+
+
+def codex_binary(remote=None) -> str:
+    return (
         remote.get("codex_bin", REMOTE_CODEX_BIN)
         if isinstance(remote, dict)
         else (REMOTE_CODEX_BIN if remote else CODEX)
     )
+
+
+def codex_queue_arguments(session_id: str, text: str, image_paths: list[str], remote=None) -> list[str]:
+    binary = codex_binary(remote)
     arguments = [binary, "queue", "--thread", session_id, "--message", text]
     for path in image_paths:
         arguments.extend(["--image", path])
     return arguments
+
+
+def codex_prompt_input(text: str, images: list[dict]) -> list[dict]:
+    items = [{"type": "text", "text": text}]
+    for image in images:
+        encoded = base64.b64encode(image["data"]).decode("ascii")
+        items.append({
+            "type": "image",
+            "url": f"data:{image['media_type']};base64,{encoded}",
+        })
+    return items
+
+
+def codex_app_server_output_reader(stream, messages: thread_queue.Queue) -> None:
+    try:
+        for line in stream:
+            messages.put(line)
+    except (OSError, ValueError):
+        pass
+    finally:
+        messages.put(None)
+
+
+def codex_app_server_method_unavailable(error: dict) -> bool:
+    code = error.get("code")
+    message = str(error.get("message") or "").casefold()
+    return code == -32601 or any(marker in message for marker in (
+        "method not found",
+        "unknown method",
+        "does not support thread/queue/add",
+    ))
+
+
+def read_codex_app_server_response(
+    messages: thread_queue.Queue,
+    request_id: str,
+    timeout: float,
+    *,
+    unavailable_on_failure: bool = False,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if unavailable_on_failure:
+                raise CodexAppServerUnavailable("Codex app-server did not respond")
+            raise RuntimeError("Codex app-server timed out while queuing the image prompt")
+        try:
+            line = messages.get(timeout=remaining)
+        except thread_queue.Empty as error:
+            if unavailable_on_failure:
+                raise CodexAppServerUnavailable("Codex app-server did not respond") from error
+            raise RuntimeError("Codex app-server timed out while queuing the image prompt") from error
+        if line is None:
+            if unavailable_on_failure:
+                raise CodexAppServerUnavailable("Codex app-server exited before initialization")
+            raise RuntimeError("Codex app-server exited before queuing the image prompt")
+        try:
+            response = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(response, dict) or response.get("id") != request_id:
+            continue
+        error = response.get("error")
+        if isinstance(error, dict):
+            if unavailable_on_failure or codex_app_server_method_unavailable(error):
+                raise CodexAppServerUnavailable("Codex app-server image queue is unavailable")
+            raise RuntimeError("Codex app-server rejected the image prompt")
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("Codex app-server returned an invalid image prompt response")
+        return result
+
+
+def write_codex_app_server_message(process, payload: dict, *, unavailable=False) -> None:
+    if process.stdin is None:
+        if unavailable:
+            raise CodexAppServerUnavailable("Codex app-server input is unavailable")
+        raise RuntimeError("Codex app-server input is unavailable")
+    try:
+        process.stdin.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        process.stdin.flush()
+    except (BrokenPipeError, OSError, ValueError) as error:
+        if unavailable:
+            raise CodexAppServerUnavailable("Codex app-server input closed unexpectedly") from error
+        raise RuntimeError("Codex app-server input closed unexpectedly") from error
+
+
+def stop_codex_app_server(process) -> None:
+    if process.poll() is None:
+        with contextlib.suppress(OSError):
+            process.terminate()
+    if process.stdin is not None:
+        with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+            process.stdin.close()
+    try:
+        process.wait(timeout=CODEX_APP_SERVER_STOP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=CODEX_APP_SERVER_STOP_TIMEOUT_SECONDS)
+    if process.stdout is not None:
+        with contextlib.suppress(OSError, ValueError):
+            process.stdout.close()
+
+
+def submit_codex_app_server_prompt(
+    session_id: str,
+    text: str,
+    images: list[dict],
+    remote=None,
+) -> None:
+    arguments = [codex_binary(remote), "app-server", "--stdio"]
+    command = remote_command_arguments(remote, arguments) if remote else arguments
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except OSError as error:
+        raise CodexAppServerUnavailable("Could not start Codex app-server") from error
+    if process.stdout is None:
+        stop_codex_app_server(process)
+        raise CodexAppServerUnavailable("Codex app-server output is unavailable")
+
+    messages = thread_queue.Queue()
+    reader = threading.Thread(
+        target=codex_app_server_output_reader,
+        args=(process.stdout, messages),
+        name="herdr-codex-app-server",
+        daemon=True,
+    )
+    reader.start()
+    initialize_id = "herdr-initialize"
+    queue_id = f"herdr-queue-{secrets.token_hex(8)}"
+    try:
+        write_codex_app_server_message(process, {
+            "id": initialize_id,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "herdr-remote",
+                    "version": "1",
+                },
+                "capabilities": {
+                    "experimentalApi": True,
+                    "optOutNotificationMethods": [
+                        "item/agentMessage/delta",
+                        "item/reasoning/summaryTextDelta",
+                        "item/reasoning/textDelta",
+                    ],
+                },
+            },
+        }, unavailable=True)
+        read_codex_app_server_response(
+            messages,
+            initialize_id,
+            CODEX_APP_SERVER_INITIALIZE_TIMEOUT_SECONDS,
+            unavailable_on_failure=True,
+        )
+        write_codex_app_server_message(process, {"method": "initialized"}, unavailable=True)
+        write_codex_app_server_message(process, {
+            "id": queue_id,
+            "method": "thread/queue/add",
+            "params": {
+                "threadId": session_id,
+                "clientUserMessageId": f"herdr-{secrets.token_hex(16)}",
+                "input": codex_prompt_input(text, images),
+            },
+        })
+        result = read_codex_app_server_response(
+            messages,
+            queue_id,
+            CODEX_APP_SERVER_QUEUE_TIMEOUT_SECONDS,
+        )
+    finally:
+        # The queue response means the image data is durably embedded. Stop the
+        # short-lived client immediately so the already-running Codex TUI owns
+        # execution of the queued turn.
+        stop_codex_app_server(process)
+
+    submission = result.get("queuedSubmission")
+    queued_input = submission.get("input") if isinstance(submission, dict) else None
+    if not isinstance(queued_input, list):
+        raise RuntimeError("Codex app-server did not confirm the image prompt")
+    queued_images = sum(
+        item.get("type") in {"image", "localImage"}
+        for item in queued_input
+        if isinstance(item, dict)
+    )
+    if queued_images != len(images):
+        raise RuntimeError("Codex app-server did not retain every prompt image")
 
 
 def write_remote_prompt_image(remote, path: str, data: bytes):
@@ -2726,6 +2947,55 @@ def write_remote_prompt_image(remote, path: str, data: bytes):
     )
     if result.returncode != 0:
         raise RuntimeError("Could not upload prompt image to the Agent host")
+
+
+def submit_codex_image_prompt_legacy(
+    session_id: str,
+    text: str,
+    images: list[dict],
+    remote=None,
+) -> None:
+    if not remote:
+        with tempfile.TemporaryDirectory(prefix="herdr-prompt-images-") as directory:
+            paths = []
+            for index, image in enumerate(images, start=1):
+                path = Path(directory) / f"image-{index}{PROMPT_IMAGE_EXTENSIONS[image['media_type']]}"
+                path.write_bytes(image["data"])
+                paths.append(str(path))
+            result = subprocess.run(
+                codex_queue_arguments(session_id, text, paths),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError("Codex rejected the image prompt")
+        return
+
+    remote_directory = f"/tmp/herdr-prompt-images-{secrets.token_hex(12)}"
+    remote_paths = [
+        f"{remote_directory}/image-{index}{PROMPT_IMAGE_EXTENSIONS[image['media_type']]}"
+        for index, image in enumerate(images, start=1)
+    ]
+    created = run_remote_result(remote, ["mkdir", "-m", "700", remote_directory], timeout=10)
+    if created.returncode != 0:
+        raise RuntimeError("Could not prepare prompt images on the Agent host")
+    try:
+        for path, image in zip(remote_paths, images):
+            write_remote_prompt_image(remote, path, image["data"])
+        result = run_remote_result(
+            remote,
+            codex_queue_arguments(session_id, text, remote_paths, remote=remote),
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("Codex rejected the image prompt")
+    finally:
+        run_remote_result(remote, ["rm", "-f", *remote_paths], timeout=10)
+        run_remote_result(remote, ["rmdir", remote_directory], timeout=10)
 
 
 def submit_codex_image_prompt(pane_id: str, text: str, images: list[dict], remote=None) -> str:
@@ -2742,48 +3012,12 @@ def submit_codex_image_prompt(pane_id: str, text: str, images: list[dict], remot
         if status == "working"
         else "confirmed"
     )
-
-    if not remote:
-        with tempfile.TemporaryDirectory(prefix="herdr-prompt-images-") as directory:
-            paths = []
-            for index, image in enumerate(images, start=1):
-                path = Path(directory) / f"image-{index}{PROMPT_IMAGE_EXTENSIONS[image['media_type']]}"
-                path.write_bytes(image["data"])
-                paths.append(str(path))
-            result = subprocess.run(
-                codex_queue_arguments(session_id, message, paths),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise RuntimeError("Codex rejected the image prompt")
-        return delivery
-
-    remote_directory = f"/tmp/herdr-prompt-images-{secrets.token_hex(12)}"
-    remote_paths = [
-        f"{remote_directory}/image-{index}{PROMPT_IMAGE_EXTENSIONS[image['media_type']]}"
-        for index, image in enumerate(images, start=1)
-    ]
-    created = run_remote_result(remote, ["mkdir", "-m", "700", remote_directory], timeout=10)
-    if created.returncode != 0:
-        raise RuntimeError("Could not prepare prompt images on the Agent host")
     try:
-        for path, image in zip(remote_paths, images):
-            write_remote_prompt_image(remote, path, image["data"])
-        result = run_remote_result(
-            remote,
-            codex_queue_arguments(session_id, message, remote_paths, remote=remote),
-            timeout=30,
-        )
-        if result.returncode != 0:
-            raise RuntimeError("Codex rejected the image prompt")
-    finally:
-        run_remote_result(remote, ["rm", "-f", *remote_paths], timeout=10)
-        run_remote_result(remote, ["rmdir", remote_directory], timeout=10)
+        submit_codex_app_server_prompt(session_id, message, images, remote=remote)
+    except CodexAppServerUnavailable:
+        # Codex versions predating thread/queue/add may still support the CLI
+        # --image path used by the original implementation.
+        submit_codex_image_prompt_legacy(session_id, message, images, remote=remote)
     return delivery
 
 

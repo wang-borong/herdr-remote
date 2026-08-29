@@ -85,8 +85,8 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn('id="file-html-preview"', html)
         self.assertIn('title="HTML 安全预览" sandbox referrerpolicy="no-referrer"', html)
         self.assertIn('id="file-html-view-button"', html)
-        self.assertIn('href="/app.css?v=20260829-2"', html)
-        self.assertIn('src="/app.js?v=20260829-2"', html)
+        self.assertIn('href="/app.css?v=20260829-3"', html)
+        self.assertIn('src="/app.js?v=20260829-3"', html)
         self.assertNotIn("allow-scripts", html)
         self.assertNotIn("allow-forms", html)
         self.assertNotIn("allow-same-origin", html)
@@ -143,6 +143,20 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertNotIn("lineHeight: 1.35", source)
         self.assertIn(".prompt-attachment", styles)
         self.assertIn("#prompt-form.is-dragging #prompt-input", styles)
+
+    def test_web_workspace_upload_uses_an_arbitrary_file_picker(self):
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'id="file-upload-input" type="file" accept="*/*" multiple hidden',
+            html,
+        )
+        self.assertNotIn('id="file-upload-input" type="file" capture', html)
+        self.assertIn("从文件夹选择文件或拖放到这里", html)
+        self.assertIn('typeof elements.fileUploadInput.showPicker === "function"', source)
+        self.assertIn("elements.fileUploadInput.showPicker()", source)
+        self.assertIn("elements.fileUploadInput.click()", source)
 
     def test_web_agent_output_fits_dividers_to_current_terminal_width(self):
         source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")

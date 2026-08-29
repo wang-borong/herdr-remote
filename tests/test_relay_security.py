@@ -5,6 +5,7 @@
 # ///
 import base64
 import importlib
+import io
 import json
 import os
 import shlex
@@ -631,7 +632,93 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "at most"):
             relay.decode_prompt_images([payload] * (relay.PROMPT_IMAGE_MAX_COUNT + 1))
 
-    def test_local_codex_image_prompt_uses_session_queue_and_cleans_temporary_files(self):
+    def test_codex_app_server_image_prompt_uses_data_url_queue_protocol(self):
+        png = b"\x89PNG\r\n\x1a\nimage-data"
+        queued_url = f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
+
+        class RecordingInput:
+            def __init__(self):
+                self.writes = []
+                self.closed = False
+
+            def write(self, value):
+                self.writes.append(value)
+                return len(value)
+
+            def flush(self):
+                return None
+
+            def close(self):
+                self.closed = True
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = RecordingInput()
+                self.stdout = io.StringIO("\n".join((
+                    json.dumps({"id": "herdr-initialize", "result": {}}),
+                    json.dumps({
+                        "id": "herdr-queue-queueid",
+                        "result": {
+                            "queuedSubmission": {
+                                "id": "submission-id",
+                                "input": [
+                                    {"type": "text", "text": "Inspect this screenshot"},
+                                    {"type": "image", "url": queued_url},
+                                ],
+                            },
+                        },
+                    }),
+                    "",
+                )))
+                self.returncode = None
+                self.terminated = False
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        process = FakeProcess()
+        with (
+            patch.object(relay, "CODEX", "/usr/bin/codex"),
+            patch.object(relay.secrets, "token_hex", side_effect=["queueid", "clientid"]),
+            patch.object(relay.subprocess, "Popen", return_value=process) as popen,
+        ):
+            relay.submit_codex_app_server_prompt(
+                "01a0467e-11a9-7963-a359-c169979eaffd",
+                "Inspect this screenshot",
+                [{"media_type": "image/png", "data": png}],
+            )
+
+        popen.assert_called_once()
+        self.assertEqual(
+            popen.call_args.args[0],
+            ["/usr/bin/codex", "app-server", "--stdio"],
+        )
+        requests = [json.loads(line) for line in "".join(process.stdin.writes).splitlines()]
+        self.assertEqual(requests[0]["method"], "initialize")
+        self.assertEqual(requests[1], {"method": "initialized"})
+        self.assertEqual(requests[2]["method"], "thread/queue/add")
+        self.assertEqual(
+            requests[2]["params"]["input"],
+            [
+                {"type": "text", "text": "Inspect this screenshot"},
+                {"type": "image", "url": queued_url},
+            ],
+        )
+        self.assertNotIn("--image", popen.call_args.args[0])
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.stdin.closed)
+
+    def test_local_codex_image_prompt_falls_back_to_cli_and_cleans_temporary_files(self):
         png = b"\x89PNG\r\n\x1a\nimage-data"
         agent = {
             "agent": "codex",
@@ -659,6 +746,11 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(relay, "CODEX", "/usr/bin/codex"),
             patch.object(relay, "get_agent_info", return_value=agent),
+            patch.object(
+                relay,
+                "submit_codex_app_server_prompt",
+                side_effect=relay.CodexAppServerUnavailable("unsupported"),
+            ),
             patch.object(relay.subprocess, "run", side_effect=run_codex) as run,
         ):
             delivery = relay.submit_codex_image_prompt(
@@ -681,7 +773,41 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(observed_paths)
         self.assertFalse(Path(observed_paths[0]).exists())
 
-    def test_remote_codex_image_prompt_uploads_queues_and_cleans_private_files(self):
+    def test_remote_codex_image_prompt_uses_remote_app_server(self):
+        png = b"\x89PNG\r\n\x1a\nimage-data"
+        source = {
+            "kind": "ssh",
+            "target": "builder@example",
+            "port": 22,
+            "codex_bin": "/home/dev/bin/codex",
+        }
+        agent = {
+            "agent": "codex",
+            "agent_status": "working",
+            "agent_session": {"value": "01a0467e-11a9-7963-a359-c169979eaffd"},
+        }
+        images = [{"media_type": "image/png", "data": png}]
+
+        with (
+            patch.object(relay, "get_agent_info", return_value=agent),
+            patch.object(relay, "submit_codex_app_server_prompt") as submit,
+        ):
+            delivery = relay.submit_codex_image_prompt(
+                "w0:p1",
+                "Compare this image",
+                images,
+                remote=source,
+            )
+
+        self.assertEqual(delivery, "queued")
+        submit.assert_called_once_with(
+            agent["agent_session"]["value"],
+            "Compare this image",
+            images,
+            remote=source,
+        )
+
+    def test_remote_codex_image_prompt_legacy_fallback_cleans_private_files(self):
         png = b"\x89PNG\r\n\x1a\nimage-data"
         source = {
             "kind": "ssh",
@@ -699,6 +825,11 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(relay, "get_agent_info", return_value=agent),
             patch.object(relay.secrets, "token_hex", return_value="abc123"),
+            patch.object(
+                relay,
+                "submit_codex_app_server_prompt",
+                side_effect=relay.CodexAppServerUnavailable("unsupported"),
+            ),
             patch.object(relay, "run_remote_result", return_value=completed) as run_remote,
         ):
             delivery = relay.submit_codex_image_prompt(
