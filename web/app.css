@@ -1191,7 +1191,7 @@ input::placeholder {
 
 .agent-output-terminal {
   position: absolute;
-  inset: 13px 10px 15px 15px;
+  inset: 13px 52px 15px 15px;
 }
 
 .agent-output-terminal .xterm {
@@ -1231,15 +1231,131 @@ input::placeholder {
 .agent-output-terminal .xterm-viewport {
   overflow-x: hidden;
   background-color: var(--terminal);
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+}
+
+.agent-output-terminal .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.agent-output-navigation {
+  position: absolute;
+  z-index: 24;
+  top: 9px;
+  right: 5px;
+  bottom: 10px;
+  width: 40px;
+  display: grid;
+  grid-template-rows: 36px minmax(54px, 1fr) 36px;
+  gap: 6px;
+  padding: 3px;
+  background: color-mix(in srgb, var(--terminal) 82%, transparent);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
+}
+
+.agent-output-jump {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  color: rgba(215, 222, 240, 0.76);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 9px;
+  touch-action: manipulation;
+}
+
+.agent-output-jump:hover:not(:disabled),
+.agent-output-jump:focus-visible {
+  color: var(--terminal-text);
+  background: rgba(139, 124, 255, 0.2);
+  border-color: rgba(166, 155, 255, 0.38);
+}
+
+.agent-output-jump:disabled {
+  opacity: 0.28;
+  cursor: default;
+}
+
+.agent-output-jump svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.agent-output-scroll-track {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  outline: none;
+  cursor: grab;
+  touch-action: none;
+}
+
+.agent-output-scroll-track::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 50%;
+  width: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  transform: translateX(-50%);
+}
+
+.agent-output-scroll-track:focus-visible {
+  box-shadow: 0 0 0 2px rgba(166, 155, 255, 0.42);
+}
+
+.agent-output-scroll-track:not(.is-scrollable) {
+  cursor: default;
+}
+
+.agent-output-scroll-thumb {
+  position: absolute;
+  top: 0;
+  right: 7px;
+  left: 7px;
+  min-height: 48px;
+  background: linear-gradient(180deg, rgba(166, 155, 255, 0.9), rgba(83, 215, 222, 0.76));
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  border-radius: 999px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.32);
+  transform: translateY(0);
+  will-change: height, transform;
+}
+
+.agent-output-scroll-track:not(.is-scrollable) .agent-output-scroll-thumb {
+  opacity: 0.34;
+}
+
+.agent-output-scroll-track.is-dragging {
+  cursor: grabbing;
+}
+
+.agent-output-scroll-track.is-dragging .agent-output-scroll-thumb {
+  background: linear-gradient(180deg, #b8afff, #77e8ee);
+  box-shadow: 0 0 0 3px rgba(139, 124, 255, 0.2), 0 5px 14px rgba(0, 0, 0, 0.38);
 }
 
 .terminal-output-fallback {
   position: absolute;
   inset: 0;
   margin: 0;
-  padding: 17px 18px 24px;
+  padding: 17px 60px 24px 18px;
   overflow: auto;
   color: var(--terminal-text);
   background: transparent;
@@ -1249,8 +1365,12 @@ input::placeholder {
   tab-size: 2;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+}
+
+.terminal-output-fallback::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .agent-key-toggle {
@@ -4401,7 +4521,27 @@ dialog {
   }
 
   .agent-output-terminal {
-    inset: 10px 7px 11px 9px;
+    inset: 10px 50px 11px 9px;
+  }
+
+  .agent-output-navigation {
+    top: 7px;
+    right: 4px;
+    bottom: 8px;
+    width: 42px;
+    grid-template-rows: 40px minmax(58px, 1fr) 40px;
+    gap: 7px;
+    padding: 3px;
+  }
+
+  .agent-output-jump {
+    min-height: 40px;
+  }
+
+  .agent-output-scroll-thumb {
+    right: 6px;
+    left: 6px;
+    min-height: 54px;
   }
 
   .terminal-card {

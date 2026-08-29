@@ -284,6 +284,7 @@ PROMPT_IMAGE_EXTENSIONS = {
 WEBSOCKET_MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 CONVERSATION_HISTORY_MAX_MESSAGES = 200
 CONVERSATION_HISTORY_CONTENT_MAX_CHARS = 20_000
+PANE_READ_MAX_LINES = 1000
 
 TOOL_OPTIONS = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
 SUBAGENT_OPTIONS = ["approve all pending", "configure individually", "exit (cancel subagents)"]
@@ -4692,7 +4693,7 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
                 try:
-                    lines = max(1, min(int(msg.get("lines", 30)), 200))
+                    lines = max(1, min(int(msg.get("lines", 500)), PANE_READ_MAX_LINES))
                 except (TypeError, ValueError):
                     await ws.send(json.dumps({"type": "error", "message": "lines must be an integer"}))
                     continue

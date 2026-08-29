@@ -23,6 +23,8 @@ const AGENT_DIVIDER_TEXT_RE = /^[─━═—–_\-=]+$/u;
 const AGENT_DIVIDER_RUN_RE = /[─━═—–_\-=]+/gu;
 const AGENT_DIVIDER_GLYPH_RE = /[─━═—–_\-=]/gu;
 const UNICODE_MARK_RE = /\p{Mark}/u;
+const AGENT_OUTPUT_SCROLLBACK_LINES = 20_000;
+const AGENT_OUTPUT_SCROLL_THUMB_MIN_PX = 48;
 
 const elements = {
   connectionDot: byId("connection-dot"),
@@ -53,6 +55,11 @@ const elements = {
   approvalActions: byId("approval-actions"),
   agentOutputTerminal: byId("agent-output-terminal"),
   terminalOutputFallback: byId("terminal-output-fallback"),
+  agentOutputNavigation: byId("agent-output-navigation"),
+  agentOutputTopButton: byId("agent-output-top-button"),
+  agentOutputScrollTrack: byId("agent-output-scroll-track"),
+  agentOutputScrollThumb: byId("agent-output-scroll-thumb"),
+  agentOutputBottomButton: byId("agent-output-bottom-button"),
   agentKeyToggle: byId("agent-key-toggle"),
   agentKeybar: byId("agent-keybar"),
   agentKeyStatus: byId("agent-key-status"),
@@ -336,8 +343,9 @@ const state = {
   outputRenderedSnapshot: null,
   outputRenderedColumns: 0,
   outputRenderId: 0,
+  outputNavigationFrame: null,
   autoRefresh: true,
-  lines: 120,
+  lines: 500,
   session: null,
   directory: null,
   selectedDirectory: null,
@@ -2131,6 +2139,164 @@ function enableWebTerminalTouchScrolling(terminal) {
   surface.addEventListener("touchcancel", finishTouch, { passive: true });
 }
 
+function agentOutputScrollMetrics() {
+  const terminal = state.outputTerminalInstance;
+  if (terminal && !elements.agentOutputTerminal.hidden) {
+    const buffer = terminal.buffer.active;
+    return {
+      kind: "terminal",
+      position: Math.max(0, buffer.viewportY),
+      maximum: Math.max(0, buffer.baseY),
+      visible: Math.max(1, terminal.rows),
+      total: Math.max(1, buffer.length),
+    };
+  }
+
+  const output = elements.terminalOutputFallback;
+  const maximum = Math.max(0, output.scrollHeight - output.clientHeight);
+  return {
+    kind: "fallback",
+    position: Math.max(0, Math.min(maximum, output.scrollTop)),
+    maximum,
+    visible: Math.max(1, output.clientHeight),
+    total: Math.max(1, output.scrollHeight),
+  };
+}
+
+function updateAgentOutputNavigation() {
+  state.outputNavigationFrame = null;
+  const metrics = agentOutputScrollMetrics();
+  const track = elements.agentOutputScrollTrack;
+  const thumb = elements.agentOutputScrollThumb;
+  const trackHeight = Math.max(0, track.clientHeight);
+  const scrollable = metrics.maximum > 0 && trackHeight > 0;
+  const progress = scrollable ? metrics.position / metrics.maximum : 0;
+  const visibleRatio = Math.max(0, Math.min(1, metrics.visible / metrics.total));
+  const thumbHeight = scrollable
+    ? Math.min(
+      trackHeight,
+      Math.max(AGENT_OUTPUT_SCROLL_THUMB_MIN_PX, trackHeight * visibleRatio),
+    )
+    : trackHeight;
+  const travel = Math.max(0, trackHeight - thumbHeight);
+  const thumbTop = travel * Math.max(0, Math.min(1, progress));
+
+  track.classList.toggle("is-scrollable", scrollable);
+  track.setAttribute("aria-valuemax", String(Math.round(metrics.maximum)));
+  track.setAttribute("aria-valuenow", String(Math.round(metrics.position)));
+  track.setAttribute(
+    "aria-valuetext",
+    scrollable ? `已滚动 ${Math.round(progress * 100)}%` : "无需滚动",
+  );
+  thumb.style.height = `${Math.max(0, thumbHeight)}px`;
+  thumb.style.transform = `translateY(${Math.max(0, thumbTop)}px)`;
+  elements.agentOutputTopButton.disabled = !scrollable || metrics.position <= 0;
+  elements.agentOutputBottomButton.disabled = !scrollable
+    || metrics.position >= metrics.maximum;
+}
+
+function scheduleAgentOutputNavigationUpdate() {
+  if (state.outputNavigationFrame !== null) return;
+  state.outputNavigationFrame = window.requestAnimationFrame(updateAgentOutputNavigation);
+}
+
+function setAgentOutputScrollPosition(position) {
+  const metrics = agentOutputScrollMetrics();
+  const target = Math.max(0, Math.min(metrics.maximum, Number(position) || 0));
+  const terminal = state.outputTerminalInstance;
+  if (metrics.kind === "terminal" && terminal) {
+    if (target >= metrics.maximum) terminal.scrollToBottom();
+    else terminal.scrollToLine(Math.round(target));
+    state.userScrolledUp = metrics.maximum - target > 2;
+  } else {
+    elements.terminalOutputFallback.scrollTop = target;
+    state.userScrolledUp = metrics.maximum - target > 80;
+  }
+  scheduleAgentOutputNavigationUpdate();
+}
+
+function scrollAgentOutputToEdge(edge) {
+  const terminal = state.outputTerminalInstance;
+  if (terminal && agentOutputHasSelection(terminal)) clearAgentOutputSelection(terminal);
+  const metrics = agentOutputScrollMetrics();
+  setAgentOutputScrollPosition(edge === "top" ? 0 : metrics.maximum);
+}
+
+function bindAgentOutputNavigation() {
+  const track = elements.agentOutputScrollTrack;
+  const thumb = elements.agentOutputScrollThumb;
+  let activePointerId = null;
+  let pointerOffset = 0;
+
+  const scrollFromPointer = (clientY) => {
+    const metrics = agentOutputScrollMetrics();
+    const trackBounds = track.getBoundingClientRect();
+    const thumbHeight = Math.min(trackBounds.height, thumb.getBoundingClientRect().height);
+    const travel = Math.max(0, trackBounds.height - thumbHeight);
+    if (!travel || !metrics.maximum) return;
+    const pixel = Math.max(0, Math.min(
+      travel,
+      clientY - trackBounds.top - pointerOffset,
+    ));
+    setAgentOutputScrollPosition((pixel / travel) * metrics.maximum);
+  };
+
+  const finishPointer = (event) => {
+    if (activePointerId === null || event.pointerId !== activePointerId) return;
+    activePointerId = null;
+    track.classList.remove("is-dragging");
+    if (track.hasPointerCapture?.(event.pointerId)) track.releasePointerCapture(event.pointerId);
+  };
+
+  elements.agentOutputTopButton.addEventListener("click", () => scrollAgentOutputToEdge("top"));
+  elements.agentOutputBottomButton.addEventListener("click", () => scrollAgentOutputToEdge("bottom"));
+  track.addEventListener("pointerdown", (event) => {
+    if (!track.classList.contains("is-scrollable") || event.button > 0) return;
+    const terminal = state.outputTerminalInstance;
+    if (terminal && agentOutputHasSelection(terminal)) clearAgentOutputSelection(terminal);
+    const thumbBounds = thumb.getBoundingClientRect();
+    pointerOffset = event.target === thumb
+      ? event.clientY - thumbBounds.top
+      : thumbBounds.height / 2;
+    activePointerId = event.pointerId;
+    track.classList.add("is-dragging");
+    track.setPointerCapture?.(event.pointerId);
+    scrollFromPointer(event.clientY);
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  track.addEventListener("pointermove", (event) => {
+    if (activePointerId === null || event.pointerId !== activePointerId) return;
+    scrollFromPointer(event.clientY);
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  track.addEventListener("pointerup", finishPointer);
+  track.addEventListener("pointercancel", finishPointer);
+  track.addEventListener("lostpointercapture", (event) => {
+    if (event.pointerId === activePointerId) {
+      activePointerId = null;
+      track.classList.remove("is-dragging");
+    }
+  });
+  track.addEventListener("keydown", (event) => {
+    const metrics = agentOutputScrollMetrics();
+    const step = metrics.kind === "terminal" ? 3 : 48;
+    const page = Math.max(step, metrics.visible * 0.85);
+    let target = null;
+    if (event.key === "Home") target = 0;
+    else if (event.key === "End") target = metrics.maximum;
+    else if (event.key === "ArrowUp") target = metrics.position - step;
+    else if (event.key === "ArrowDown") target = metrics.position + step;
+    else if (event.key === "PageUp") target = metrics.position - page;
+    else if (event.key === "PageDown") target = metrics.position + page;
+    if (target === null) return;
+    event.preventDefault();
+    setAgentOutputScrollPosition(target);
+  });
+  scheduleAgentOutputNavigationUpdate();
+}
+
 function ensureAgentOutputTerminal() {
   if (state.outputTerminalInstance) return true;
   if (typeof window.Terminal !== "function" || typeof window.FitAddon?.FitAddon !== "function") {
@@ -2149,7 +2315,7 @@ function ensureAgentOutputTerminal() {
         : TERMINAL_FALLBACK_FONT_FAMILY,
       fontSize: isDesktop() ? 13 : 11,
       lineHeight: 1.1,
-      scrollback: 1000,
+      scrollback: AGENT_OUTPUT_SCROLLBACK_LINES,
       screenReaderMode: true,
       theme: terminalTheme(),
       allowTransparency: false,
@@ -2167,11 +2333,14 @@ function ensureAgentOutputTerminal() {
     terminal.element?.querySelector(".live-region")?.setAttribute("aria-live", "off");
     terminal.onScroll((position) => {
       state.userScrolledUp = terminal.buffer.active.baseY - position > 2;
+      scheduleAgentOutputNavigationUpdate();
     });
+    terminal.onResize(scheduleAgentOutputNavigationUpdate);
     state.outputTerminalInstance = terminal;
     state.outputTerminalFitAddon = fitAddon;
     elements.agentOutputTerminal.hidden = false;
     elements.terminalOutputFallback.hidden = true;
+    scheduleAgentOutputNavigationUpdate();
 
     terminalFontReady.then(() => {
       if (state.outputTerminalInstance !== terminal) return;
@@ -2251,6 +2420,7 @@ function fitAgentOutputTerminal() {
   } catch (_) {
     return false;
   }
+  scheduleAgentOutputNavigationUpdate();
   return terminal.cols !== previousColumns;
 }
 
@@ -2268,6 +2438,7 @@ function refitAgentOutputTerminal(force = false) {
   state.outputTerminalSurfaceWidth = surfaceWidth;
   state.outputTerminalSurfaceHeight = surfaceHeight;
   const columnsChanged = fitAgentOutputTerminal();
+  scheduleAgentOutputNavigationUpdate();
   if (!columnsChanged || state.outputRenderedSnapshot === null) return;
   state.outputRenderedColumns = 0;
   renderOutput();
@@ -3679,6 +3850,7 @@ function renderOutput() {
     if (!unchanged && !selectionLocksSnapshot) {
       clearAgentOutputSelection(terminal);
       const preserveScroll = state.userScrolledUp;
+      const wasAtTop = terminal.buffer.active.viewportY <= 1;
       const distanceFromBottom = Math.max(
         0,
         terminal.buffer.active.baseY - terminal.buffer.active.viewportY,
@@ -3695,21 +3867,28 @@ function renderOutput() {
         terminal.write(`\x1bc${fittedSnapshot}`, () => {
           if (renderId !== state.outputRenderId) return;
           if (preserveScroll && distanceFromBottom > 0) {
-            terminal.scrollToLine(Math.max(0, terminal.buffer.active.baseY - distanceFromBottom));
+            terminal.scrollToLine(
+              wasAtTop ? 0 : Math.max(0, terminal.buffer.active.baseY - distanceFromBottom),
+            );
+            scheduleAgentOutputNavigationUpdate();
             return;
           }
           terminal.scrollToBottom();
+          scheduleAgentOutputNavigationUpdate();
         });
       });
     }
+    scheduleAgentOutputNavigationUpdate();
   } else {
     elements.terminalOutputFallback.hidden = false;
     elements.terminalOutputFallback.textContent = displayContent;
     if (!state.userScrolledUp) {
       window.requestAnimationFrame(() => {
         elements.terminalOutputFallback.scrollTop = elements.terminalOutputFallback.scrollHeight;
+        scheduleAgentOutputNavigationUpdate();
       });
     }
+    scheduleAgentOutputNavigationUpdate();
   }
   const updatedAt = state.outputUpdatedAt.get(state.activePane);
   elements.lastUpdated.textContent = updatedAt
@@ -5525,6 +5704,7 @@ function closeDialogById(id) {
 }
 
 function bindEvents() {
+  bindAgentOutputNavigation();
   document.querySelectorAll("[data-app-view]").forEach((button) => {
     button.addEventListener("click", () => setAppView(button.dataset.appView));
   });
@@ -5550,7 +5730,7 @@ function bindEvents() {
   });
 
   elements.lineCount.addEventListener("change", () => {
-    state.lines = Number(elements.lineCount.value) || 120;
+    state.lines = Number(elements.lineCount.value) || 500;
     refreshOutput();
   });
   elements.autoRefreshButton.addEventListener("click", () => {
@@ -5584,6 +5764,7 @@ function bindEvents() {
   elements.terminalOutputFallback.addEventListener("scroll", () => {
     const output = elements.terminalOutputFallback;
     state.userScrolledUp = output.scrollHeight - output.scrollTop - output.clientHeight > 80;
+    scheduleAgentOutputNavigationUpdate();
   });
 
   elements.promptInput.addEventListener("input", () => {
@@ -5873,6 +6054,7 @@ function bindEvents() {
   window.addEventListener("online", connect);
   window.addEventListener("resize", () => {
     syncVisualViewportLayout();
+    scheduleAgentOutputNavigationUpdate();
   });
   window.addEventListener("popstate", () => {
     const url = new URL(window.location.href);

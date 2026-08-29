@@ -1150,7 +1150,7 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             "read",
             pane_id,
             "--lines",
-            "200",
+            "1000",
             "--source",
             "recent-unwrapped",
             "--format",

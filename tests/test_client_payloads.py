@@ -85,8 +85,8 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn('id="file-html-preview"', html)
         self.assertIn('title="HTML 安全预览" sandbox referrerpolicy="no-referrer"', html)
         self.assertIn('id="file-html-view-button"', html)
-        self.assertIn('href="/app.css?v=20260828-4"', html)
-        self.assertIn('src="/app.js?v=20260828-4"', html)
+        self.assertIn('href="/app.css?v=20260829-1"', html)
+        self.assertIn('src="/app.js?v=20260829-1"', html)
         self.assertNotIn("allow-scripts", html)
         self.assertNotIn("allow-forms", html)
         self.assertNotIn("allow-same-origin", html)
@@ -162,6 +162,31 @@ class ClientPayloadTests(unittest.TestCase):
             r"\.agent-output-terminal \.xterm \{[^}]*"
             r"text-spacing-trim: space-all;",
         )
+
+    def test_web_agent_output_has_touch_scrollbar_and_larger_history_choices(self):
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "web" / "app.css").read_text(encoding="utf-8")
+
+        for value in ("200", "500", "1000"):
+            self.assertIn(f'<option value="{value}"', html)
+        self.assertIn('<option value="500" selected>', html)
+        self.assertNotIn('<option value="60">', html)
+        self.assertNotIn('<option value="120"', html)
+        for element_id in (
+            "agent-output-navigation",
+            "agent-output-top-button",
+            "agent-output-scroll-track",
+            "agent-output-scroll-thumb",
+            "agent-output-bottom-button",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("function updateAgentOutputNavigation()", source)
+        self.assertIn("function bindAgentOutputNavigation()", source)
+        self.assertIn("scrollback: AGENT_OUTPUT_SCROLLBACK_LINES", source)
+        self.assertIn("lines: 500", source)
+        self.assertIn("touch-action: none", styles)
+        self.assertIn(".agent-output-scroll-thumb", styles)
 
     def test_swift_models_decode_omp_question_state(self):
         for relative_path in (
