@@ -422,7 +422,7 @@
           <form class="file-path-jump" id="file-path-jump-form">
             <label for="file-path-jump-input">路径跳转</label>
             <div>
-              <input id="file-path-jump-input" type="text" placeholder="~/Workspace/project" autocomplete="off" spellcheck="false">
+              <input id="file-path-jump-input" type="text" placeholder="~/Documents 或 ~/Projects" autocomplete="off" spellcheck="false">
               <button type="submit">前往</button>
             </div>
           </form>
@@ -431,7 +431,7 @@
             <button class="icon-button" id="file-up-button" type="button" aria-label="返回上级目录" title="上级目录">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
             </button>
-            <span id="file-directory-path">配置的 Workspace 根目录</span>
+            <span id="file-directory-path">配置的允许目录</span>
           </div>
 
           <label class="search-field file-search" for="file-search-input">
@@ -540,7 +540,7 @@
         <div>
           <p class="eyebrow">NEW CODEX</p>
           <h2 id="new-agent-title">在目录中启动 Agent</h2>
-          <p>目录浏览与 Agent 启动仍限制在 Workspace 白名单；完整 Shell 位于单独授权的 Remote Shell 页面。</p>
+          <p>目录浏览与 Agent 启动默认覆盖用户家目录，也可配置为更小的允许范围；完整 Shell 位于单独授权的 Remote Shell 页面。</p>
         </div>
         <button class="icon-button modal-close" type="button" data-close-dialog="new-agent-dialog" aria-label="关闭">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -569,7 +569,7 @@
           <form class="path-jump" id="path-jump-form">
             <label for="path-jump-input">快速跳转</label>
             <div>
-              <input id="path-jump-input" type="text" placeholder="~/Workspace/others" autocomplete="off">
+              <input id="path-jump-input" type="text" placeholder="~/Projects" autocomplete="off">
               <button type="submit">前往</button>
             </div>
           </form>
@@ -691,8 +691,8 @@
           <input id="ssh-host-herdr-bin" type="text" maxlength="255" value="herdr" placeholder="herdr 或 /home/user/.local/bin/herdr" spellcheck="false" autocomplete="off">
         </label>
         <label class="field-stack field-wide" for="ssh-host-workspace-root">
-          <span>远端 Workspace 根目录 <small>Files 与 Agent 共用；每行一个，最多 8 个</small></span>
-          <textarea id="ssh-host-workspace-root" maxlength="8192" rows="3" placeholder="~/Workspace&#10;~/workspace-ai" required spellcheck="false" autocomplete="off">~/Workspace</textarea>
+          <span>远端允许目录 <small>默认用户家目录；Files 与 Agent 共用；每行一个，最多 8 个</small></span>
+          <textarea id="ssh-host-workspace-root" maxlength="8192" rows="3" placeholder="~&#10;/srv/projects" required spellcheck="false" autocomplete="off">~</textarea>
         </label>
       </div>
       <div class="ssh-host-hint">
@@ -765,7 +765,7 @@
       <section class="file-upload-target" aria-label="上传目标">
         <span>目标目录</span>
         <strong id="file-upload-target-host">本机</strong>
-        <code id="file-upload-target-path">~/Workspace</code>
+        <code id="file-upload-target-path">~</code>
       </section>
 
       <div class="file-upload-dropzone" id="file-upload-dropzone" role="button" tabindex="0" aria-label="选择或拖放要上传的文件">

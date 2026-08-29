@@ -20,7 +20,7 @@
 - 用户点击已完成的 Agent 卡片后，会将该完成结果标记为已查看并恢复为待命；桌面端自动选中和页面初始化不会误清状态。
 - 通过 `herdr agent prompt` 提交 Prompt；Agent 工作中还可用 **Tab 缓存**，把下一条任务明确加入 Codex 队列。
 - 二次确认后发送规范的 `C-c` Interrupt。
-- 在配置的 Workspace 白名单中浏览目录。
+- 默认可在用户家目录中浏览，也可通过配置收窄或扩展允许目录。
 - 独立的 Files 页面可浏览本机、SSH Agent Source 或已授权的普通 SSH Profile Workspace：Markdown 使用 Marked 渲染并经 DOMPurify 清理，HTML 在无脚本、无表单、无外部资源权限的 sandbox iframe 中渲染且可切换源码，常见代码文件使用 Highlight.js 语法高亮；桌面端为文件列表与阅读器双栏布局，手机端点开文件后进入全屏阅读并可一键返回。
 - 可复制预览文件的原始文本，也可下载普通文件。预览默认限制为 1 MiB，下载默认限制为 25 MiB；下载地址是与当前登录身份绑定、90 秒过期且只能使用一次的随机令牌。
 - Remote Shell 明确授权的用户可在 Files 当前目录多选或拖放上传文件；默认自动编号避免覆盖，也可显式选择原子覆盖。单文件默认上限为 2 GiB，可通过 `HERDR_WORKSPACE_UPLOAD_MAX_BYTES` 调整。
@@ -40,8 +40,8 @@
 - WebSocket 必须同源，阻止其他网页借用你的 Tailscale 身份发起控制请求。
 - 旧式 `?token=` 网页访问会换成短时 HttpOnly、SameSite 会话 Cookie；token 不写入 `localStorage`。
 - Prompt 正文不会写入 Relay 日志或审计日志。
-- 工作目录会解析为真实路径，并限制在 `HERDR_WORKSPACE_ROOTS` 中；目录符号链接不会出现在列表中。
-- Files 页面同样限制在 Workspace 白名单中，并额外拒绝隐藏路径、符号链接、二进制预览、非 UTF-8 文本预览和超限文件；上传还会拒绝隐藏或路径型文件名，先写隐藏临时文件再原子提交。Markdown HTML 会在浏览器中清理后再显示，独立 HTML 文档还会经过 DOMPurify、iframe sandbox 和文档内 CSP 三层限制，页面不从 CDN 加载预览脚本。
+- 工作目录会解析为真实路径，并限制在 `HERDR_WORKSPACE_ROOTS` 中；默认值是当前用户家目录，目录符号链接不会出现在列表中。
+- Files 页面同样限制在这些允许目录中，并额外拒绝隐藏路径、符号链接、二进制预览、非 UTF-8 文本预览和超限文件；上传还会拒绝隐藏或路径型文件名，先写隐藏临时文件再原子提交。Markdown HTML 会在浏览器中清理后再显示，独立 HTML 文档还会经过 DOMPurify、iframe sandbox 和文档内 CSP 三层限制，页面不从 CDN 加载预览脚本。
 - 默认 Agent 模式只提供明确的 Herdr RPC。完整 Shell 必须通过 `--remote-shell` 显式启用，并使用不支持 `*` 通配符的独立 `HERDR_TERMINAL_ALLOWED_USERS` 白名单。
 - Relay Token/Web Session 客户端不能打开完整 Shell；Web Terminal 要求经过 Tailscale 身份认证的 WebSocket。
 - Terminal 命令、按键和输出不会写入 Relay 审计日志。
@@ -179,7 +179,7 @@ Clash mixed 端口不同，请替换 `7897`。也可以设置
 HERDR_RELAY_HOST=127.0.0.1
 HERDR_TAILSCALE_WEB=1
 HERDR_TAILSCALE_ALLOWED_USERS=you@example.com
-HERDR_WORKSPACE_ROOTS=/home/user/Workspace:/srv/repos
+HERDR_WORKSPACE_ROOTS=/home/user
 HERDR_WORKSPACE_UPLOAD_MAX_BYTES=2147483648
 HERDR_CODEX_BIN=/home/user/.local/bin/codex
 HERDR_REMOTE_CODEX_BIN=codex
@@ -189,13 +189,15 @@ HERDR_TERMINAL_ALLOWED_USERS=you@example.com
 HERDR_SSH_HOSTS_FILE=/home/user/.config/herdr-remote/ssh-hosts.json
 ```
 
+`HERDR_WORKSPACE_ROOTS` 未设置时默认为运行 Relay 的用户家目录。升级时，精确匹配旧默认值 `~/Workspace` 或 `~/Workspace:~/workspace-ai` 的配置会自动迁移为家目录；包含其他自定义路径的配置保持不变。仍可用冒号分隔多个显式允许目录，例如 `/home/user:/srv/repos`。
+
 修改后重启 Relay：
 
 ```bash
 systemctl --user restart herdr-relay
 ```
 
-更新 `relay/herdr_relay.py` 后也必须重启该服务；刷新浏览器只会重新加载网页文件，不会热重载正在运行的 Relay Python 进程。Files 页面会检测后台协议版本，并在 Relay 尚未重启时直接提示，不再无限停留在“正在安全读取 Workspace”。
+更新 `relay/herdr_relay.py` 后也必须重启该服务；刷新浏览器只会重新加载网页文件，不会热重载正在运行的 Relay Python 进程。Files 页面会检测后台协议版本，并在 Relay 尚未重启时直接提示，不再无限停留在“正在安全读取目录”。
 
 如果退出桌面或 SSH 后用户服务会停止，可以启用 linger：
 

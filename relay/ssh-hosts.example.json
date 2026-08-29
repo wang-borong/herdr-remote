@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "hosts": [
     {
       "id": "build-server",
@@ -11,7 +11,7 @@
       "agent_enabled": true,
       "herdr_bin": "/home/builder/.local/bin/herdr",
       "workspace_roots": [
-        "/home/builder/Workspace",
+        "~",
         "/srv/projects"
       ]
     },
@@ -24,7 +24,7 @@
       "color": "cyan",
       "agent_enabled": false,
       "herdr_bin": "herdr",
-      "workspace_roots": ["~/Workspace"]
+      "workspace_roots": ["~"]
     }
   ]
 }

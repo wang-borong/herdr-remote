@@ -820,7 +820,7 @@ def agent_source_picker_text(chat_id: int) -> str:
         "<b>Codex hosts</b>",
         f"Current: <b>{html.escape(agent_source_label(selected_id))}</b>",
         "",
-        "Choose an online host. Its allowlisted Workspace roots will open next.",
+        "Choose an online host. Its allowed directories will open next.",
     ]
     return "\n".join(lines)
 
@@ -862,7 +862,7 @@ def directory_browser_text(listing: dict, chat_id: int) -> str:
     lines = [
         "<b>Workspace browser</b>",
         f"Host: <b>{html.escape(source_label)}</b>",
-        f"<code>{html.escape(listing.get('display_path') or 'Configured workspace roots')}</code>",
+        f"<code>{html.escape(listing.get('display_path') or 'Allowed directories')}</code>",
         "",
         f"Folders: {len(entries)}" + ("+" if listing.get("truncated") else ""),
     ]

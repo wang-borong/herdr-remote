@@ -103,7 +103,7 @@ Ctrl+B z    缩放当前 Pane
 - SSH 目标，例如 `builder@192.168.1.50`。
 - SSH 端口，默认 `22`。
 - 可选备注与颜色。
-- Files 允许访问的远端 Workspace 根目录，每行一个，最多 8 个。
+- Files 允许访问的远端目录，默认 `~`（远端用户家目录）；每行一个，最多 8 个。
 
 也可以填写 `~/.ssh/config` 中的 Host 别名：
 
@@ -131,15 +131,15 @@ ssh-copy-id builder@192.168.1.50
 拥有 Remote Shell 白名单权限的用户可以在 **Files** 页面把当前浏览设备上的文件上传到 Relay 本机或任一 SSH Profile：
 
 1. 在 Files 顶部选择本机或 SSH 主机。
-2. 进入一个具体的 Workspace 目录；配置根目录的虚拟列表本身不能作为上传目标。
+2. 进入一个具体的允许目录；配置根目录的虚拟列表本身不能作为上传目标。
 3. 点击 **上传** 多选文件，或直接把文件拖到 Files 面板。
 4. 默认保留已有同名文件，并把新文件命名为 `name (1).ext`、`name (2).ext`；如需原子替换，可勾选 **覆盖同名文件**。
 
-上传以 512 KiB 分块通过 WebSocket 传输，并显示单文件及总进度。Relay 先写入隐藏临时文件，校验声明大小后再原子提交；取消、断线或校验失败会清理未完成的临时文件。Files 原有的 Workspace 根目录、隐藏路径和符号链接限制同样适用于上传，因此隐藏文件名和包含路径分隔符的文件名会被拒绝。
+上传以 512 KiB 分块通过 WebSocket 传输，并显示单文件及总进度。Relay 先写入隐藏临时文件，校验声明大小后再原子提交；取消、断线或校验失败会清理未完成的临时文件。Files 原有的允许目录、隐藏路径和符号链接限制同样适用于上传，因此隐藏文件名和包含路径分隔符的文件名会被拒绝。
 
 默认单文件上限为 2 GiB，可通过 `HERDR_WORKSPACE_UPLOAD_MAX_BYTES` 调整，Relay 会把配置限制在 1 MiB–64 GiB。SSH 上传需要目标机安装 Python 3，并使用 Batch Mode；请先配置 SSH Key 或 SSH Agent，交互式密码提示只适用于 Web Terminal，不能用于 Files 后台传输。
 
-普通 Relay Token 客户端仍可使用原有只读 Files，但不能上传。SSH Profile 即使没有启用 Agent discovery，也会出现在已授权用户的 Files 主机列表中；其 Workspace 根目录始终用于 Files，启用 Agent discovery 后再同时用于远端 Codex 启动。
+普通 Relay Token 客户端仍可使用原有只读 Files，但不能上传。SSH Profile 即使没有启用 Agent discovery，也会出现在已授权用户的 Files 主机列表中；其允许目录始终用于 Files，启用 Agent discovery 后再同时用于远端 Codex 启动。
 
 ### 同时连接远端 Herdr Agents
 
@@ -148,10 +148,10 @@ ssh-copy-id builder@192.168.1.50
 - Remote Shell 终端入口。
 - 远端 Herdr Agent 发现、状态与健康检查。
 - Pane 输出、Prompt、审批、Tab 排队和 Interrupt。
-- 受限 Workspace 目录浏览。
+- 受限目录浏览。
 - 在所选远端目录中创建 Herdr workspace 并启动 Codex。
 
-需要填写远端 `herdr` 命令名或绝对路径。SSH Profile 中配置的 1–8 个 Workspace 根目录会同时作为 Files 白名单和 Agent 启动范围；所有路径都会在远端解析后重新检查边界，目录列表不会展示隐藏目录或符号链接。
+需要填写远端 `herdr` 命令名或绝对路径。SSH Profile 默认使用远端用户家目录 `~`；配置的 1–8 个允许目录会同时作为 Files 和 Agent 启动范围。旧版 Profile 中精确匹配 `~/Workspace`，或同一用户目录下 `Workspace` 与 `workspace-ai` 组合的默认值，会自动迁移为该用户家目录；包含其他自定义路径的 Profile 保持不变。所有路径都会在远端解析后重新检查边界，目录列表不会展示隐藏目录或符号链接。
 
 Relay 为远端 Pane 使用 `<profile-id>::<raw-pane-id>` 全局 ID。例如 `build-server::w0:p1`，因此不同机器都存在 `w0:p1` 时不会发生状态覆盖或命令串台。本机 Pane ID 保持不变。
 
@@ -161,7 +161,7 @@ Relay 为远端 Pane 使用 `<profile-id>::<raw-pane-id>` 全局 ID。例如 `bu
 ssh build-server '/home/builder/.local/bin/herdr pane list'
 ```
 
-Telegram Bot 使用同一组 Agent Sources。发送 `/hosts` 可以选择本机或某个在线 SSH 主机；选择后 Bot 会打开该主机的白名单 Workspace 根目录，后续 `/browse`、`/cd`、`/cwd`、目录按钮和 `/codex` 都会保持在该主机范围内。这样可以让运行 Relay 的本机充当跳板，从 Telegram 在局域网服务器上选择目录并启动 Codex，而无需把远端 Relay 暴露到网络。
+Telegram Bot 使用同一组 Agent Sources。发送 `/hosts` 可以选择本机或某个在线 SSH 主机；选择后 Bot 会打开该主机的允许目录，后续 `/browse`、`/cd`、`/cwd`、目录按钮和 `/codex` 都会保持在该主机范围内。这样可以让运行 Relay 的本机充当跳板，从 Telegram 在局域网服务器上选择目录并启动 Codex，而无需把远端 Relay 暴露到网络。
 
 不可达的主机会在新建 Agent 对话框中显示为离线；各主机并行检查，不会按主机数量串行累积超时。
 
@@ -218,7 +218,7 @@ ssh builder@192.168.1.50
 - Agent 控制白名单与完整终端白名单分离。
 - Web Terminal 只接受经过 Tailscale 身份认证的浏览器 WebSocket；Relay Token 客户端不能打开 Shell。
 - Files 上传沿用同一份 Remote Shell 明确用户白名单；普通 Relay Token 只有 Files 浏览、预览和下载权限。
-- 上传只写入当前白名单 Workspace 目录，拒绝隐藏路径、符号链接和路径型文件名，并通过临时文件原子提交。
+- 上传只写入当前允许目录，拒绝隐藏路径、符号链接和路径型文件名，并通过临时文件原子提交。
 - SSH Profile 进行结构化校验，不能注入 `ssh -o` 或 Shell 参数。
 - Profile 文件以 `0600` 原子写入。
 - Relay 审计日志只记录打开、关闭和 Profile 变更，不记录按键、命令或终端输出。
@@ -266,7 +266,7 @@ ssh -vvv build-server
 - **局域网服务器连接超时**：先在本机终端执行相同的 `ssh` 命令，确认路由、防火墙和 sshd。
 - **SSH Key 未生效**：检查本机 `~/.ssh/config`、文件权限和 `SSH_AUTH_SOCK`。
 - **SSH Files 可以浏览但无法上传**：确认目标机有 `python3`，并从 Relay 本机执行 `ssh -o BatchMode=yes build-server true` 验证无需交互的密钥认证。
-- **上传按钮不可用**：先进入一个具体 Workspace 目录，并确认当前 Tailscale 登录名位于 `HERDR_TERMINAL_ALLOWED_USERS`。
+- **上传按钮不可用**：先进入一个具体允许目录，并确认当前 Tailscale 登录名位于 `HERDR_TERMINAL_ALLOWED_USERS`。
 - **重新打开网页后看不到原现场**：运行 `tmux -L herdr-web list-sessions`，确认 tmux Server 仍在运行。
 - **仍显示方框或缺失图标**：先强制刷新网页；字体由 Relay 本地提供，不需要在手机上单独安装 Nerd Font。
 

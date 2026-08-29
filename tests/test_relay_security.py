@@ -80,6 +80,41 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "Remote relay binding is disabled"):
                 relay.validate_runtime_config()
 
+    def test_workspace_roots_default_to_home_and_migrate_legacy_defaults(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            workspace = home / "Workspace"
+            workspace_ai = home / "workspace-ai"
+            custom = home / "Projects"
+            outside = Path(temporary) / "outside"
+            for directory in (workspace, workspace_ai, custom, outside):
+                directory.mkdir(parents=True)
+
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                os.environ.pop("HERDR_WORKSPACE_ROOTS", None)
+                self.assertEqual(relay.configured_workspace_roots(), [home.resolve()])
+
+                os.environ["HERDR_WORKSPACE_ROOTS"] = os.pathsep.join((
+                    str(workspace),
+                    str(workspace_ai),
+                ))
+                self.assertEqual(relay.configured_workspace_roots(), [home.resolve()])
+
+                os.environ["HERDR_WORKSPACE_ROOTS"] = os.pathsep.join((
+                    str(workspace),
+                    str(custom),
+                ))
+                self.assertEqual(
+                    relay.configured_workspace_roots(),
+                    [workspace.resolve(), custom.resolve()],
+                )
+
+                with patch.object(relay, "WORKSPACE_ROOTS", [home.resolve()]):
+                    self.assertEqual(relay.display_workspace_path(home.resolve()), "~")
+                    self.assertEqual(relay.resolve_workspace_path(str(custom)), custom.resolve())
+                    with self.assertRaisesRegex(ValueError, "outside the configured roots"):
+                        relay.resolve_workspace_path(str(outside))
+
     def test_tailscale_runtime_requires_loopback_and_an_explicit_user_allowlist(self):
         with (
             patch.object(relay, "AUTH_TOKEN", ""),

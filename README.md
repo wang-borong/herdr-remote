@@ -95,7 +95,7 @@ cd relay
 
 Remote Shell provides a real PTY with xterm.js, persistent tmux sessions, Git/system maintenance, mouse support, touch-friendly mobile controls, a dedicated Ctrl+B web tmux prefix that does not conflict with Herdr's Ctrl+X, and allowlisted SSH profiles for LAN servers. Native SSH, ProxyJump, and optional subnet-router workflows remain available even when the browser console is offline. See [Remote Shell and LAN access](REMOTE_SHELL.md).
 
-Every authorized SSH profile can expose its allowlisted Workspace roots in Files, even when Agent discovery is disabled. Files can upload selected or dropped files into the current local or SSH directory; uploads are chunked, staged, and atomically committed, with automatic conflict numbering unless overwrite is selected. Enabling a profile as a Herdr Agent Source additionally discovers and controls that host's agents with source-scoped Pane IDs, reports per-host health, and starts new Codex agents on the selected machine.
+Every authorized SSH profile can expose its allowed directories in Files, using the remote user's home directory by default, even when Agent discovery is disabled. Files can upload selected or dropped files into the current local or SSH directory; uploads are chunked, staged, and atomically committed, with automatic conflict numbering unless overwrite is selected. Enabling a profile as a Herdr Agent Source additionally discovers and controls that host's agents with source-scoped Pane IDs, reports per-host health, and starts new Codex agents on the selected machine.
 
 The Telegram bot consumes the same Relay snapshot, so remote agents automatically appear in `/start`, `/agents`, `/read`, `/reply`, `/send`, `/interrupt`, blocked/completion notifications, and `/digest`. `/status` also reports each local or SSH Agent Source's health and Agent count. Use `/hosts` to select an online local or SSH Agent Source; `/browse`, `/cd`, `/cwd`, and `/codex` then remain scoped to that host, including remote Workspace browsing and Codex startup.
 
@@ -139,7 +139,7 @@ uv run relay/herdr_telegram.py
 | `/interrupt` | Send Ctrl+C |
 | `/digest` | Today's activity summary |
 | `/hosts` | Select the local or SSH host used for new Codex agents |
-| `/browse` | Browse allowlisted Workspace roots on the selected host |
+| `/browse` | Browse allowed directories on the selected host |
 | `/cd` | Select a Workspace directory on the selected host |
 | `/cwd` | Show the selected host and directory |
 | `/codex` | Start Codex on the selected host |

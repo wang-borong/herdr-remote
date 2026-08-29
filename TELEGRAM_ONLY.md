@@ -85,7 +85,7 @@ Agent 阻塞时，Bot 会提供一次性允许、拒绝和“打开输出并回�
 推荐使用按钮流程：
 
 1. 发送 `/start`，点击 **Hosts**，选择本机或在线的 SSH Agent Source。
-2. Bot 会打开该主机的 Workspace 根目录；也可以点击 **Workspaces** 再次浏览。
+2. Bot 会打开该主机允许访问的目录；默认是用户家目录，也可以点击 **Workspaces** 再次浏览。
 3. 逐层打开目录，点击 **Select here** 选择工作目录。
 4. 点击 **Codex here** 或控制面板中的 **New Codex**。
 5. Codex 就绪后，直接回复 Bot 的 ForceReply 消息提交第一项任务。
@@ -94,20 +94,20 @@ Agent 阻塞时，Bot 会提供一次性允许、拒绝和“打开输出并回�
 
 ```text
 /hosts
-/browse ~/Workspace/others
-/cd ~/Workspace/others/herdr-remote
+/browse ~
+/cd ~/Projects/herdr-remote
 /codex 请解释这个仓库并给出改进建议
 ```
 
 `/hosts` 的选择会绑定后续目录按钮、`/cd`、`/cwd` 和 `/codex`。切换主机时会清除旧主机的目录选择，防止把远端路径误发给本机。远端主机需要先配置为启用了 Agent discovery 的 SSH Profile，并确保 Relay 主机能够通过免交互 SSH 执行远端 `herdr`；配置方法见 [Remote Shell and LAN access](REMOTE_SHELL.md#同时连接远端-herdr-agents)。
 
-Relay 默认只允许访问 `~/Workspace`。可在 `~/.config/herdr-remote/config.env` 中配置多个根目录，Linux/macOS 使用冒号分隔：
+Relay 默认允许访问当前用户的家目录。可在 `~/.config/herdr-remote/config.env` 中配置更小或额外的允许目录，Linux/macOS 使用冒号分隔：
 
 ```text
-HERDR_WORKSPACE_ROOTS=/home/user/Workspace:/srv/repos
+HERDR_WORKSPACE_ROOTS=/home/user:/srv/repos
 ```
 
-修改后重启 Relay。目录会解析为真实路径，越过白名单的 `..` 路径会被拒绝，目录符号链接不会出现在浏览列表中。白名单内的普通目录和 Git 仓库都可以启动 Codex；Git 标记只用于帮助识别仓库。Relay 始终使用结构化参数调用 Herdr，不提供任意 shell 命令入口。
+升级时，精确匹配旧默认值 `~/Workspace` 或 `~/Workspace:~/workspace-ai` 的配置会自动迁移为家目录，其他自定义目录不会被覆盖。修改后重启 Relay。目录会解析为真实路径，越过允许范围的 `..` 路径会被拒绝，目录符号链接不会出现在浏览列表中。允许目录内的普通目录和 Git 仓库都可以启动 Codex；Git 标记只用于帮助识别仓库。Relay 始终使用结构化参数调用 Herdr，不提供任意 shell 命令入口。
 
 Pane 输出默认读取最近 60 行，使用 Telegram HTML 的粗体标题和等宽正文显示；内容较长时会自动拆成多条消息，最多保留约 12000 个字符。Codex 完成后的界面页脚会被整理为单独的 `Worked for ...`，后面的下一条 Prompt、模型和路径信息不会发送。
 

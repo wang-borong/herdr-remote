@@ -926,6 +926,14 @@ HERDR_TG_USER_ID="${HERDR_TG_USER_ID:-$TELEGRAM_USER_ID}"
 HERDR_TG_CHAT_TYPE="${HERDR_TG_CHAT_TYPE:-$TELEGRAM_CHAT_TYPE}"
 HERDR_TG_USERNAME="${HERDR_TG_USERNAME:-$TELEGRAM_USERNAME}"
 
+case "${HERDR_WORKSPACE_ROOTS:-}" in
+    ""|"$HOME/Workspace"|"~/Workspace"|\
+    "$HOME/Workspace:$HOME/workspace-ai"|"$HOME/workspace-ai:$HOME/Workspace"|\
+    "~/Workspace:~/workspace-ai"|"~/workspace-ai:~/Workspace")
+        HERDR_WORKSPACE_ROOTS="$HOME"
+        ;;
+esac
+
 [ -z "$HERDR_TG_TOKEN" ] || [[ "$HERDR_TG_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || {
     echo "Error: Refusing to persist an invalid Telegram token."
     exit 1
@@ -956,7 +964,7 @@ HERDR_RELAY_HOST=127.0.0.1
 HERDR_ALLOW_REMOTE_BIND=0
 HERDR_ALLOW_INSECURE_NO_AUTH=0
 HERDR_MDNS_ENABLED=0
-HERDR_WORKSPACE_ROOTS=${HERDR_WORKSPACE_ROOTS:-$HOME/Workspace}
+HERDR_WORKSPACE_ROOTS=$HERDR_WORKSPACE_ROOTS
 HERDR_TAILSCALE_WEB=${HERDR_TAILSCALE_WEB:-0}
 HERDR_TAILSCALE_ALLOWED_USERS=${HERDR_TAILSCALE_ALLOWED_USERS:-}
 HERDR_BIN=${HERDR_PATH:-herdr}

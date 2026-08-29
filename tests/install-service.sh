@@ -151,6 +151,7 @@ run_install() {
         HERDR_LOG_DIR= \
         HERDR_RELAY= \
         HERDR_RELAY_TOKEN= \
+        HERDR_WORKSPACE_ROOTS= \
         HERDR_TG_CHAT_ID= \
         HERDR_TG_CHAT_TYPE= \
         HERDR_TG_ENABLED= \
@@ -291,9 +292,31 @@ assert_contains "$TMP/mac-new.log" 'Telegram bot verified as @installer_test_bot
 assert_contains "$MAC_HOME/.config/herdr-remote/secrets.env" 'HERDR_TG_USER_ID=123456'
 assert_contains "$MAC_HOME/.config/herdr-remote/config.env" 'HERDR_RELAY_HOST=127.0.0.1'
 assert_contains "$MAC_HOME/.config/herdr-remote/config.env" 'HERDR_ALLOW_REMOTE_BIND=0'
-assert_contains "$MAC_HOME/.config/herdr-remote/config.env" "HERDR_WORKSPACE_ROOTS=$MAC_HOME/Workspace"
+assert_contains "$MAC_HOME/.config/herdr-remote/config.env" "HERDR_WORKSPACE_ROOTS=$MAC_HOME"
 assert_contains "$MAC_HOME/.config/herdr-remote/config.env" 'HERDR_TG_READ_LINES=60'
 assert_contains "$MAC_HOME/.config/herdr-remote/config.env" 'HERDR_TG_OUTPUT_MAX_CHARS=12000'
+
+LEGACY_WORKSPACE_HOME="$TMP/legacy-workspace-home"
+mkdir -p "$LEGACY_WORKSPACE_HOME/.config/herdr-remote"
+printf '%s\n' \
+    "HERDR_WORKSPACE_ROOTS=$LEGACY_WORKSPACE_HOME/Workspace:$LEGACY_WORKSPACE_HOME/workspace-ai" \
+    'HERDR_TG_ENABLED=false' \
+    > "$LEGACY_WORKSPACE_HOME/.config/herdr-remote/config.env"
+run_install macos "$LEGACY_WORKSPACE_HOME" 'nn' > "$TMP/legacy-workspace.log"
+assert_contains \
+    "$LEGACY_WORKSPACE_HOME/.config/herdr-remote/config.env" \
+    "HERDR_WORKSPACE_ROOTS=$LEGACY_WORKSPACE_HOME"
+
+CUSTOM_WORKSPACE_HOME="$TMP/custom-workspace-home"
+mkdir -p "$CUSTOM_WORKSPACE_HOME/.config/herdr-remote"
+printf '%s\n' \
+    'HERDR_WORKSPACE_ROOTS=/srv/projects:/data/models' \
+    'HERDR_TG_ENABLED=false' \
+    > "$CUSTOM_WORKSPACE_HOME/.config/herdr-remote/config.env"
+run_install macos "$CUSTOM_WORKSPACE_HOME" 'nn' > "$TMP/custom-workspace.log"
+assert_contains \
+    "$CUSTOM_WORKSPACE_HOME/.config/herdr-remote/config.env" \
+    'HERDR_WORKSPACE_ROOTS=/srv/projects:/data/models'
 
 run_install macos "$MAC_HOME" 'yyyyn' > "$TMP/mac-retain.log" || {
     cat "$TMP/mac-retain.log"

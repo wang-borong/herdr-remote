@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import os
 import stat
 import subprocess
@@ -47,13 +48,57 @@ class TerminalProfileTests(unittest.TestCase):
             self.assertEqual(saved["id"], "build-server")
             self.assertFalse(saved["agent_enabled"])
             self.assertEqual(saved["herdr_bin"], "herdr")
-            self.assertEqual(saved["workspace_roots"], ["~/Workspace"])
+            self.assertEqual(saved["workspace_roots"], ["~"])
             self.assertEqual(load_ssh_profiles(config_file), [saved])
             self.assertEqual(stat.S_IMODE(config_file.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(config_file.parent.stat().st_mode), 0o700)
 
             delete_ssh_profile(config_file, saved["id"])
             self.assertEqual(load_ssh_profiles(config_file), [])
+
+    def test_version_one_profiles_migrate_only_legacy_workspace_defaults(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config_file = Path(temporary) / "ssh-hosts.json"
+            config_file.write_text(json.dumps({
+                "version": 1,
+                "hosts": [
+                    {
+                        "id": "legacy-home",
+                        "label": "Legacy Home",
+                        "target": "legacy-home",
+                        "workspace_roots": [
+                            "/home/builder/Workspace",
+                            "/home/builder/workspace-ai",
+                        ],
+                    },
+                    {
+                        "id": "legacy-tilde",
+                        "label": "Legacy Tilde",
+                        "target": "legacy-tilde",
+                        "workspace_roots": ["~/Workspace"],
+                    },
+                    {
+                        "id": "custom",
+                        "label": "Custom",
+                        "target": "custom",
+                        "workspace_roots": ["~/Workspace", "/srv/models"],
+                    },
+                ],
+            }), encoding="utf-8")
+
+            profiles = load_ssh_profiles(config_file)
+
+            self.assertEqual(profiles[0]["workspace_roots"], ["/home/builder"])
+            self.assertEqual(profiles[1]["workspace_roots"], ["~"])
+            self.assertEqual(
+                profiles[2]["workspace_roots"],
+                ["~/Workspace", "/srv/models"],
+            )
+
+            save_ssh_profile(config_file, profiles[0])
+            document = json.loads(config_file.read_text(encoding="utf-8"))
+            self.assertEqual(document["version"], 2)
+            self.assertEqual(document["hosts"][0]["workspace_roots"], ["/home/builder"])
 
     def test_profile_rejects_option_injection_and_invalid_ports(self):
         with self.assertRaisesRegex(TerminalConfigError, "SSH target"):

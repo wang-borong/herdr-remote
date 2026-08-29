@@ -2973,7 +2973,7 @@ function openSshHostDialog(profileId = "") {
   elements.sshHostHerdrBin.value = profile?.herdr_bin || "herdr";
   elements.sshHostWorkspaceRoot.value = Array.isArray(profile?.workspace_roots)
     ? profile.workspace_roots.join("\n")
-    : (profile?.workspace_root || "~/Workspace");
+    : (profile?.workspace_root || "~");
   elements.sshHostTitle.textContent = profile ? "编辑 SSH 服务器" : "添加 SSH 服务器";
   elements.deleteSshHostButton.hidden = !profile;
   state.sshProfilePending = false;
@@ -3009,7 +3009,7 @@ function saveSshHost() {
     description: elements.sshHostDescription.value.trim(),
     agent_enabled: elements.sshHostAgentEnabled.checked,
     herdr_bin: elements.sshHostHerdrBin.value.trim() || "herdr",
-    workspace_roots: workspaceRoots.length ? workspaceRoots : ["~/Workspace"],
+    workspace_roots: workspaceRoots.length ? workspaceRoots : ["~"],
   };
   if (!send({type: "ssh_profile_save", profile})) return;
   state.sshProfilePending = true;
@@ -4154,7 +4154,7 @@ function renderDirectoryBrowser() {
   elements.directoryList.replaceChildren();
   const listing = state.directory;
   const sourceUsable = agentSourceUsable(agentSourceById(state.selectedSource));
-  elements.directoryPath.textContent = listing?.display_path || "配置的 Workspace 根目录";
+  elements.directoryPath.textContent = listing?.display_path || "配置的允许目录";
   elements.directoryUpButton.disabled = state.directoryPending || !listing?.parent;
   elements.directoryRefreshButton.disabled = state.directoryPending || !socketReady() || !sourceUsable;
   elements.directoryNote.hidden = !listing?.truncated;
@@ -4163,7 +4163,7 @@ function renderDirectoryBrowser() {
   if (state.directoryPending) {
     elements.directoryList.append(directoryMessage("正在安全读取目录…", "directory-loading"));
   } else if (!listing) {
-    elements.directoryList.append(directoryMessage("打开对话框后会显示允许访问的 Workspace。", "directory-empty"));
+    elements.directoryList.append(directoryMessage("打开对话框后会显示允许访问的目录。", "directory-empty"));
   } else if (!listing.entries?.length) {
     elements.directoryList.append(directoryMessage("此目录中没有可浏览的子目录。", "directory-empty"));
   } else {
@@ -4299,7 +4299,7 @@ function renderWorkspaceFileBrowser() {
   const listing = state.fileListing;
   const sourceUsable = fileSourceUsable(fileSourceById(state.fileSource));
   const featureUnavailable = workspaceFilesUnavailable();
-  elements.fileDirectoryPath.textContent = listing?.display_path || "配置的 Workspace 根目录";
+  elements.fileDirectoryPath.textContent = listing?.display_path || "配置的允许目录";
   elements.fileUpButton.disabled = featureUnavailable
     || state.fileListingPending
     || !listing
@@ -4318,7 +4318,7 @@ function renderWorkspaceFileBrowser() {
     || !listing?.path;
   elements.fileUploadButton.title = !state.fileUploadSupported
     ? "上传需要 Remote Shell 授权"
-    : (!listing?.path ? "先进入一个具体 Workspace 目录" : "上传到当前目录");
+    : (!listing?.path ? "先进入一个具体目录" : "上传到当前目录");
   elements.filePathJumpInput.disabled = featureUnavailable || state.fileListingPending;
   elements.filePathJumpForm.querySelector("button").disabled = featureUnavailable
     || state.fileListingPending
@@ -4340,8 +4340,8 @@ function renderWorkspaceFileBrowser() {
   if (!nodes.length) {
     let text = "此目录中没有可显示的文件。";
     if (state.fileListingError) text = state.fileListingError;
-    else if (state.fileListingPending && !listing) text = "正在安全读取 Workspace…";
-    else if (!listing) text = "连接主机后会显示允许访问的 Workspace。";
+    else if (state.fileListingPending && !listing) text = "正在安全读取目录…";
+    else if (!listing) text = "连接主机后会显示允许访问的目录。";
     else if (query) text = "当前目录中没有匹配的项目。";
     const messageClass = state.fileListingError
       ? "is-error"
@@ -4540,7 +4540,7 @@ function requestWorkspaceUploadFiles() {
     ? state.fileUploadTarget
     : captureWorkspaceUploadTarget();
   if (!target) {
-    showToast("请选择上传目录", "先在 Files 中进入一个具体 Workspace 目录。", "error");
+    showToast("请选择上传目录", "先在 Files 中进入一个具体目录。", "error");
     return;
   }
   if (state.fileUploadPending) return;
@@ -4569,7 +4569,7 @@ function addWorkspaceUploadFiles(files) {
   }
   if (!state.fileUploadTarget) state.fileUploadTarget = captureWorkspaceUploadTarget();
   if (!state.fileUploadTarget) {
-    showToast("请选择上传目录", "先在 Files 中进入一个具体 Workspace 目录。", "error");
+    showToast("请选择上传目录", "先在 Files 中进入一个具体目录。", "error");
     return;
   }
 

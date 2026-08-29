@@ -222,12 +222,24 @@ REMOTE_CODEX_BIN = os.environ.get("HERDR_REMOTE_CODEX_BIN", "codex").strip() or 
 
 
 def configured_workspace_roots() -> list[Path]:
-    configured = os.environ.get("HERDR_WORKSPACE_ROOTS", os.path.expanduser("~/Workspace"))
+    configured = os.environ.get("HERDR_WORKSPACE_ROOTS")
+    values = (
+        [os.path.expanduser("~")]
+        if configured is None
+        else [value.strip() for value in configured.split(os.pathsep) if value.strip()]
+    )
+    home = Path(os.path.expanduser("~"))
+    expanded_values = [Path(os.path.expanduser(value)) for value in values]
+    legacy_workspace = home / "Workspace"
+    legacy_workspace_ai = home / "workspace-ai"
+    if expanded_values == [legacy_workspace] or (
+        len(expanded_values) == 2
+        and set(expanded_values) == {legacy_workspace, legacy_workspace_ai}
+    ):
+        values = [str(home)]
+
     roots = []
-    for value in configured.split(os.pathsep):
-        value = value.strip()
-        if not value:
-            continue
+    for value in values:
         try:
             root = Path(os.path.expanduser(value)).resolve(strict=True)
         except (OSError, RuntimeError):
@@ -421,7 +433,7 @@ def legacy_agent_source(remote: str) -> dict:
         "port": 22,
         "agent_enabled": True,
         "herdr_bin": REMOTE_HERDR_BIN,
-        "workspace_root": "~/Workspace",
+        "workspace_root": "~",
     })
 
 
@@ -989,7 +1001,12 @@ def resolve_workspace_path(value: str) -> Path:
 
 
 def display_workspace_path(path: Path) -> str:
-    home = Path.home()
+    try:
+        home = Path.home().resolve(strict=True)
+    except (OSError, RuntimeError):
+        home = Path.home()
+    if path == home:
+        return "~"
     try:
         return "~/" + str(path.relative_to(home))
     except ValueError:
@@ -1180,7 +1197,7 @@ def workspace_file_listing(value: str | None = None) -> dict:
     if not value:
         return {
             "path": "",
-            "display_path": "Configured workspace roots",
+            "display_path": "Allowed directories",
             "parent": None,
             "entries": [workspace_file_entry(root, kind="directory") for root in WORKSPACE_ROOTS],
             "truncated": False,
@@ -1389,7 +1406,7 @@ def workspace_directory_listing(value: str | None = None) -> dict:
         ]
         return {
             "path": "",
-            "display_path": "Configured workspace roots",
+            "display_path": "Allowed directories",
             "parent": None,
             "entries": entries,
             "can_start_agent": False,
@@ -1499,7 +1516,7 @@ if not requested:
     } for root in roots]
     print(json.dumps({
         "path": "",
-        "display_path": "Configured workspace roots",
+        "display_path": "Allowed directories",
         "parent": None,
         "entries": entries,
         "can_start_agent": False,
@@ -1665,7 +1682,7 @@ if operation == "list":
         } for root in roots]
         print(json.dumps({
             "path": "",
-            "display_path": "Configured workspace roots",
+            "display_path": "Allowed directories",
             "parent": None,
             "entries": entries,
             "truncated": False,
@@ -1788,7 +1805,7 @@ def remote_workspace_directory_listing(source: dict, value: str | None = None) -
                 REMOTE_WORKSPACE_SCRIPT,
                 json.dumps(
                     source.get("workspace_roots")
-                    or [source.get("workspace_root", "~/Workspace")]
+                    or [source.get("workspace_root", "~")]
                 ),
                 value or "",
             ],
@@ -1832,7 +1849,7 @@ def remote_workspace_file_request(
                 REMOTE_WORKSPACE_FILE_SCRIPT,
                 json.dumps(
                     source.get("workspace_roots")
-                    or [source.get("workspace_root", "~/Workspace")]
+                    or [source.get("workspace_root", "~")]
                 ),
                 operation,
                 value or "",
@@ -2269,7 +2286,7 @@ def remote_workspace_upload_file(
             REMOTE_WORKSPACE_UPLOAD_SCRIPT,
             json.dumps(
                 source.get("workspace_roots")
-                or [source.get("workspace_root", "~/Workspace")]
+                or [source.get("workspace_root", "~")]
             ),
             directory,
             name,

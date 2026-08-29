@@ -36,6 +36,7 @@ MAX_SSH_PROFILES = 32
 MAX_TERMINAL_INPUT_BYTES = 16 * 1024
 MAX_TERMINAL_CAPTURE_BYTES = 1024 * 1024
 MAX_TERMINAL_CAPTURE_LINES = 5000
+SSH_PROFILE_DOCUMENT_VERSION = 2
 TMUX_SOCKET_NAME = "herdr-web"
 TMUX_CONFIGURATION_ATTEMPTS = 40
 TMUX_CONFIGURATION_RETRY_SECONDS = 0.05
@@ -88,7 +89,29 @@ def _profile_slug(label: str, target: str) -> str:
     return slug[:32]
 
 
-def normalize_ssh_profile(value: dict) -> dict:
+def _migrate_legacy_workspace_roots(workspace_roots: list[str]) -> list[str]:
+    if workspace_roots == ["~/Workspace"]:
+        return ["~"]
+    if len(workspace_roots) != 2:
+        return workspace_roots
+    if set(workspace_roots) == {"~/Workspace", "~/workspace-ai"}:
+        return ["~"]
+
+    paths = [Path(value) for value in workspace_roots]
+    if (
+        all(path.is_absolute() for path in paths)
+        and paths[0].parent == paths[1].parent
+        and {path.name for path in paths} == {"Workspace", "workspace-ai"}
+    ):
+        return [str(paths[0].parent)]
+    return workspace_roots
+
+
+def normalize_ssh_profile(
+    value: dict,
+    *,
+    migrate_legacy_workspace_roots: bool = False,
+) -> dict:
     if not isinstance(value, dict):
         raise TerminalConfigError("SSH profile must be an object")
 
@@ -142,7 +165,7 @@ def normalize_ssh_profile(value: dict) -> dict:
         )
     raw_workspace_roots = value.get("workspace_roots")
     if raw_workspace_roots is None:
-        raw_workspace_roots = [value.get("workspace_root", "~/Workspace")]
+        raw_workspace_roots = [value.get("workspace_root", "~")]
     elif isinstance(raw_workspace_roots, str):
         raw_workspace_roots = raw_workspace_roots.splitlines()
     if not isinstance(raw_workspace_roots, list) or not 1 <= len(raw_workspace_roots) <= 8:
@@ -163,6 +186,8 @@ def normalize_ssh_profile(value: dict) -> dict:
             )
         if workspace_root not in workspace_roots:
             workspace_roots.append(workspace_root)
+    if migrate_legacy_workspace_roots:
+        workspace_roots = _migrate_legacy_workspace_roots(workspace_roots)
 
     return {
         "id": profile_id,
@@ -193,7 +218,7 @@ def local_terminal_profile(hostname: str) -> dict:
 
 def _read_profile_document(config_file: Path) -> dict:
     if not config_file.exists():
-        return {"version": 1, "hosts": []}
+        return {"version": SSH_PROFILE_DOCUMENT_VERSION, "hosts": []}
     try:
         document = json.loads(config_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -209,10 +234,18 @@ def load_ssh_profiles(config_file: Path) -> list[dict]:
     if len(hosts) > MAX_SSH_PROFILES:
         raise TerminalConfigError(f"At most {MAX_SSH_PROFILES} SSH profiles are allowed")
 
+    raw_version = document.get("version", 1)
+    if isinstance(raw_version, bool) or not isinstance(raw_version, int) or raw_version < 1:
+        raise TerminalConfigError("SSH profile file version must be a positive integer")
+    migrate_legacy_workspace_roots = raw_version < SSH_PROFILE_DOCUMENT_VERSION
+
     profiles = []
     seen = set()
     for raw_profile in hosts:
-        profile = normalize_ssh_profile(raw_profile)
+        profile = normalize_ssh_profile(
+            raw_profile,
+            migrate_legacy_workspace_roots=migrate_legacy_workspace_roots,
+        )
         if profile["id"] in seen:
             raise TerminalConfigError(f"Duplicate SSH profile id: {profile['id']}")
         seen.add(profile["id"])
@@ -233,7 +266,7 @@ def _write_profiles(config_file: Path, profiles: list[dict]) -> None:
         f".{config_file.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     )
     payload = json.dumps(
-        {"version": 1, "hosts": profiles},
+        {"version": SSH_PROFILE_DOCUMENT_VERSION, "hosts": profiles},
         ensure_ascii=False,
         indent=2,
     ) + "\n"
