@@ -275,6 +275,32 @@ def delete_ssh_profile(config_file: Path, profile_id: str) -> None:
     _write_profiles(config_file, remaining)
 
 
+def _terminal_direct_command(
+    profile: dict,
+    *,
+    shell_binary: str,
+    ssh_binary: str,
+    ssh_config_file: Path | None = None,
+) -> list[str]:
+    """Build the shell or SSH command used inside a terminal pane."""
+    if profile.get("kind") == "local":
+        return [shell_binary, "-l"]
+
+    direct_command = [ssh_binary]
+    if ssh_config_file:
+        direct_command.extend(["-F", str(ssh_config_file)])
+    direct_command.extend([
+        "-tt",
+        "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
+    ])
+    if profile.get("port", 22) != 22:
+        direct_command.extend(["-p", str(profile["port"])])
+    direct_command.append(profile["target"])
+    return direct_command
+
+
 def terminal_profile_command(
     profile: dict,
     *,
@@ -285,21 +311,12 @@ def terminal_profile_command(
     cwd: Path,
 ) -> tuple[list[str], Path, bool]:
     """Return argv, process cwd, and whether the session survives detach."""
-    if profile.get("kind") == "local":
-        direct_command = [shell_binary, "-l"]
-    else:
-        direct_command = [ssh_binary]
-        if ssh_config_file:
-            direct_command.extend(["-F", str(ssh_config_file)])
-        direct_command.extend([
-            "-tt",
-            "-o", "ConnectTimeout=10",
-            "-o", "ServerAliveInterval=30",
-            "-o", "ServerAliveCountMax=3",
-        ])
-        if profile.get("port", 22) != 22:
-            direct_command.extend(["-p", str(profile["port"])])
-        direct_command.append(profile["target"])
+    direct_command = _terminal_direct_command(
+        profile,
+        shell_binary=shell_binary,
+        ssh_binary=ssh_binary,
+        ssh_config_file=ssh_config_file,
+    )
 
     if not tmux_binary:
         return direct_command, cwd, False
@@ -333,9 +350,32 @@ def tmux_server_configuration_command(tmux_binary: str) -> list[str]:
     return command
 
 
-def configure_tmux_server(tmux_binary: str) -> None:
-    """Apply deterministic mouse and key bindings to the web-only tmux server."""
-    command = tmux_server_configuration_command(tmux_binary)
+def tmux_session_configuration_command(
+    profile: dict,
+    *,
+    tmux_binary: str,
+    shell_binary: str,
+    ssh_binary: str,
+    ssh_config_file: Path | None = None,
+) -> list[str] | None:
+    """Build the SSH default command for new panes in one remote session."""
+    if profile.get("kind") == "local":
+        return None
+    direct_command = _terminal_direct_command(
+        profile,
+        shell_binary=shell_binary,
+        ssh_binary=ssh_binary,
+        ssh_config_file=ssh_config_file,
+    )
+    return [
+        tmux_binary,
+        "-L", TMUX_SOCKET_NAME,
+        "set-option", "-t", persistent_session_name(profile),
+        "default-command", f"exec {shlex.join(direct_command)}",
+    ]
+
+
+def _run_tmux_configuration(command: list[str]) -> None:
     for attempt in range(TMUX_CONFIGURATION_ATTEMPTS):
         try:
             result = subprocess.run(
@@ -352,6 +392,32 @@ def configure_tmux_server(tmux_binary: str) -> None:
         if attempt + 1 < TMUX_CONFIGURATION_ATTEMPTS:
             time.sleep(TMUX_CONFIGURATION_RETRY_SECONDS)
     raise TerminalConfigError("Could not configure the web tmux session")
+
+
+def configure_tmux_server(tmux_binary: str) -> None:
+    """Apply deterministic mouse and key bindings to the web-only tmux server."""
+    _run_tmux_configuration(tmux_server_configuration_command(tmux_binary))
+
+
+def configure_tmux_session(
+    profile: dict,
+    *,
+    tmux_binary: str,
+    shell_binary: str,
+    ssh_binary: str,
+    ssh_config_file: Path | None = None,
+) -> None:
+    """Keep new windows and panes inside the selected remote SSH host."""
+    command = tmux_session_configuration_command(
+        profile,
+        tmux_binary=tmux_binary,
+        shell_binary=shell_binary,
+        ssh_binary=ssh_binary,
+        ssh_config_file=ssh_config_file,
+    )
+    if command is None:
+        return
+    _run_tmux_configuration(command)
 
 
 def persistent_session_name(profile: dict) -> str:
@@ -531,6 +597,14 @@ class TerminalSession:
         if self.persistent and self.tmux_binary:
             try:
                 await asyncio.to_thread(configure_tmux_server, self.tmux_binary)
+                await asyncio.to_thread(
+                    configure_tmux_session,
+                    self.profile,
+                    tmux_binary=self.tmux_binary,
+                    shell_binary=self.shell_binary,
+                    ssh_binary=self.ssh_binary,
+                    ssh_config_file=self.ssh_config_file,
+                )
             except TerminalConfigError:
                 await self.close()
                 raise

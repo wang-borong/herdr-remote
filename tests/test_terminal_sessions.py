@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "relay"))
@@ -16,6 +16,7 @@ from terminal_sessions import (
     TerminalConfigError,
     TerminalSession,
     capture_tmux_pane,
+    configure_tmux_session,
     configure_tmux_server,
     delete_ssh_profile,
     load_ssh_profiles,
@@ -25,6 +26,7 @@ from terminal_sessions import (
     terminal_environment,
     terminal_profile_command,
     terminate_persistent_session,
+    tmux_session_configuration_command,
     tmux_server_configuration_command,
     validated_terminal_dimensions,
 )
@@ -179,6 +181,72 @@ class TerminalProfileTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         sleep.assert_called_once_with(0.05)
 
+    def test_remote_tmux_session_uses_ssh_for_new_windows_and_panes(self):
+        profile = normalize_ssh_profile({
+            "id": "build",
+            "label": "Build",
+            "target": "builder@10.10.0.5",
+            "port": 2222,
+        })
+        command = tmux_session_configuration_command(
+            profile,
+            tmux_binary="/usr/bin/tmux",
+            shell_binary="/bin/zsh",
+            ssh_binary="/usr/bin/ssh",
+            ssh_config_file=Path("/home/dev/SSH Config"),
+        )
+
+        self.assertIsNotNone(command)
+        self.assertEqual(
+            command[:7],
+            [
+                "/usr/bin/tmux", "-L", "herdr-web", "set-option", "-t",
+                persistent_session_name(profile), "default-command",
+            ],
+        )
+        self.assertEqual(
+            command[-1],
+            "exec /usr/bin/ssh -F '/home/dev/SSH Config' -tt "
+            "-o ConnectTimeout=10 -o ServerAliveInterval=30 "
+            "-o ServerAliveCountMax=3 -p 2222 builder@10.10.0.5",
+        )
+
+        with patch("terminal_sessions.subprocess.run") as run:
+            run.return_value.returncode = 0
+            configure_tmux_session(
+                profile,
+                tmux_binary="/usr/bin/tmux",
+                shell_binary="/bin/zsh",
+                ssh_binary="/usr/bin/ssh",
+                ssh_config_file=Path("/home/dev/SSH Config"),
+            )
+
+        run.assert_called_once_with(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+
+    def test_local_tmux_session_keeps_its_local_default_shell(self):
+        profile = {"id": "local", "kind": "local"}
+
+        self.assertIsNone(tmux_session_configuration_command(
+            profile,
+            tmux_binary="/usr/bin/tmux",
+            shell_binary="/bin/zsh",
+            ssh_binary="/usr/bin/ssh",
+        ))
+        with patch("terminal_sessions.subprocess.run") as run:
+            configure_tmux_session(
+                profile,
+                tmux_binary="/usr/bin/tmux",
+                shell_binary="/bin/zsh",
+                ssh_binary="/usr/bin/ssh",
+            )
+        run.assert_not_called()
+
     def test_persistent_ssh_session_tracks_endpoint_and_can_be_terminated(self):
         profile = normalize_ssh_profile({
             "id": "build",
@@ -256,6 +324,55 @@ class TerminalProfileTests(unittest.TestCase):
 
 
 class TerminalSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_spawn_configures_remote_tmux_session_defaults(self):
+        async def event_handler(_event):
+            return None
+
+        profile = normalize_ssh_profile({
+            "id": "build",
+            "label": "Build",
+            "target": "builder@10.10.0.5",
+        })
+
+        async def run_inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            session = TerminalSession(
+                profile,
+                event_handler,
+                shell_binary="/bin/zsh",
+                ssh_binary="/usr/bin/ssh",
+                ssh_config_file=Path("/home/dev/.ssh/config"),
+                tmux_binary="/usr/bin/tmux",
+                cwd=Path(temporary),
+                cols=80,
+                rows=24,
+            )
+            with (
+                patch(
+                    "terminal_sessions.terminal_profile_command",
+                    return_value=(["/bin/true"], Path(temporary), True),
+                ),
+                patch("terminal_sessions.configure_tmux_server") as configure_server,
+                patch("terminal_sessions.configure_tmux_session") as configure_session,
+                patch(
+                    "terminal_sessions.asyncio.to_thread",
+                    new=AsyncMock(side_effect=run_inline),
+                ),
+            ):
+                await session.spawn()
+                await session.close()
+
+        configure_server.assert_called_once_with("/usr/bin/tmux")
+        configure_session.assert_called_once_with(
+            profile,
+            tmux_binary="/usr/bin/tmux",
+            shell_binary="/bin/zsh",
+            ssh_binary="/usr/bin/ssh",
+            ssh_config_file=Path("/home/dev/.ssh/config"),
+        )
+
     async def test_direct_pty_streams_output_and_accepts_input(self):
         events = []
         finished = asyncio.Event()
