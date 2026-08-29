@@ -85,8 +85,8 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn('id="file-html-preview"', html)
         self.assertIn('title="HTML 安全预览" sandbox referrerpolicy="no-referrer"', html)
         self.assertIn('id="file-html-view-button"', html)
-        self.assertIn('href="/app.css?v=20260829-3"', html)
-        self.assertIn('src="/app.js?v=20260829-3"', html)
+        self.assertIn('href="/app.css?v=20260829-4"', html)
+        self.assertIn('src="/app.js?v=20260829-4"', html)
         self.assertNotIn("allow-scripts", html)
         self.assertNotIn("allow-forms", html)
         self.assertNotIn("allow-same-origin", html)
@@ -149,14 +149,33 @@ class ClientPayloadTests(unittest.TestCase):
         source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
 
         self.assertIn(
-            'id="file-upload-input" type="file" accept="*/*" multiple hidden',
+            'id="file-upload-input" type="file" accept="application/*,text/*,font/*,model/*,',
+            html,
+        )
+        self.assertIn(
+            'id="file-upload-media-input" type="file" accept="image/*,video/*,audio/*" multiple hidden',
             html,
         )
         self.assertNotIn('id="file-upload-input" type="file" capture', html)
-        self.assertIn("从文件夹选择文件或拖放到这里", html)
-        self.assertIn('typeof elements.fileUploadInput.showPicker === "function"', source)
-        self.assertIn("elements.fileUploadInput.showPicker()", source)
+        self.assertNotIn('id="file-upload-media-input" type="file" capture', html)
+        self.assertIn("打开文件管理器", html)
+        self.assertIn('typeof window.showOpenFilePicker === "function"', source)
+        self.assertIn("await window.showOpenFilePicker({multiple: true})", source)
+        self.assertNotIn("fileUploadInput.showPicker()", source)
         self.assertIn("elements.fileUploadInput.click()", source)
+        self.assertIn("elements.fileUploadMediaInput.click()", source)
+        self.assertIn(
+            'elements.fileUploadButton.addEventListener("click", startWorkspaceUploadSelection)',
+            source,
+        )
+        self.assertIn(
+            'elements.fileUploadBrowseButton.addEventListener("click", requestWorkspaceUploadFiles)',
+            source,
+        )
+        self.assertIn(
+            'elements.fileUploadMediaButton.addEventListener("click", requestWorkspaceUploadMediaFiles)',
+            source,
+        )
 
     def test_web_agent_output_fits_dividers_to_current_terminal_width(self):
         source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")

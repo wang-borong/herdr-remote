@@ -96,7 +96,9 @@ WEB_JS="$DIR/web/app.js"
   grep -q 'case "workspace_listing"' "$WEB_JS" && \
   grep -q 'id="file-workspace"' "$WEB" && grep -q 'data-app-view="files"' "$WEB" && \
   grep -q 'id="file-upload-button"' "$WEB" && grep -q 'id="file-upload-dialog"' "$WEB" && \
-  grep -q 'id="file-upload-input" type="file" accept="\*/\*" multiple' "$WEB" && \
+  grep -q 'id="file-upload-browse-button"' "$WEB" && grep -q 'id="file-upload-media-button"' "$WEB" && \
+  grep -q 'id="file-upload-input" type="file" accept="application/\*,text/\*,font/\*,model/\*' "$WEB" && \
+  grep -q 'id="file-upload-media-input" type="file" accept="image/\*,video/\*,audio/\*" multiple' "$WEB" && \
   grep -q 'id="file-markdown-content"' "$WEB" && grep -q 'id="file-code-content"' "$WEB" && \
   grep -q "renderMarkdownWorkspaceFile" "$WEB_JS" && \
   grep -q "DOMPurify" "$WEB_JS" && grep -q "hljs.highlight" "$WEB_JS" && \

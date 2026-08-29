@@ -201,6 +201,9 @@ const elements = {
   fileUploadTargetPath: byId("file-upload-target-path"),
   fileUploadDropzone: byId("file-upload-dropzone"),
   fileUploadInput: byId("file-upload-input"),
+  fileUploadMediaInput: byId("file-upload-media-input"),
+  fileUploadBrowseButton: byId("file-upload-browse-button"),
+  fileUploadMediaButton: byId("file-upload-media-button"),
   fileUploadList: byId("file-upload-list"),
   fileUploadOverwrite: byId("file-upload-overwrite"),
   fileUploadProgress: byId("file-upload-progress"),
@@ -371,6 +374,7 @@ const state = {
   fileUploadPending: false,
   fileUploadTarget: null,
   fileUploadDragDepth: 0,
+  fileSystemPickerUnavailable: false,
   fileReaderRenderedMode: "",
   fileReaderRenderedSource: "",
   fileReaderRenderedPath: "",
@@ -4715,29 +4719,73 @@ function captureWorkspaceUploadTarget() {
   };
 }
 
-function requestWorkspaceUploadFiles() {
+function prepareWorkspaceUploadSelection() {
   if (!state.fileUploadSupported) {
     showToast("上传未授权", "Files 上传需要 Remote Shell 明确用户权限。", "error");
-    return;
+    return false;
   }
   const target = elements.fileUploadDialog.open
     ? state.fileUploadTarget
     : captureWorkspaceUploadTarget();
   if (!target) {
     showToast("请选择上传目录", "先在 Files 中进入一个具体目录。", "error");
-    return;
+    return false;
   }
-  if (state.fileUploadPending) return;
+  if (state.fileUploadPending) return false;
   state.fileUploadTarget = target;
-  try {
-    if (typeof elements.fileUploadInput.showPicker === "function") {
-      elements.fileUploadInput.showPicker();
+  return true;
+}
+
+function directWorkspaceFilePickerAvailable() {
+  return !state.fileSystemPickerUnavailable
+    && window.isSecureContext
+    && typeof window.showOpenFilePicker === "function";
+}
+
+function showWorkspaceUploadDialog() {
+  if (!prepareWorkspaceUploadSelection()) return;
+  renderWorkspaceUploadDialog();
+  if (!elements.fileUploadDialog.open) elements.fileUploadDialog.showModal();
+}
+
+async function requestWorkspaceUploadFiles() {
+  if (!prepareWorkspaceUploadSelection()) return;
+  if (directWorkspaceFilePickerAvailable()) {
+    try {
+      const handles = await window.showOpenFilePicker({multiple: true});
+      const files = await Promise.all(handles.map((handle) => handle.getFile()));
+      addWorkspaceUploadFiles(files);
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      state.fileSystemPickerUnavailable = true;
+      showToast(
+        "改用兼容文件选择器",
+        "浏览器拒绝直接打开文件管理器，请再次点击“打开文件管理器”。",
+        "error",
+      );
+      showWorkspaceUploadDialog();
       return;
     }
-  } catch (_) {
-    // Fall back to click() when a browser exposes showPicker() but declines it.
   }
+  // This must be the only picker call in the user gesture. Calling
+  // HTMLInputElement.showPicker() first can consume the gesture when the
+  // browser rejects hidden inputs, leaving click() silently blocked.
   elements.fileUploadInput.click();
+}
+
+function requestWorkspaceUploadMediaFiles() {
+  if (!prepareWorkspaceUploadSelection()) return;
+  elements.fileUploadMediaInput.click();
+}
+
+async function startWorkspaceUploadSelection() {
+  if (!prepareWorkspaceUploadSelection()) return;
+  if (directWorkspaceFilePickerAvailable()) {
+    await requestWorkspaceUploadFiles();
+    return;
+  }
+  showWorkspaceUploadDialog();
 }
 
 function workspaceUploadFileAllowed(file) {
@@ -4790,6 +4838,7 @@ function addWorkspaceUploadFiles(files) {
     firstError ||= `每批最多选择 ${WORKSPACE_UPLOAD_MAX_FILES} 个文件`;
   }
   elements.fileUploadInput.value = "";
+  elements.fileUploadMediaInput.value = "";
   renderWorkspaceUploadDialog();
   if (!elements.fileUploadDialog.open && state.fileUploadEntries.length) {
     elements.fileUploadDialog.showModal();
@@ -4891,6 +4940,9 @@ function renderWorkspaceUploadDialog() {
   elements.fileUploadDropzone.classList.toggle("is-disabled", selectionDisabled);
   elements.fileUploadDropzone.setAttribute("aria-disabled", String(selectionDisabled));
   elements.fileUploadInput.disabled = selectionDisabled;
+  elements.fileUploadMediaInput.disabled = selectionDisabled;
+  elements.fileUploadBrowseButton.disabled = selectionDisabled;
+  elements.fileUploadMediaButton.disabled = selectionDisabled;
   elements.fileUploadOverwrite.disabled = state.fileUploadPending;
   elements.fileUploadCloseButton.disabled = committing;
   elements.fileUploadCancelButton.disabled = committing;
@@ -5153,6 +5205,7 @@ function resetWorkspaceUploadDialog() {
   state.fileUploadActive = null;
   state.fileUploadTarget = null;
   elements.fileUploadInput.value = "";
+  elements.fileUploadMediaInput.value = "";
   elements.fileUploadOverwrite.checked = false;
   renderWorkspaceUploadDialog();
 }
@@ -5881,17 +5934,14 @@ function bindEvents() {
   elements.copyFileButton.addEventListener("click", copyWorkspaceFile);
   elements.downloadFileButton.addEventListener("click", downloadWorkspaceFile);
   elements.downloadFileEmptyButton.addEventListener("click", downloadWorkspaceFile);
-  elements.fileUploadButton.addEventListener("click", requestWorkspaceUploadFiles);
+  elements.fileUploadButton.addEventListener("click", startWorkspaceUploadSelection);
+  elements.fileUploadBrowseButton.addEventListener("click", requestWorkspaceUploadFiles);
+  elements.fileUploadMediaButton.addEventListener("click", requestWorkspaceUploadMediaFiles);
   elements.fileUploadInput.addEventListener("change", () => {
     addWorkspaceUploadFiles(elements.fileUploadInput.files);
   });
-  elements.fileUploadDropzone.addEventListener("click", () => {
-    if (!state.fileUploadPending) requestWorkspaceUploadFiles();
-  });
-  elements.fileUploadDropzone.addEventListener("keydown", (event) => {
-    if (!["Enter", " "].includes(event.key) || state.fileUploadPending) return;
-    event.preventDefault();
-    requestWorkspaceUploadFiles();
+  elements.fileUploadMediaInput.addEventListener("change", () => {
+    addWorkspaceUploadFiles(elements.fileUploadMediaInput.files);
   });
   elements.fileUploadDropzone.addEventListener("dragenter", (event) => {
     if (!workspaceDragContainsFiles(event) || state.fileUploadPending) return;
