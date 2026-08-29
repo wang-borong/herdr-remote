@@ -11,7 +11,7 @@ Download [Herdi.app](https://github.com/dcolinmorgan/herdr-remote/releases/lates
 Monitors all your local herdr agents automatically -- no relay, no config, no account.
 
 ```bash
-curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/latest/download/Herdi-0.7.0.dmg -o /tmp/Herdi.dmg && open /tmp/Herdi.dmg
+curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/latest/download/Herdi-0.7.4.dmg -o /tmp/Herdi.dmg && open /tmp/Herdi.dmg
 ```
 
 ## What you get
@@ -79,27 +79,48 @@ Set-Location herdi-win
 
 ### Security
 
-The relay validates WebSocket origins to prevent drive-by attacks from malicious
-webpages. On a tokenless loopback relay, only connections from `localhost` or
-`127.0.0.1` origins are accepted. To allow additional origins (e.g., a Cloudflare
-Access hostname), set `HERDR_TRUSTED_ORIGINS`:
+Browser WebSocket clients must use the relay's own authenticated origin. Native
+clients without an `Origin` header remain supported. The Tailscale console adds
+identity allowlists and same-origin checks on top of relay token authentication.
+An authenticated cross-origin dashboard can be opted in explicitly with the
+exact `HERDR_RELAY_TRUSTED_ORIGINS` allowlist; wildcard origins are not accepted.
 
-```bash
-export HERDR_TRUSTED_ORIGINS="https://herdr.example.com"
-```
+### Private Tailscale web console
 
-## Telegram Bot
-
-For an automatically restarting relay and Telegram bot:
+For a private, identity-aware web dashboard that works on desktop and mobile browsers, keep the relay on localhost and publish it with Tailscale Serve:
 
 ```bash
 cd relay
-./install-service.sh
+./install-tailscale-web.sh
 ```
 
-Choose Telegram setup when prompted. Create the bot with `@BotFather` using `/newbot`, send `/start` to the bot (or `/start@your_bot` in a private group), and select the discovered chat. Telegram connects to the relay over localhost, so this setup does **not** require Cloudflare Tunnel; the Mac only needs outbound internet access to Telegram.
+The web console includes the Agent Dashboard, live pane output, semantic Prompt submission with pasted, dropped, or selected image attachments for Codex, Tab-to-queue for a working Codex agent, confirmed Interrupt, safe workspace-directory browsing, a responsive local/SSH file reader with sanitized Markdown, sandboxed HTML, and syntax highlighting, one-time file downloads, arbitrary multi-file uploads for Remote Shell-authorized users, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
 
-The installer creates user services on macOS or Linux, enables relay authentication for new installs, and stores credentials in `~/.config/herdr-remote/secrets.env` with mode `0600`. On macOS:
+For full workstation maintenance, enable official Tailscale SSH plus the responsive Web Terminal:
+
+```bash
+cd relay
+./install-tailscale-web.sh --remote-shell
+```
+
+Remote Shell provides a real PTY with xterm.js, persistent tmux sessions, Git/system maintenance, mouse support, touch-friendly mobile controls, a dedicated Ctrl+B web tmux prefix that does not conflict with Herdr's Ctrl+X, and allowlisted SSH profiles for LAN servers. Native SSH, ProxyJump, and optional subnet-router workflows remain available even when the browser console is offline. See [Remote Shell and LAN access](REMOTE_SHELL.md).
+
+Every authorized SSH profile can expose its allowed directories in Files, using the remote user's home directory by default, even when Agent discovery is disabled. Files can upload selected or dropped files into the current local or SSH directory; uploads are chunked, staged, and atomically committed, with automatic conflict numbering unless overwrite is selected. Enabling a profile as a Herdr Agent Source additionally discovers and controls that host's agents with source-scoped Pane IDs, reports per-host health, and starts new Codex agents on the selected machine.
+
+The Telegram bot consumes the same Relay snapshot, so remote agents automatically appear in `/start`, `/agents`, `/read`, `/reply`, `/send`, `/interrupt`, blocked/completion notifications, and `/digest`. `/status` also reports each local or SSH Agent Source's health and Agent count. Use `/hosts` to select an online local or SSH Agent Source; `/browse`, `/cd`, `/cwd`, and `/codex` then remain scoped to that host, including remote Workspace browsing and Codex startup.
+
+## Telegram Bot
+
+For the hardened Telegram-only setup (recommended for personal remote control):
+
+```bash
+cd relay
+./install-telegram-only.sh
+```
+
+Create the bot with `@BotFather` using `/newbot`, then send the exact one-time pairing command shown by the installer in a **private chat**. Telegram connects to the relay over authenticated localhost WebSocket, so this setup does **not** require Cloudflare Tunnel or an inbound port. See the full [Telegram-only secure setup](TELEGRAM_ONLY.md).
+
+The installer creates user services on macOS or Linux, binds the relay to `127.0.0.1`, requires relay authentication, authorizes both the Telegram chat and user IDs, and stores credentials in `~/.config/herdr-remote/secrets.env` with mode `0600`. On macOS:
 
 ```bash
 launchctl print "gui/$(id -u)/com.herdr-remote.relay"
@@ -111,6 +132,9 @@ Manual foreground setup remains available:
 ```bash
 export HERDR_TG_TOKEN="your-token"
 export HERDR_TG_CHAT_ID="your-chat-id"
+export HERDR_TG_USER_ID="your-user-id"
+export HERDR_RELAY_TOKEN="$(openssl rand -hex 32)"
+export HERDR_RELAY="ws://127.0.0.1:8375?token=$HERDR_RELAY_TOKEN"
 uv run relay/herdr_telegram.py
 ```
 
@@ -121,13 +145,20 @@ uv run relay/herdr_telegram.py
 | `/read` | Read agent output |
 | `/reply` | Read + respond in one flow |
 | `/send` | Send text to an agent |
-| `/trust` | Trust all tools for blocked agent |
+| `/trust` | Persistent trust; disabled by default and requires confirmation when enabled |
 | `/interrupt` | Send Ctrl+C |
 | `/digest` | Today's activity summary |
+| `/hosts` | Select the local or SSH host used for new Codex agents |
+| `/browse` | Browse allowed directories on the selected host |
+| `/cd` | Select a Workspace directory on the selected host |
+| `/cwd` | Show the selected host and directory |
+| `/codex` | Start Codex on the selected host |
 
-The `/start`, `/read`, `/reply`, `/send`, `/interrupt`, and `/trust` pickers keep every eligible agent reachable. Normal herds appear in one list; larger herds include Previous and Next buttons. Selecting an agent opens a reply prompt containing its recent output; reply to that prompt to send text safely to the pane.
+The `/start`, `/read`, `/reply`, `/send`, and `/interrupt` pickers keep every eligible agent reachable. Normal herds appear in one list; larger herds include Previous and Next buttons. Selecting an agent opens a reply prompt containing its recent output; replying submits text through `herdr agent prompt` rather than emulated terminal input.
 
 Finished and blocked notifications include **Open output & reply**. You can also reply directly to the notification to send a follow-up without returning to the agent list. Blocked notifications retain their one-tap approval controls.
+
+After `/read`, `/reply`, or **Open output & reply** successfully displays a completed Agent's output, the Relay marks that completion as seen and Herdr returns the Agent to `idle`.
 
 ## Architecture
 
@@ -144,7 +175,7 @@ Finished and blocked notifications include **Open output & reply**. You can also
        └───── WebSocket ──┴──────────────────┘
                    │
         ┌──────────┴──────────┐
-        │   relay (:8375)     │  <- Cloudflare tunnel
+        │ relay (127.0.0.1)   │  <- Tailscale Serve / local clients
         └──────────┬──────────┘
                    │
      ┌─────────────┼─────────────┐
@@ -165,12 +196,14 @@ uv run relay/herdr_tui.py
 
 ## Token Auth
 
-`install-service.sh` generates and persists a relay token for new managed installs. For foreground use:
+Relay authentication is required by default. `install-service.sh` generates and persists a token for managed installs. For foreground use:
 
 ```bash
 export HERDR_RELAY_TOKEN="$(openssl rand -hex 32)"
 uv run relay/herdr_relay.py
 ```
+
+The relay listens on `127.0.0.1` by default. Remote binding requires the explicit `HERDR_ALLOW_REMOTE_BIND=1` opt-in and should only be used behind a trusted access layer.
 
 On Windows PowerShell:
 
@@ -185,7 +218,9 @@ uv run relay/herdr_relay.py
 - Windows 10 1809+ (tray app, relay/web/TUI/Telegram)
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/) (relay/TUI/bot)
 - `cloudflared` (for remote access)
-- herdr 0.7+
+- `tailscale` (recommended for the private responsive web console)
+- `openssh` and `tmux` (installed by `--remote-shell` for full workstation and LAN-server control)
+- herdr 0.8+ for semantic Telegram prompt submission
 - Zero-dep plugin: [`herdr-push`](https://github.com/dcolinmorgan/herdr-push)
 
 ## Changelog
@@ -205,4 +240,4 @@ uv run relay/herdr_relay.py
 
 ### v0.5.0
 
-Telegram bot (`/agents /read /send /reply /trust /interrupt`), demo bot, linux setup script.
+Telegram bot (`/start /agents /status /hosts /read /send /reply /interrupt /digest /browse /cd /cwd /codex /help`) with scoped command completion, local/SSH Agent Source selection, allowlisted directory browsing, safe Codex startup, and shortcut buttons; demo bot and Linux setup script.

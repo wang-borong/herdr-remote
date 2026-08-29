@@ -215,7 +215,9 @@ final class RelayConnection {
     private func upsertAgent(_ data: AgentMessage.AgentData) {
         if let existing = agents.first(where: { $0.id == data.pane_id }) {
             existing.name = data.agent
-            existing.status = AgentStatus(rawValue: data.status) ?? .unknown
+            let status = AgentStatus(rawValue: data.status) ?? .unknown
+            existing.status = status
+            if status != .blocked { clearBlockedState(existing) }
             existing.project = data.project
             existing.cwd = data.cwd
             existing.host = data.host ?? "local"
@@ -226,6 +228,16 @@ final class RelayConnection {
             status: AgentStatus(rawValue: data.status) ?? .unknown,
             project: data.project, cwd: data.cwd, host: data.host ?? "local"
         ))
+    }
+
+    private func clearBlockedState(_ agent: Agent) {
+        agent.prompt = nil
+        agent.promptId = nil
+        agent.options = nil
+        agent.multiOptions = []
+        agent.selectedOptions = []
+        agent.interaction = nil
+        agent.isMultiSelect = false
     }
 
     private func updateAgentCounts() {

@@ -1,18 +1,18 @@
-# Quick Start
+# Telegram-only Quick Start
 
-Get mobile notifications + approval for your herdr agents in 60 seconds.
+Get private mobile notifications, approval, prompts, reads, and interrupts without a public server or tunnel.
 
 ## 1. Install persistent local services
 
 **macOS/Linux:**
 
 ```bash
-git clone https://github.com/dcolinmorgan/herdr-remote
+git clone https://github.com/wang-borong/herdr-remote
 cd herdr-remote/relay
-./install-service.sh
+./install-telegram-only.sh
 ```
 
-The installer creates restartable user services for the relay and, optionally, Telegram. Choose `none` for the Cloudflare tunnel when you only need Telegram; the bot connects to the relay over localhost.
+The installer creates restartable user services for the authenticated, loopback-only relay and Telegram bot. Cloudflare is skipped entirely.
 
 **Windows PowerShell:**
 
@@ -30,47 +30,31 @@ The Windows launcher binds to `127.0.0.1` with no tunnel by default. Set
 
 1. Open `@BotFather` in Telegram and send `/newbot`.
 2. Choose Telegram setup in the installer and paste the token when prompted.
-3. Open the new bot and send `/start`. For a private group, add the bot and send `/start@your_bot`.
-4. Select the discovered chat and accept the test message.
+3. Open the new bot in a private chat and send the exact one-time `/start <pairing-code>` command displayed by the installer.
+4. Accept the test message.
 
-Credentials are stored in `~/.config/herdr-remote/secrets.env` with owner-only permissions. The machine needs outbound internet access to Telegram, but no public IP, webhook, or tunnel.
+The installer authorizes both your chat ID and user ID. Credentials are stored in `~/.config/herdr-remote/secrets.env` with owner-only permissions. The machine needs outbound internet access to Telegram, but no public IP, webhook, or tunnel.
 
-## 3. Optional remote web and agent access
+## 3. Monitor and control
 
-Cloudflare is only needed when a browser or agent outside your local network must connect directly to the relay:
+Send `/start` for the clickable dashboard, then use `/agents`, `/read`, `/reply`, `/send`, `/interrupt`, or `/digest`.
 
-```bash
-cloudflared tunnel --url http://localhost:8375
-# → gives you https://something.trycloudflare.com
-```
+Replies are submitted through `herdr agent prompt`, so Codex receives an actual prompt submission instead of a pasted newline. Persistent Trust is hidden by default.
 
-On a remote machine with herdr:
+## 4. Check services
 
 ```bash
-herdr plugin install dcolinmorgan/herdr-push
-export HERDR_RELAY="https://your-tunnel.trycloudflare.com"
-herdr server reload-config
+systemctl --user status herdr-relay
+systemctl --user status herdr-telegram
 ```
 
-## 4. Monitor
+On macOS, use `launchctl print` commands from the installer summary.
 
-**Telegram:** send `/status`, then `/agents`, `/read`, or `/reply` to your bot.
+## 5. Security notes
 
-**Telegram:** send `/start` for a clickable dashboard of every running agent. Select an agent, then reply to the generated output prompt. Finished and blocked notifications also provide **Open output & reply**, and larger herds include Previous and Next buttons.
+- Use only the authorized private bot chat.
+- Never share `secrets.env`, the BotFather token, or a Relay URL containing `?token=`.
+- Telegram Bot chats are not end-to-end encrypted; avoid exposing secrets in terminal output.
+- Keep `HERDR_TG_ALLOW_PERSISTENT_TRUST=0` unless permanent trust is genuinely required.
 
-**Web app** (phone): open [herdr-remote.pages.dev](https://herdr-remote.pages.dev), tap ⚙, and paste the tunnel URL.
-
-**Menu bar app** (macOS): download from [Releases](https://github.com/dcolinmorgan/herdr-remote/releases).
-
-**Terminal TUI**:
-```bash
-uv run herdr_tui.py
-```
-
-## 5. Test
-
-```bash
-herdr plugin action invoke herdr.push test
-```
-
-You should see a test agent appear on your dashboard.
+See [TELEGRAM_ONLY.md](TELEGRAM_ONLY.md) for detailed operation, optional persistent trust, Linux linger, logs, and uninstall instructions.

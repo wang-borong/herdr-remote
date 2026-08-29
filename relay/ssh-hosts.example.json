@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "hosts": [
+    {
+      "id": "build-server",
+      "label": "编译服务器",
+      "target": "builder@192.168.1.50",
+      "port": 22,
+      "description": "局域网 Debian 构建机",
+      "color": "green",
+      "agent_enabled": true,
+      "herdr_bin": "/home/builder/.local/bin/herdr",
+      "workspace_roots": [
+        "~",
+        "/srv/projects"
+      ]
+    },
+    {
+      "id": "nas",
+      "label": "NAS",
+      "target": "home-nas",
+      "port": 22,
+      "description": "使用 ~/.ssh/config 中的 Host 别名",
+      "color": "cyan",
+      "agent_enabled": false,
+      "herdr_bin": "herdr",
+      "workspace_roots": ["~"]
+    }
+  ]
+}

@@ -3,6 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="$HOME/.config/herdr-remote/config.env"
+SECRETS_FILE="$HOME/.config/herdr-remote/secrets.env"
 WS_PORT="${HERDR_RELAY_PORT:-8375}"
 
 RELAY_PID=""
@@ -24,6 +25,7 @@ echo ""
 
 # Load config if available
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+[ -f "$SECRETS_FILE" ] && source "$SECRETS_FILE"
 
 # 1. Start relay
 echo "Starting relay on :$WS_PORT..."

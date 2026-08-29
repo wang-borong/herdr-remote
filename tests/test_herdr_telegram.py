@@ -15,6 +15,11 @@ TELEGRAM_PATH = Path(__file__).resolve().parents[1] / "relay" / "herdr_telegram.
 def _telegram_stubs():
     telegram = types.ModuleType("telegram")
 
+    class _Value:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
     class InlineKeyboardButton:
         def __init__(self, text, callback_data=None):
             self.text = text
@@ -29,9 +34,17 @@ def _telegram_stubs():
             self.kwargs = kwargs
 
     telegram.Update = object
+    telegram.BotCommand = _Value
+    telegram.BotCommandScopeChat = _Value
     telegram.ForceReply = ForceReply
     telegram.InlineKeyboardButton = InlineKeyboardButton
     telegram.InlineKeyboardMarkup = InlineKeyboardMarkup
+    telegram.MenuButtonCommands = _Value
+
+    errors = types.ModuleType("telegram.error")
+    errors.BadRequest = type("BadRequest", (Exception,), {})
+    errors.NetworkError = type("NetworkError", (Exception,), {})
+    errors.TelegramError = type("TelegramError", (Exception,), {})
 
     ext = types.ModuleType("telegram.ext")
     ext.Application = object
@@ -40,7 +53,11 @@ def _telegram_stubs():
     ext.ContextTypes = types.SimpleNamespace(DEFAULT_TYPE=object)
     ext.MessageHandler = object
     ext.filters = types.SimpleNamespace()
-    return {"telegram": telegram, "telegram.ext": ext}
+    return {
+        "telegram": telegram,
+        "telegram.error": errors,
+        "telegram.ext": ext,
+    }
 
 
 def loaded_telegram():

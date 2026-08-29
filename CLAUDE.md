@@ -73,18 +73,25 @@ cd herdi-win && ./build.ps1
 | Variable | Purpose |
 |----------|---------|
 | `HERDR_RELAY_PORT` | Relay WebSocket port (default: 8375) |
-| `HERDR_RELAY_TOKEN` | Optional shared secret for auth |
+| `HERDR_RELAY_HOST` | Relay bind address (secure default: `127.0.0.1`) |
+| `HERDR_RELAY_TOKEN` | Required shared secret for relay auth |
+| `HERDR_ALLOW_REMOTE_BIND` | Explicit opt-in for non-loopback relay binding |
 | `HERDR_REMOTES` | Comma-separated SSH targets to poll |
+| `HERDR_SSH_CONFIG_FILE` | User SSH config used by Remote Shell and Agent Sources |
 | `HERDR_BIN` | Path to herdr binary (default: `/opt/homebrew/bin/herdr`) |
 | `HERDR_RELAY` | Relay URL used by clients (default: `ws://127.0.0.1:8375`) |
 | `HERDR_SESSION` | Boot-time default herdr session; a client can override it per source at runtime via `session_switch` |
 | `HERDI_RENDER` | Windows client only: `hardware` restores WPF's GPU path (default is software — see `herdi-win/README.md#memory`) |
+| `HERDR_TG_USER_ID` | Telegram controller user allowlist |
+| `HERDR_TG_REQUIRE_PRIVATE_CHAT` | Reject non-private Telegram chats (default: true) |
+| `HERDR_TG_REQUIRE_LOCAL_RELAY` | Reject non-loopback relay URLs (default: true) |
+| `HERDR_TG_ALLOW_PERSISTENT_TRUST` | Show persistent trust controls (default: false) |
 
-Runtime session overrides (per source) are persisted to `active_sessions.json` inside `HERDR_LOG_DIR`, so they survive relay restarts.
+Runtime session overrides are persisted per Agent Source to `active_sessions.json` inside `HERDR_LOG_DIR`, so they survive relay restarts.
 
 ## Web App
 
-The web app is a single self-contained HTML file (`web/index.html`) with inline CSS and JS — no build step. It's deployed to Cloudflare Pages. It includes 11 color themes, a mobile terminal keyboard, PWA support, and agent-icon detection.
+The web app is a build-free static application: `web/index.html` provides markup while `web/app.css` and `web/app.js` provide the responsive UI. It is served by the Relay and can also be deployed to Cloudflare Pages.
 
 ## WebSocket Protocol
 
@@ -92,15 +99,9 @@ Messages are JSON with a `type` field:
 
 **Server → Client:** `agents` (complete state snapshot), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `sessions` (per-source herdr session lists and the active selection)
 
-**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `agent_prompt` (submit free-form text via `herdr agent prompt`), `session_switch` (point one source at a herdr session; `session: null` follows herdr's default), `get_history`, `create_tab`, `push_subscribe`/`push_unsubscribe`
+**Client → Server:** `respond` and `question_toggle`/`question_submit` (interactive approvals), `agent_prompt`/`agent_prompt_queue` (semantic Prompt submission, including Codex images), `read_pane`/`get_history`, `send_keys`/`send_text`, `session_switch` (select a Herdr session per Agent Source), workspace browse/read/download/upload operations, terminal operations, and push subscription operations.
 
-### Relay-side constraints clients must respect
-
-Easy to get wrong — three of the existing clients do:
-
-- **`respond` is allowlisted.** Only the 12 values in `SAFE_RESPONSES` (`herdr_relay.py:90`) are accepted; anything else returns `response not in allowlist`. Free-form replies must use `agent_prompt` (≤10000 chars) or `send_text` (≤1000). The mac/iOS approval cards send custom text as `respond`, so their custom-reply box does not work against the relay.
-- **Interrupt is `C-c`.** `SAFE_KEYS` (`herdr_relay.py:91`) accepts `C-c`, not `Ctrl+c`, and `keys` must be an array. The mac app's `Ctrl+c` only works because it invokes the local CLI rather than the relay.
-- **`question_toggle`/`question_submit` have no relay handler.** The web app, TUI, mac and iOS clients all send them; the relay ignores both, so multi-select questions cannot be answered from any client until it grows support.
+Interrupt is represented by the allowlisted `C-c` key value. Pane IDs exposed by SSH Agent Sources are source-scoped; clients must return the public Pane ID received from the Relay rather than reconstructing it.
 
 ## Deployment
 

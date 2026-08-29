@@ -56,8 +56,16 @@ def loaded_relay(*, herdr_bin=None, relay_host=None, relay_token=None, trusted_o
     websockets_logger = logging.getLogger("websockets")
     original_websockets_level = websockets_logger.level
 
+    relay_dir = str(RELAY_PATH.parent)
+    added_relay_dir = relay_dir not in sys.path
+    if added_relay_dir:
+        sys.path.insert(0, relay_dir)
     with tempfile.TemporaryDirectory() as log_dir:
-        environment = {"HERDR_LOG_DIR": log_dir}
+        environment = {
+            "HERDR_LOG_DIR": log_dir,
+            "HERDR_TRUSTED_ORIGINS": "",
+            "HERDR_SSH_HOSTS_FILE": os.path.join(log_dir, "ssh-hosts.json"),
+        }
         if herdr_bin is not None:
             environment["HERDR_BIN"] = herdr_bin
         if relay_host is not None:
@@ -88,6 +96,8 @@ def loaded_relay(*, herdr_bin=None, relay_host=None, relay_token=None, trusted_o
                 yield module
             finally:
                 sys.modules.pop(module_name, None)
+                if added_relay_dir:
+                    sys.path.remove(relay_dir)
                 for handler in tuple(logger.handlers):
                     if handler not in original_handlers:
                         logger.removeHandler(handler)
@@ -140,6 +150,41 @@ class RelayConfigurationTests(unittest.TestCase):
             if expected is None:
                 expected = "herdr" if relay.sys.platform == "win32" else "/opt/homebrew/bin/herdr"
             self.assertEqual(relay.HERDR, expected)
+
+    def test_windows_log_directory_uses_local_app_data(self):
+        with (
+            loaded_relay() as relay,
+            mock.patch.object(relay.sys, "platform", "win32"),
+            mock.patch.dict(
+                relay.os.environ,
+                {"LOCALAPPDATA": "C:/Users/test/AppData/Local"},
+            ),
+        ):
+            self.assertEqual(
+                relay._get_log_dir(),
+                relay.os.path.join(
+                    "C:/Users/test/AppData/Local",
+                    "herdr-remote",
+                    "logs",
+                ),
+            )
+
+    def test_explicit_trusted_origin_allowlist_is_exact(self):
+        with loaded_relay(
+            relay_token="relay-token-at-least-16-chars",
+            trusted_origins="https://dashboard.example",
+        ) as relay:
+            trusted = types.SimpleNamespace(headers={
+                "Origin": "https://dashboard.example",
+                "Host": "relay.example",
+            })
+            attacker = types.SimpleNamespace(headers={
+                "Origin": "https://attacker.example",
+                "Host": "relay.example",
+            })
+
+            self.assertTrue(relay.websocket_origin_allowed(trusted))
+            self.assertFalse(relay.websocket_origin_allowed(attacker))
 
     def test_herdr_bin_override_is_honored(self):
         configured_path = os.path.join("custom", "bin", "herdr")
@@ -205,14 +250,21 @@ class RelayPaneStateTests(unittest.TestCase):
             "result": {"workspaces": [{"workspace_id": "w1", "label": label}]}
         })
 
+    @staticmethod
+    def _pane_result(output):
+        return subprocess.CompletedProcess([], 0, stdout=output, stderr="")
+
     def test_workspace_name_is_exposed_to_clients(self):
         with loaded_relay() as relay:
             with mock.patch.object(
-                relay,
-                "run_herdr",
-                side_effect=[self._pane_list(), self._workspace_list()],
-            ):
-                agents = relay.get_agents_from_host()
+                        relay,
+                        "run_herdr_result",
+                        return_value=self._pane_result(self._pane_list())), \
+                 mock.patch.object(
+                        relay,
+                        "run_herdr",
+                        return_value=self._workspace_list()):
+                agents = relay.get_agents_from_source(relay.local_agent_source())[0]
 
             # Without this, clients fall back to the cwd basename ("personal").
             self.assertEqual(agents[0]["workspace_label"], "central AC")
@@ -220,11 +272,14 @@ class RelayPaneStateTests(unittest.TestCase):
     def test_workspace_name_does_not_overwrite_the_pane_label(self):
         with loaded_relay() as relay:
             with mock.patch.object(
-                relay,
-                "run_herdr",
-                side_effect=[self._pane_list(label="pane name"), self._workspace_list()],
-            ):
-                agents = relay.get_agents_from_host()
+                        relay,
+                        "run_herdr_result",
+                        return_value=self._pane_result(self._pane_list(label="pane name"))), \
+                 mock.patch.object(
+                        relay,
+                        "run_herdr",
+                        return_value=self._workspace_list()):
+                agents = relay.get_agents_from_source(relay.local_agent_source())[0]
 
             # Tab chips key off label, so it must stay pane-scoped.
             self.assertEqual(agents[0]["label"], "pane name")
@@ -233,11 +288,14 @@ class RelayPaneStateTests(unittest.TestCase):
     def test_pane_label_stays_empty_when_herdr_gives_none(self):
         with loaded_relay() as relay:
             with mock.patch.object(
-                relay,
-                "run_herdr",
-                side_effect=[self._pane_list(), self._workspace_list()],
-            ):
-                agents = relay.get_agents_from_host()
+                        relay,
+                        "run_herdr_result",
+                        return_value=self._pane_result(self._pane_list())), \
+                 mock.patch.object(
+                        relay,
+                        "run_herdr",
+                        return_value=self._workspace_list()):
+                agents = relay.get_agents_from_source(relay.local_agent_source())[0]
 
             self.assertEqual(agents[0]["label"], "")
 
@@ -246,28 +304,28 @@ class RelayPaneStateTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 with loaded_relay() as relay:
                     with mock.patch.object(
-                        relay,
-                        "run_herdr",
-                        side_effect=[self._pane_list(), raw],
-                    ):
-                        agents = relay.get_agents_from_host()
+                                relay,
+                                "run_herdr_result",
+                                return_value=self._pane_result(self._pane_list())), \
+                         mock.patch.object(relay, "run_herdr", return_value=raw):
+                        agents = relay.get_agents_from_source(relay.local_agent_source())[0]
 
                     self.assertEqual(agents[0]["workspace_label"], "")
                     self.assertEqual(agents[0]["project"], "personal")
 
     def test_unusable_pane_list_skips_the_workspace_lookup(self):
         with loaded_relay() as relay:
-            calls = []
-
-            def record(*args, **kwargs):
-                calls.append(args)
-                return "not json"
-
-            with mock.patch.object(relay, "run_herdr", side_effect=record):
-                self.assertEqual(relay.get_agents_from_host(), [])
+            with mock.patch.object(
+                        relay,
+                        "run_herdr_result",
+                        return_value=self._pane_result("not json")) as pane_list, \
+                 mock.patch.object(relay, "run_herdr") as workspace_list:
+                agents = relay.get_agents_from_source(relay.local_agent_source())[0]
 
             # An unreachable SSH remote should not cost a second timeout.
-            self.assertEqual(calls, [("pane", "list")])
+            self.assertEqual(agents, [])
+            pane_list.assert_called_once_with("pane", "list", remote=None, timeout=8)
+            workspace_list.assert_not_called()
 
 
 class RelaySessionSwitchTests(unittest.TestCase):
@@ -383,15 +441,51 @@ class RelaySessionSwitchTests(unittest.TestCase):
             with mock.patch.object(relay.subprocess, "run", side_effect=fake_run):
                 relay._invoke_herdr("pane", "list", remote="user@host")
 
-            self.assertIn("HERDR_SESSION=personal", captured["cmd"])
-            # The assignment must precede the binary in the remote argv.
+            remote_command = captured["cmd"][-1]
+            self.assertIn("HERDR_SESSION=personal", remote_command)
+            # The assignment must precede the binary in the safely quoted
+            # remote command string.
             self.assertLess(
-                captured["cmd"].index("HERDR_SESSION=personal"),
-                captured["cmd"].index(relay.REMOTE_HERDR),
+                remote_command.index("HERDR_SESSION=personal"),
+                remote_command.index(relay.REMOTE_HERDR),
             )
             # An env= kwarg would not survive ssh; the remote session
             # assignment must travel via argv only, never the child env.
             self.assertNotIn("env", captured["kwargs"])
+
+    def test_named_ssh_profile_uses_stable_source_id_for_session(self):
+        with loaded_relay() as relay:
+            profile = {
+                "id": "build",
+                "kind": "ssh",
+                "label": "Build server",
+                "target": "builder@10.0.0.8",
+                "port": 2222,
+                "agent_enabled": True,
+                "herdr_bin": "herdr",
+            }
+            sources = [relay.local_agent_source(), profile]
+            with mock.patch.object(relay, "configured_agent_sources", return_value=sources), \
+                 mock.patch.object(relay, "get_sessions", return_value=[
+                     {"name": "personal", "running": True}
+                 ]) as get_sessions, \
+                 mock.patch.object(relay, "_save_active_sessions"), \
+                 mock.patch.object(relay, "audit"):
+                ok, err, changed = relay.apply_session_switch("build", "personal")
+                message = relay.sessions_message()
+
+            self.assertTrue(ok)
+            self.assertEqual(err, "")
+            self.assertTrue(changed)
+            self.assertEqual(relay.ACTIVE_SESSIONS["build"], "personal")
+            self.assertEqual(message["sources"][1]["host"], "build")
+            self.assertEqual(message["sources"][1]["active"], "personal")
+            self.assertEqual(
+                get_sessions.call_args_list,
+                [mock.call(remote=profile),
+                 mock.call(remote=None),
+                 mock.call(remote=profile)],
+            )
 
     def test_active_sessions_round_trip_through_state_file(self):
         with loaded_relay() as relay:
@@ -494,7 +588,10 @@ class RelaySessionSwitchTests(unittest.TestCase):
             async def switch_mid_broadcast(_message):
                 relay.reset_pane_state()          # simulates a switch landing
 
-            with mock.patch.object(relay, "get_all_agents", return_value=agents), \
+            with mock.patch.object(
+                        relay,
+                        "collect_all_agents",
+                        new=mock.AsyncMock(return_value=(agents, [], {}))), \
                  mock.patch.object(relay, "broadcast", side_effect=switch_mid_broadcast):
                 asyncio.run(relay._poll_once())
 
@@ -521,7 +618,10 @@ class RelaySessionSwitchTests(unittest.TestCase):
                 if calls["blocked_broadcasts"] == 1:
                     relay.reset_pane_state()          # simulates a switch landing
 
-            with mock.patch.object(relay, "get_all_agents", return_value=agents), \
+            with mock.patch.object(
+                        relay,
+                        "collect_all_agents",
+                        new=mock.AsyncMock(return_value=(agents, [], {}))), \
                  mock.patch.object(relay, "read_pane", return_value="Deploy to prod?"), \
                  mock.patch.object(relay, "broadcast", side_effect=switch_on_first_blocked_broadcast), \
                  mock.patch.object(relay, "send_web_push", new=mock.AsyncMock()):
@@ -543,7 +643,10 @@ class RelaySessionSwitchTests(unittest.TestCase):
             async def switch_mid_clear_push(*args, **kwargs):
                 relay.reset_pane_state()          # simulates a switch landing
 
-            with mock.patch.object(relay, "get_all_agents", return_value=agents), \
+            with mock.patch.object(
+                        relay,
+                        "collect_all_agents",
+                        new=mock.AsyncMock(return_value=(agents, [], {}))), \
                  mock.patch.object(relay, "broadcast", new=mock.AsyncMock()), \
                  mock.patch.object(relay, "send_web_push", side_effect=switch_mid_clear_push):
                 asyncio.run(relay._poll_once())
@@ -574,7 +677,10 @@ class RelaySessionSwitchTests(unittest.TestCase):
                         relay.reset_pane_state()          # simulates a switch landing
                         switched.set()
 
-                with mock.patch.object(relay, "get_all_agents", return_value=[]), \
+                with mock.patch.object(
+                            relay,
+                            "collect_all_agents",
+                            new=mock.AsyncMock(return_value=([], [], {}))), \
                      mock.patch.object(relay, "read_pane", return_value="Deploy to prod?"), \
                      mock.patch.object(relay, "broadcast", side_effect=switch_mid_broadcast):
                     task = asyncio.create_task(relay.event_push())
@@ -947,6 +1053,30 @@ class RelaySessionSwitchTests(unittest.TestCase):
             )
 
 
+class RelayHistoryTests(unittest.TestCase):
+    def test_conversation_history_is_bounded_before_websocket_delivery(self):
+        with loaded_relay() as relay:
+            history = {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": f"{index}:" + ("x" * 25_000),
+                    }
+                    for index in range(205)
+                ]
+            }
+
+            messages = relay.bounded_history_messages(history)
+
+            self.assertEqual(len(messages), relay.CONVERSATION_HISTORY_MAX_MESSAGES)
+            self.assertTrue(messages[0]["content"].startswith("5:"))
+            self.assertTrue(all(
+                len(message["content"])
+                <= relay.CONVERSATION_HISTORY_CONTENT_MAX_CHARS
+                for message in messages
+            ))
+
+
 class RelayResponseTests(unittest.TestCase):
     def test_respond_sends_correlated_acknowledgement(self):
         with loaded_relay() as relay:
@@ -1005,14 +1135,31 @@ class RelayResponseTests(unittest.TestCase):
                  mock.patch.object(relay.subprocess, "run", return_value=completed) as run:
                 asyncio.run(relay.handle_client(ws))
 
-            command_prefix = [
-                "ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote, relay.REMOTE_HERDR
-            ]
             self.assertEqual(
                 [call.args[0] for call in run.call_args_list],
                 [
-                    [*command_prefix, "pane", "send-text", pane_id, "yes"],
-                    [*command_prefix, "pane", "send-keys", pane_id, "Enter"],
+                    [
+                        *relay.ssh_command_prefix(),
+                        remote,
+                        relay.shlex.join([
+                            relay.REMOTE_HERDR_BIN,
+                            "pane",
+                            "send-text",
+                            pane_id,
+                            "yes",
+                        ]),
+                    ],
+                    [
+                        *relay.ssh_command_prefix(),
+                        remote,
+                        relay.shlex.join([
+                            relay.REMOTE_HERDR_BIN,
+                            "pane",
+                            "send-keys",
+                            pane_id,
+                            "Enter",
+                        ]),
+                    ],
                 ],
             )
             for call in run.call_args_list:
@@ -1314,8 +1461,71 @@ class RelayQuestionTests(unittest.TestCase):
             run.assert_not_called()
             self.assertIn("prompt changed", json.loads(ws.sent[-1])["message"])
 
+    def test_stale_approval_key_cannot_type_into_an_unblocked_agent(self):
+        with loaded_relay() as relay:
+            pane_id = "pane-1"
+            old_content = "Run read-only status command?\nyes, single permission"
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket([
+                json.dumps({
+                    "type": "send_keys",
+                    "pane_id": pane_id,
+                    "prompt_id": relay.question_prompt_id(pane_id, old_content),
+                    "keys": ["1"],
+                })
+            ])
+
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "read_pane", return_value="$ "), \
+                 mock.patch.object(relay, "run_herdr_result") as run:
+                asyncio.run(relay.handle_client(ws))
+
+            run.assert_not_called()
+            self.assertIn("prompt changed", json.loads(ws.sent[-1])["message"])
+
 
 class RelayCommandTests(unittest.TestCase):
+    def test_agent_navigation_keys_do_not_require_prompt_identity(self):
+        for key in ("Up", "Down", "Enter", "Escape"):
+            with self.subTest(key=key), loaded_relay() as relay:
+                pane_id = "pane-1"
+                request_id = f"request-{key.lower()}"
+                relay.known_panes.add(pane_id)
+                ws = _FakeWebSocket(
+                    [json.dumps({
+                        "type": "send_keys",
+                        "pane_id": pane_id,
+                        "keys": [key],
+                        "request_id": request_id,
+                    })],
+                    headers={"X-Herdr-Remote-Command": "1"},
+                )
+                completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+                with mock.patch.object(
+                    relay,
+                    "run_herdr_result",
+                    return_value=completed,
+                ) as run:
+                    asyncio.run(relay.handle_client(ws))
+
+                run.assert_called_once_with(
+                    "pane",
+                    "send-keys",
+                    pane_id,
+                    key,
+                    remote=None,
+                )
+                self.assertEqual(
+                    json.loads(ws.sent[-1]),
+                    {
+                        "type": "command_result",
+                        "command": "send_keys",
+                        "ok": True,
+                        "request_id": request_id,
+                    },
+                )
+
     def test_command_connection_skips_snapshot_and_correlates_ack(self):
         with loaded_relay() as relay:
             pane_id = "pane-1"
@@ -1348,27 +1558,72 @@ class RelayCommandTests(unittest.TestCase):
                 },
             )
 
+    def test_numeric_approval_key_requires_and_accepts_the_current_prompt(self):
+        with loaded_relay() as relay:
+            pane_id = "pane-1"
+            content = "Run read-only status command?\nyes, single permission"
+            request_id = "request-123"
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket(
+                [json.dumps({
+                    "type": "send_keys",
+                    "pane_id": pane_id,
+                    "prompt_id": relay.question_prompt_id(pane_id, content),
+                    "keys": ["1"],
+                    "request_id": request_id,
+                })],
+                headers={"X-Herdr-Remote-Command": "1"},
+            )
+            completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+            with mock.patch.object(relay, "read_pane", return_value=content), \
+                 mock.patch.object(
+                     relay,
+                     "run_herdr_result",
+                     return_value=completed,
+                 ) as run:
+                asyncio.run(relay.handle_client(ws))
+
+            run.assert_called_once_with(
+                "pane",
+                "send-keys",
+                pane_id,
+                "1",
+                remote=None,
+            )
+            self.assertEqual(
+                json.loads(ws.sent[-1]),
+                {
+                    "type": "command_result",
+                    "command": "send_keys",
+                    "ok": True,
+                    "request_id": request_id,
+                },
+            )
+
 
 class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
     async def test_blocked_agent_event_broadcasts_snapshot_before_blocked_prompt(self):
         complete_snapshot = [
             {
                 "pane_id": "event-pane",
+                "raw_pane_id": "event-pane",
+                "source_id": "local",
                 "agent": "omp",
                 "status": "blocked",
                 "cwd": "/projects/current",
                 "project": "current",
                 "host": "local",
-                "remote": None,
             },
             {
-                "pane_id": "unrelated-pane",
+                "pane_id": "build::unrelated-pane",
+                "raw_pane_id": "unrelated-pane",
+                "source_id": "build",
                 "agent": "claude",
                 "status": "idle",
                 "cwd": "/projects/other",
                 "project": "other",
-                "host": "agent-host",
-                "remote": "agent-host",
+                "host": "Build Server",
             },
         ]
         event = {
@@ -1382,12 +1637,13 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
         }
         fallback_agent = {
             "pane_id": "event-pane",
+            "raw_pane_id": "event-pane",
+            "source_id": "local",
             "agent": "omp",
             "status": "blocked",
             "cwd": "/projects/current",
             "project": "current",
             "host": "local",
-            "remote": "existing-host",
         }
 
         cases = (
@@ -1396,6 +1652,29 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
         )
         for case, snapshot, expected_agents in cases:
             with self.subTest(case=case), loaded_relay() as relay:
+                local_source = relay.local_agent_source()
+                remote_source = relay.normalize_ssh_profile({
+                    "id": "build",
+                    "label": "Build Server",
+                    "target": "agent-host",
+                    "agent_enabled": True,
+                })
+                source_map = {
+                    "local": local_source,
+                    "build": remote_source,
+                }
+                source_statuses = [
+                    relay.source_status(
+                        local_source,
+                        "online",
+                        agent_count=1 if snapshot else 0,
+                    ),
+                    relay.source_status(
+                        remote_source,
+                        "online",
+                        agent_count=1 if snapshot else 0,
+                    ),
+                ]
                 relay.known_panes.update({"event-pane", "stale-pane"})
                 relay.pane_remote_map["event-pane"] = "existing-host"
                 relay.pane_remote_map["stale-pane"] = "old-host"
@@ -1405,16 +1684,24 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
 
                 async def capture_broadcast(message):
                     messages.append(message)
-                    if len(messages) == 2:
+                    if len(messages) == 3:
                         broadcasts_complete.set()
 
                 with mock.patch.object(
-                    relay, "get_all_agents", return_value=snapshot
+                    relay,
+                    "collect_all_agents",
+                    new=mock.AsyncMock(return_value=(
+                        snapshot,
+                        source_statuses,
+                        source_map,
+                    )),
                 ), mock.patch.object(
                     relay, "read_pane", return_value="approve all pending"
                 ) as read_pane, mock.patch.object(
                     relay, "broadcast", side_effect=capture_broadcast
-                ):
+                ), mock.patch.object(
+                    relay, "send_web_push", new=mock.AsyncMock()
+                ) as send_web_push:
                     task = asyncio.create_task(relay.event_push())
                     try:
                         await relay.event_queue.put(event)
@@ -1428,6 +1715,7 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     messages,
                     [
+                        {"type": "agent_sources", "sources": source_statuses},
                         {"type": "agents", "agents": expected_agents},
                         {
                             "type": "blocked",
@@ -1435,6 +1723,7 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
                             "agent": "omp",
                             "project": "current",
                             "host": "local",
+                            "source_id": "local",
                             "prompt": "approve all pending",
                             "prompt_id": expected_prompt_id,
                             "options": relay.SUBAGENT_OPTIONS,
@@ -1446,17 +1735,84 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
                         },
                     ],
                 )
-                expected_event_remote = expected_agents[0].get("remote")
                 read_pane.assert_called_once_with(
-                    "event-pane", remote=expected_event_remote
+                    "event-pane", remote=None
                 )
                 expected_pane_ids = {agent["pane_id"] for agent in expected_agents}
-                expected_remote_map = {
-                    agent["pane_id"]: agent.get("remote") for agent in expected_agents
-                }
                 self.assertEqual(relay.known_panes, expected_pane_ids)
-                self.assertEqual(relay.pane_remote_map, expected_remote_map)
+                self.assertIsNone(relay.pane_remote_map["event-pane"])
+                if snapshot:
+                    self.assertEqual(
+                        relay.pane_remote_map["build::unrelated-pane"],
+                        remote_source,
+                    )
                 self.assertNotIn("stale-pane", relay.last_statuses)
+                self.assertEqual(relay.last_statuses["event-pane"], "blocked")
+                send_web_push.assert_awaited_once_with(
+                    title="🐑 current blocked",
+                    body="approve all pending",
+                    url="/?pane=event-pane",
+                )
+
+    async def test_nonblocked_event_clears_prompt_lifecycle_before_reblocking(self):
+        with loaded_relay() as relay:
+            pane_id = "event-pane"
+            cached_agent = {
+                "pane_id": pane_id,
+                "raw_pane_id": pane_id,
+                "source_id": "local",
+                "agent": "omp",
+                "status": "blocked",
+                "cwd": "/projects/current",
+                "project": "current",
+                "host": "local",
+            }
+            relay.agent_cache[pane_id] = cached_agent
+            relay.last_statuses[pane_id] = "blocked"
+            relay.last_blocked_prompts[pane_id] = (
+                relay.question_prompt_id(pane_id, "same prompt"),
+                (),
+                "same prompt",
+            )
+            cleanup_complete = asyncio.Event()
+            event = {
+                **cached_agent,
+                "type": "agent_event",
+                "status": "working",
+            }
+
+            async def capture_push(*args, **kwargs):
+                cleanup_complete.set()
+
+            with (
+                mock.patch.object(
+                    relay,
+                    "collect_all_agents",
+                    new=mock.AsyncMock(return_value=(
+                        [cached_agent],
+                        [],
+                        {"local": relay.local_agent_source()},
+                    )),
+                ),
+                mock.patch.object(relay, "broadcast", new=mock.AsyncMock()),
+                mock.patch.object(
+                    relay,
+                    "send_web_push",
+                    new=mock.AsyncMock(side_effect=capture_push),
+                ) as send_web_push,
+            ):
+                task = asyncio.create_task(relay.event_push())
+                try:
+                    await relay.event_queue.put(event)
+                    await asyncio.wait_for(cleanup_complete.wait(), timeout=1)
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
+            self.assertNotIn(pane_id, relay.last_blocked_prompts)
+            self.assertEqual(relay.last_statuses[pane_id], "working")
+            send_web_push.assert_awaited_once_with("", "", clear=True)
 
 
 class RelaySubprocessConcurrencyTests(unittest.TestCase):
@@ -1517,7 +1873,7 @@ class RelaySubprocessConcurrencyTests(unittest.TestCase):
             release_blocked = threading.Event()
 
             def command_target(command):
-                if command[0] != "ssh":
+                if Path(command[0]).name != "ssh":
                     return "local"
                 batch_mode_index = command.index("BatchMode=yes")
                 return command[batch_mode_index + 1]
