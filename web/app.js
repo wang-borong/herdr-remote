@@ -24,7 +24,8 @@ const AGENT_DIVIDER_RUN_RE = /[─━═—–_\-=]+/gu;
 const AGENT_DIVIDER_GLYPH_RE = /[─━═—–_\-=]/gu;
 const UNICODE_MARK_RE = /\p{Mark}/u;
 const AGENT_OUTPUT_SCROLLBACK_LINES = 20_000;
-const AGENT_OUTPUT_SCROLL_THUMB_MIN_PX = 48;
+const AGENT_OUTPUT_SCROLL_THUMB_MIN_PX = 44;
+const AGENT_OUTPUT_XTERM_SCROLLBAR_PX = 1;
 
 const elements = {
   connectionDot: byId("connection-dot"),
@@ -2316,6 +2317,10 @@ function ensureAgentOutputTerminal() {
       fontSize: isDesktop() ? 13 : 11,
       lineHeight: 1.1,
       scrollback: AGENT_OUTPUT_SCROLLBACK_LINES,
+      // xterm derives its internal scrollbar reserve from this width. Keep it
+      // at 1px, then hide the generated scrollbar in CSS, so only the web
+      // navigation remains without sacrificing a full 14px text column.
+      overviewRuler: { width: AGENT_OUTPUT_XTERM_SCROLLBAR_PX },
       screenReaderMode: true,
       theme: terminalTheme(),
       allowTransparency: false,

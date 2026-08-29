@@ -85,8 +85,8 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn('id="file-html-preview"', html)
         self.assertIn('title="HTML 安全预览" sandbox referrerpolicy="no-referrer"', html)
         self.assertIn('id="file-html-view-button"', html)
-        self.assertIn('href="/app.css?v=20260829-1"', html)
-        self.assertIn('src="/app.js?v=20260829-1"', html)
+        self.assertIn('href="/app.css?v=20260829-2"', html)
+        self.assertIn('src="/app.js?v=20260829-2"', html)
         self.assertNotIn("allow-scripts", html)
         self.assertNotIn("allow-forms", html)
         self.assertNotIn("allow-same-origin", html)
@@ -184,9 +184,19 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn("function updateAgentOutputNavigation()", source)
         self.assertIn("function bindAgentOutputNavigation()", source)
         self.assertIn("scrollback: AGENT_OUTPUT_SCROLLBACK_LINES", source)
+        self.assertIn("AGENT_OUTPUT_XTERM_SCROLLBAR_PX = 1", source)
+        self.assertIn(
+            "overviewRuler: { width: AGENT_OUTPUT_XTERM_SCROLLBAR_PX }",
+            source,
+        )
         self.assertIn("lines: 500", source)
         self.assertIn("touch-action: none", styles)
         self.assertIn(".agent-output-scroll-thumb", styles)
+        self.assertIn(
+            ".agent-output-terminal .xterm-scrollable-element > .scrollbar",
+            styles,
+        )
+        self.assertIn("display: none !important", styles)
 
     def test_swift_models_decode_omp_question_state(self):
         for relative_path in (

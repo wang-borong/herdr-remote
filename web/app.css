@@ -1191,7 +1191,7 @@ input::placeholder {
 
 .agent-output-terminal {
   position: absolute;
-  inset: 13px 52px 15px 15px;
+  inset: 13px 32px 15px 15px;
 }
 
 .agent-output-terminal .xterm {
@@ -1231,42 +1231,47 @@ input::placeholder {
 .agent-output-terminal .xterm-viewport {
   overflow-x: hidden;
   background-color: var(--terminal);
-  scrollbar-width: none;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none;
 }
 
 .agent-output-terminal .xterm-viewport::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+  display: none;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+.agent-output-terminal .xterm-scrollable-element > .scrollbar,
+.agent-output-terminal .xterm-scrollable-element > .shadow,
+.agent-output-terminal .xterm-decoration-overview-ruler {
+  display: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 .agent-output-navigation {
   position: absolute;
   z-index: 24;
-  top: 9px;
-  right: 5px;
-  bottom: 10px;
-  width: 40px;
+  top: 10px;
+  right: 4px;
+  bottom: 11px;
+  width: 26px;
   display: grid;
-  grid-template-rows: 36px minmax(54px, 1fr) 36px;
-  gap: 6px;
-  padding: 3px;
-  background: color-mix(in srgb, var(--terminal) 82%, transparent);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
+  grid-template-rows: 28px minmax(48px, 1fr) 28px;
+  gap: 4px;
 }
 
 .agent-output-jump {
   width: 100%;
   min-width: 0;
-  min-height: 36px;
+  min-height: 28px;
   display: inline-grid;
   place-items: center;
   padding: 0;
   color: rgba(215, 222, 240, 0.76);
-  background: rgba(255, 255, 255, 0.045);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 7px;
   touch-action: manipulation;
 }
 
@@ -1283,8 +1288,8 @@ input::placeholder {
 }
 
 .agent-output-jump svg {
-  width: 17px;
-  height: 17px;
+  width: 14px;
+  height: 14px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -1296,8 +1301,8 @@ input::placeholder {
   position: relative;
   min-height: 0;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: transparent;
+  border: 0;
   border-radius: 999px;
   outline: none;
   cursor: grab;
@@ -1310,8 +1315,8 @@ input::placeholder {
   top: 8px;
   bottom: 8px;
   left: 50%;
-  width: 4px;
-  background: rgba(255, 255, 255, 0.08);
+  width: 2px;
+  background: rgba(255, 255, 255, 0.12);
   border-radius: 999px;
   transform: translateX(-50%);
 }
@@ -1327,13 +1332,14 @@ input::placeholder {
 .agent-output-scroll-thumb {
   position: absolute;
   top: 0;
-  right: 7px;
-  left: 7px;
-  min-height: 48px;
+  left: 50%;
+  width: 8px;
+  min-height: 44px;
+  margin-left: -4px;
   background: linear-gradient(180deg, rgba(166, 155, 255, 0.9), rgba(83, 215, 222, 0.76));
-  border: 1px solid rgba(255, 255, 255, 0.34);
+  border: 0;
   border-radius: 999px;
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.32);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.38);
   transform: translateY(0);
   will-change: height, transform;
 }
@@ -1348,14 +1354,14 @@ input::placeholder {
 
 .agent-output-scroll-track.is-dragging .agent-output-scroll-thumb {
   background: linear-gradient(180deg, #b8afff, #77e8ee);
-  box-shadow: 0 0 0 3px rgba(139, 124, 255, 0.2), 0 5px 14px rgba(0, 0, 0, 0.38);
+  box-shadow: 0 0 0 2px rgba(139, 124, 255, 0.22), 0 3px 9px rgba(0, 0, 0, 0.42);
 }
 
 .terminal-output-fallback {
   position: absolute;
   inset: 0;
   margin: 0;
-  padding: 17px 60px 24px 18px;
+  padding: 17px 38px 24px 18px;
   overflow: auto;
   color: var(--terminal-text);
   background: transparent;
@@ -4521,27 +4527,20 @@ dialog {
   }
 
   .agent-output-terminal {
-    inset: 10px 50px 11px 9px;
+    inset: 10px 32px 11px 9px;
   }
 
   .agent-output-navigation {
-    top: 7px;
-    right: 4px;
-    bottom: 8px;
-    width: 42px;
-    grid-template-rows: 40px minmax(58px, 1fr) 40px;
-    gap: 7px;
-    padding: 3px;
+    top: 8px;
+    right: 3px;
+    bottom: 9px;
+    width: 28px;
+    grid-template-rows: 30px minmax(48px, 1fr) 30px;
+    gap: 4px;
   }
 
   .agent-output-jump {
-    min-height: 40px;
-  }
-
-  .agent-output-scroll-thumb {
-    right: 6px;
-    left: 6px;
-    min-height: 54px;
+    min-height: 30px;
   }
 
   .terminal-card {
