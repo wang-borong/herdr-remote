@@ -379,6 +379,15 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
         session_message = next(message for message in ws.sent if message["type"] == "session")
         self.assertTrue(session_message["features"]["terminal"])
         self.assertTrue(session_message["features"]["workspace_files"])
+        self.assertTrue(session_message["features"]["workspace_upload"])
+        self.assertEqual(
+            session_message["limits"]["workspace_upload_max_bytes"],
+            relay.WORKSPACE_UPLOAD_MAX_BYTES,
+        )
+        self.assertEqual(
+            session_message["limits"]["workspace_upload_chunk_bytes"],
+            relay.WORKSPACE_UPLOAD_CHUNK_BYTES,
+        )
         self.assertEqual(session_message["terminal_profiles"], [profile])
         audit_details = [call.args[4] for call in audit.call_args_list]
         self.assertFalse(any("git status" in detail for detail in audit_details))
@@ -1555,6 +1564,413 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(ValueError, "too large"):
                     relay.workspace_file_read(str(large_code))
 
+    def test_local_workspace_upload_is_atomic_and_handles_name_conflicts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Workspace"
+            project = root / "project"
+            project.mkdir(parents=True)
+            existing = project / "report.txt"
+            existing.write_bytes(b"old")
+            source = relay.local_agent_source()
+
+            with patch.object(relay, "WORKSPACE_ROOTS", [root.resolve()]):
+                payload = b"new report"
+                upload = relay.WorkspaceUpload(
+                    source,
+                    str(project),
+                    "report.txt",
+                    len(payload),
+                    False,
+                )
+                staging_path = upload.staging_path
+                self.assertEqual(upload.write(0, payload[:4]), 4)
+                self.assertEqual(upload.write(4, payload[4:]), len(payload))
+                result = upload.finish()
+
+                self.assertEqual(result["name"], "report (1).txt")
+                self.assertEqual((project / result["name"]).read_bytes(), payload)
+                self.assertEqual(existing.read_bytes(), b"old")
+                self.assertFalse(staging_path.exists())
+
+                replacement = b"replacement"
+                overwrite = relay.WorkspaceUpload(
+                    source,
+                    str(project),
+                    "report.txt",
+                    len(replacement),
+                    True,
+                )
+                overwrite.write(0, replacement)
+                overwritten = overwrite.finish()
+                self.assertEqual(overwritten["name"], "report.txt")
+                self.assertEqual(existing.read_bytes(), replacement)
+
+                empty = relay.WorkspaceUpload(
+                    source,
+                    str(project),
+                    "empty.bin",
+                    0,
+                    False,
+                )
+                empty.finish()
+                self.assertEqual((project / "empty.bin").read_bytes(), b"")
+
+    def test_workspace_upload_rejects_invalid_input_and_cleans_staging_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Workspace"
+            project = root / "project"
+            project.mkdir(parents=True)
+            source = relay.local_agent_source()
+
+            self.assertEqual(
+                relay.validated_workspace_upload_name(" report .txt "),
+                " report .txt ",
+            )
+            for name in ("", "   ", ".hidden", "..", "../escape", "dir/file", "dir\\file", "bad\x00name"):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    relay.validated_workspace_upload_name(name)
+
+            with (
+                patch.object(relay, "WORKSPACE_ROOTS", [root.resolve()]),
+                patch.object(relay, "WORKSPACE_UPLOAD_MAX_BYTES", 8),
+            ):
+                for size in (-1, 9, True, "4"):
+                    with self.subTest(size=size), self.assertRaisesRegex(ValueError, "file size"):
+                        relay.WorkspaceUpload(
+                            source,
+                            str(project),
+                            "invalid.bin",
+                            size,
+                            False,
+                        )
+
+                cancelled = relay.WorkspaceUpload(
+                    source,
+                    str(project),
+                    "cancelled.bin",
+                    4,
+                    False,
+                )
+                cancelled_path = cancelled.staging_path
+                with self.assertRaisesRegex(ValueError, "offset"):
+                    cancelled.write(1, b"ab")
+                cancelled.cancel()
+                self.assertTrue(cancelled.stream.closed)
+                self.assertFalse(cancelled_path.exists())
+
+                oversized_chunk = relay.WorkspaceUpload(
+                    source,
+                    str(project),
+                    "oversized.bin",
+                    1,
+                    False,
+                )
+                with self.assertRaisesRegex(ValueError, "declared size"):
+                    oversized_chunk.write(0, b"ab")
+                oversized_chunk.cancel()
+
+                with patch.object(relay, "WORKSPACE_UPLOAD_CHUNK_BYTES", 1):
+                    bounded_chunk = relay.WorkspaceUpload(
+                        source,
+                        str(project),
+                        "bounded.bin",
+                        2,
+                        False,
+                    )
+                    with self.assertRaisesRegex(ValueError, "chunk is invalid"):
+                        bounded_chunk.write(0, b"ab")
+                    bounded_chunk.cancel()
+
+                incomplete = relay.WorkspaceUpload(
+                    source,
+                    str(project),
+                    "incomplete.bin",
+                    4,
+                    False,
+                )
+                incomplete_path = incomplete.staging_path
+                incomplete.write(0, b"ab")
+                with self.assertRaisesRegex(ValueError, "incomplete"):
+                    incomplete.finish()
+                self.assertTrue(incomplete.stream.closed)
+                self.assertFalse(incomplete_path.exists())
+                self.assertFalse((project / "incomplete.bin").exists())
+
+    def test_remote_workspace_upload_streams_structured_ssh_arguments(self):
+        source = relay.normalize_ssh_profile({
+            "id": "files-only",
+            "label": "Files Server",
+            "target": "builder@build-host",
+            "port": 2222,
+            "agent_enabled": False,
+            "workspace_roots": ["~/Workspace", "/srv/models"],
+        })
+        payload = b"remote payload"
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["payload"] = kwargs["stdin"].read()
+            response = {
+                "path": "/home/builder/Workspace/project/name;safe.txt",
+                "display_path": "~/Workspace/project/name;safe.txt",
+                "name": "name;safe.txt",
+                "size": len(payload),
+            }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(response).encode(),
+                stderr=b"",
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            staging = Path(temp_dir) / "upload.bin"
+            staging.write_bytes(payload)
+            with patch.object(relay.subprocess, "run", side_effect=fake_run):
+                result = relay.remote_workspace_upload_file(
+                    source,
+                    staging,
+                    "/home/builder/Workspace/project",
+                    "name;safe.txt",
+                    len(payload),
+                    False,
+                )
+
+        command = captured["command"]
+        self.assertEqual(captured["payload"], payload)
+        self.assertEqual(command[-2], "builder@build-host")
+        self.assertIn("BatchMode=yes", command)
+        self.assertIn("2222", command)
+        remote_arguments = shlex.split(command[-1])
+        self.assertEqual(remote_arguments[:2], ["python3", "-c"])
+        self.assertEqual(json.loads(remote_arguments[3]), ["~/Workspace", "/srv/models"])
+        self.assertEqual(remote_arguments[4], "/home/builder/Workspace/project")
+        self.assertEqual(remote_arguments[5], "name;safe.txt")
+        self.assertEqual(remote_arguments[6:], ["0", str(len(payload))])
+        self.assertEqual(result["name"], "name;safe.txt")
+
+    def test_remote_workspace_upload_script_revalidates_roots_and_commits_atomically(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Workspace"
+            project = root / "project"
+            outside = Path(temp_dir) / "outside"
+            project.mkdir(parents=True)
+            outside.mkdir()
+            (project / "model.bin").write_bytes(b"old")
+            linked = root / "linked"
+            linked.symlink_to(outside, target_is_directory=True)
+            payload = b"remote model"
+            command = [
+                sys.executable,
+                "-c",
+                relay.REMOTE_WORKSPACE_UPLOAD_SCRIPT,
+                json.dumps([str(root)]),
+                str(project),
+                "model.bin",
+                "0",
+                str(len(payload)),
+            ]
+
+            completed = subprocess.run(
+                command,
+                input=payload,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["name"], "model (1).bin")
+            self.assertEqual((project / result["name"]).read_bytes(), payload)
+            self.assertEqual((project / "model.bin").read_bytes(), b"old")
+            self.assertEqual(list(project.glob(".herdr-upload-*")), [])
+
+            rejected = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    relay.REMOTE_WORKSPACE_UPLOAD_SCRIPT,
+                    json.dumps([str(root)]),
+                    str(linked),
+                    "escape.bin",
+                    "0",
+                    "1",
+                ],
+                input=b"x",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("symbolic links", json.loads(rejected.stdout)["error"])
+            self.assertFalse((outside / "escape.bin").exists())
+
+    def test_ssh_only_profile_is_a_files_source_only_for_terminal_authorized_scope(self):
+        source = relay.normalize_ssh_profile({
+            "id": "files-only",
+            "label": "Files Server",
+            "target": "builder@build-host",
+            "agent_enabled": False,
+            "workspace_roots": ["~/Workspace"],
+        })
+        remote_listing = {
+            "path": "/home/builder/Workspace",
+            "display_path": "~/Workspace",
+            "parent": "",
+            "entries": [],
+            "truncated": False,
+        }
+        with (
+            patch.object(relay, "agent_source", side_effect=ValueError("not an Agent source")),
+            patch.object(relay, "terminal_profile", return_value=source) as terminal_profile,
+            patch.object(
+                relay,
+                "remote_workspace_file_listing",
+                return_value=remote_listing,
+            ) as remote_listing_request,
+        ):
+            with self.assertRaises(ValueError):
+                relay.workspace_file_listing_for_source(
+                    source["id"],
+                    remote_listing["path"],
+                    False,
+                )
+            listing = relay.workspace_file_listing_for_source(
+                source["id"],
+                remote_listing["path"],
+                True,
+            )
+
+        terminal_profile.assert_called_once_with(source["id"])
+        remote_listing_request.assert_called_once_with(source, remote_listing["path"])
+        self.assertEqual(listing["source_id"], source["id"])
+        self.assertEqual(listing["source_label"], source["label"])
+
+    async def test_authorized_workspace_upload_websocket_supports_cancel_and_finish(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Workspace"
+            project = root / "project"
+            project.mkdir(parents=True)
+            payload = b"uploaded over websocket"
+            ws = FakeWebSocket([
+                {
+                    "type": "workspace_upload_start",
+                    "upload_id": 7,
+                    "source_id": "local",
+                    "directory": str(project),
+                    "name": "cancelled.bin",
+                    "size": 4,
+                    "overwrite": False,
+                },
+                {
+                    "type": "workspace_upload_chunk",
+                    "upload_id": 7,
+                    "offset": 0,
+                    "data": base64.b64encode(b"ab").decode(),
+                },
+                {"type": "workspace_upload_cancel", "upload_id": 7},
+                {
+                    "type": "workspace_upload_start",
+                    "upload_id": 8,
+                    "source_id": "local",
+                    "directory": str(project),
+                    "name": "finished.bin",
+                    "size": len(payload),
+                    "overwrite": False,
+                },
+                {
+                    "type": "workspace_upload_chunk",
+                    "upload_id": 8,
+                    "offset": 0,
+                    "data": base64.b64encode(payload[:8]).decode(),
+                },
+                {
+                    "type": "workspace_upload_chunk",
+                    "upload_id": 8,
+                    "offset": 8,
+                    "data": base64.b64encode(payload[8:]).decode(),
+                },
+                {"type": "workspace_upload_finish", "upload_id": 8},
+            ])
+            relay.client_auth[id(ws)] = {
+                "mode": "tailscale",
+                "login": "owner@example.com",
+                "name": "Owner",
+            }
+            local_source = relay.local_agent_source()
+
+            with (
+                patch.object(relay, "WEB_TERMINAL_ENABLED", True),
+                patch.object(relay, "TERMINAL_ALLOWED_USERS", {"owner@example.com"}),
+                patch.object(relay, "WORKSPACE_ROOTS", [root.resolve()]),
+                patch.object(relay, "configured_agent_sources", return_value=[local_source]),
+                patch.object(relay, "configured_terminal_profiles", return_value=[]),
+                patch.object(relay, "machine_access_info", return_value={}),
+                patch.object(relay, "audit") as audit,
+            ):
+                await relay.handle_client(ws)
+
+            session = next(message for message in ws.sent if message["type"] == "session")
+            self.assertTrue(session["features"]["workspace_upload"])
+            self.assertIn(
+                {"type": "workspace_upload_cancelled", "upload_id": 7},
+                ws.sent,
+            )
+            completed = next(
+                message
+                for message in ws.sent
+                if message["type"] == "workspace_upload_complete"
+            )
+            self.assertEqual(completed["upload_id"], 8)
+            self.assertEqual(completed["name"], "finished.bin")
+            self.assertEqual((project / "finished.bin").read_bytes(), payload)
+            self.assertFalse((project / "cancelled.bin").exists())
+            self.assertEqual(list(project.glob(".herdr-upload-*")), [])
+            upload_audits = [
+                call for call in audit.call_args_list if call.args[0] == "workspace_upload"
+            ]
+            self.assertEqual(len(upload_audits), 1)
+            self.assertIn("name='finished.bin'", upload_audits[0].args[4])
+
+    async def test_token_client_cannot_upload_workspace_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Workspace"
+            project = root / "project"
+            project.mkdir(parents=True)
+            ws = FakeWebSocket([{
+                "type": "workspace_upload_start",
+                "upload_id": 9,
+                "source_id": "local",
+                "directory": str(project),
+                "name": "denied.bin",
+                "size": 0,
+                "overwrite": False,
+            }])
+            relay.client_auth[id(ws)] = {"mode": "token", "login": "", "name": ""}
+
+            with (
+                patch.object(relay, "WEB_TERMINAL_ENABLED", True),
+                patch.object(relay, "TERMINAL_ALLOWED_USERS", {"owner@example.com"}),
+                patch.object(relay, "WORKSPACE_ROOTS", [root.resolve()]),
+                patch.object(relay, "configured_terminal_profiles", return_value=[]),
+                patch.object(relay, "machine_access_info", return_value={}),
+            ):
+                await relay.handle_client(ws)
+
+            session = next(message for message in ws.sent if message["type"] == "session")
+            self.assertFalse(session["features"]["workspace_upload"])
+            self.assertIn(
+                {
+                    "type": "workspace_upload_error",
+                    "upload_id": 9,
+                    "message": "Workspace upload requires authorized Remote Shell access",
+                },
+                ws.sent,
+            )
+            self.assertFalse((project / "denied.bin").exists())
+
     def test_remote_workspace_file_requests_keep_paths_in_structured_arguments(self):
         source = relay.normalize_ssh_profile({
             "id": "build",
@@ -1667,16 +2083,19 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
                     relay.workspace_file_listing_for_source,
                     "local",
                     "/workspace/project",
+                    False,
                 ),
                 unittest.mock.call(
                     relay.workspace_file_read_for_source,
                     "local",
                     path,
+                    False,
                 ),
                 unittest.mock.call(
                     relay.workspace_file_metadata_for_source,
                     "local",
                     path,
+                    False,
                 ),
             ],
         )
@@ -1770,6 +2189,47 @@ class RelaySecurityTests(unittest.IsolatedAsyncioTestCase):
             metadata["path"],
         )
         audit.assert_called_once()
+
+    async def test_workspace_download_http_route_preserves_terminal_profile_scope(self):
+        data = b"remote file\n"
+        metadata = {
+            "source_id": "files-only",
+            "source_label": "Files Server",
+            "path": "/home/builder/Workspace/project/remote.txt",
+            "name": "remote.txt",
+            "size": len(data),
+            "include_terminal_profiles": True,
+        }
+        auth = {"mode": "token", "login": "", "name": ""}
+        prepared = relay.create_workspace_download(metadata, auth)
+        request = SimpleNamespace(
+            path=prepared["url"],
+            headers={
+                "Authorization": f"Bearer {relay.AUTH_TOKEN}",
+                "Host": "127.0.0.1:8375",
+                "User-Agent": "test-browser",
+            },
+        )
+        connection = SimpleNamespace(remote_address=("127.0.0.1", 43123))
+
+        with (
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                new=AsyncMock(return_value=(metadata, data)),
+            ) as to_thread,
+            patch.object(relay, "audit"),
+        ):
+            response = await relay.process_request(connection, request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body, data)
+        to_thread.assert_awaited_once_with(
+            relay.workspace_file_download_for_source,
+            "files-only",
+            metadata["path"],
+            True,
+        )
 
     def test_codex_start_allows_an_ordinary_directory_and_waits_for_the_new_shell(self):
         with tempfile.TemporaryDirectory() as temp_dir:

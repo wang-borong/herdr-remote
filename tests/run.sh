@@ -91,13 +91,20 @@ WEB_JS="$DIR/web/app.js"
   grep -q "list_directories" "$WEB_JS" && grep -q "start_agent" "$WEB_JS" && \
   grep -q "list_workspace_files" "$WEB_JS" && grep -q "read_workspace_file" "$WEB_JS" && \
   grep -q "prepare_workspace_download" "$WEB_JS" && \
+  grep -q "workspace_upload_start" "$WEB_JS" && grep -q "workspace_upload_chunk" "$WEB_JS" && \
+  grep -q 'case "workspace_upload_complete"' "$WEB_JS" && \
   grep -q 'case "workspace_listing"' "$WEB_JS" && \
   grep -q 'id="file-workspace"' "$WEB" && grep -q 'data-app-view="files"' "$WEB" && \
+  grep -q 'id="file-upload-button"' "$WEB" && grep -q 'id="file-upload-dialog"' "$WEB" && \
+  grep -q 'id="file-upload-input" type="file" multiple' "$WEB" && \
   grep -q 'id="file-markdown-content"' "$WEB" && grep -q 'id="file-code-content"' "$WEB" && \
   grep -q "renderMarkdownWorkspaceFile" "$WEB_JS" && \
   grep -q "DOMPurify" "$WEB_JS" && grep -q "hljs.highlight" "$WEB_JS" && \
   grep -q 'elif msg_type == "list_workspace_files"' "$DIR/relay/herdr_relay.py" && \
   grep -q 'elif msg_type == "read_workspace_file"' "$DIR/relay/herdr_relay.py" && \
+  grep -q 'elif msg_type == "workspace_upload_start"' "$DIR/relay/herdr_relay.py" && \
+  grep -q 'elif msg_type == "workspace_upload_chunk"' "$DIR/relay/herdr_relay.py" && \
+  grep -q '"workspace_upload": terminal_enabled' "$DIR/relay/herdr_relay.py" && \
   grep -q '"workspace_files": True' "$DIR/relay/herdr_relay.py" && \
   grep -q 'path == "/api/workspace-download"' "$DIR/relay/herdr_relay.py" && \
   grep -q "C-c" "$WEB_JS" && grep -q "terminal_open" "$WEB_JS" && \

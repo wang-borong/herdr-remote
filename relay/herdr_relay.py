@@ -242,6 +242,17 @@ WORKSPACE_ENTRY_LIMIT = 200
 WORKSPACE_FILE_ENTRY_LIMIT = 400
 WORKSPACE_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
 WORKSPACE_FILE_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024
+WORKSPACE_UPLOAD_CHUNK_BYTES = 512 * 1024
+try:
+    WORKSPACE_UPLOAD_MAX_BYTES = max(
+        1024 * 1024,
+        min(
+            int(os.environ.get("HERDR_WORKSPACE_UPLOAD_MAX_BYTES", str(2 * 1024**3))),
+            64 * 1024**3,
+        ),
+    )
+except ValueError:
+    WORKSPACE_UPLOAD_MAX_BYTES = 2 * 1024**3
 WORKSPACE_DOWNLOAD_TOKEN_TTL_SECONDS = 90
 WORKSPACE_DOWNLOAD_TOKEN_LIMIT = 256
 AGENT_PROMPT_WAIT_TIMEOUT_MS = 8_000
@@ -446,6 +457,27 @@ def agent_source(source_id: str | None) -> dict:
         if source["id"] == requested:
             return source
     raise ValueError("Agent source is not configured")
+
+
+def workspace_source(
+    source_id: str | None,
+    *,
+    include_terminal_profiles: bool = False,
+) -> dict:
+    """Resolve a Files source, optionally including SSH-only terminal profiles."""
+    try:
+        return agent_source(source_id)
+    except ValueError:
+        if not include_terminal_profiles:
+            raise
+    requested = str(source_id or "local")
+    try:
+        profile = terminal_profile(requested)
+    except TerminalConfigError as error:
+        raise ValueError("Workspace source is not configured") from error
+    if profile.get("kind") == "local":
+        return local_agent_source()
+    return profile
 
 
 def public_pane_id(source_id: str, raw_pane_id: str) -> str:
@@ -1919,8 +1951,12 @@ def workspace_directory_listing_for_source(
 def workspace_file_listing_for_source(
     source_id: str | None,
     value: str | None = None,
+    include_terminal_profiles: bool = False,
 ) -> dict:
-    source = agent_source(source_id)
+    source = workspace_source(
+        source_id,
+        include_terminal_profiles=include_terminal_profiles,
+    )
     if source["kind"] == "local":
         listing = workspace_file_listing(value)
     else:
@@ -1933,8 +1969,15 @@ def workspace_file_listing_for_source(
     }
 
 
-def workspace_file_read_for_source(source_id: str | None, value: str) -> dict:
-    source = agent_source(source_id)
+def workspace_file_read_for_source(
+    source_id: str | None,
+    value: str,
+    include_terminal_profiles: bool = False,
+) -> dict:
+    source = workspace_source(
+        source_id,
+        include_terminal_profiles=include_terminal_profiles,
+    )
     if source["kind"] == "local":
         result = workspace_file_read(value)
     else:
@@ -1947,8 +1990,15 @@ def workspace_file_read_for_source(source_id: str | None, value: str) -> dict:
     }
 
 
-def workspace_file_metadata_for_source(source_id: str | None, value: str) -> dict:
-    source = agent_source(source_id)
+def workspace_file_metadata_for_source(
+    source_id: str | None,
+    value: str,
+    include_terminal_profiles: bool = False,
+) -> dict:
+    source = workspace_source(
+        source_id,
+        include_terminal_profiles=include_terminal_profiles,
+    )
     if source["kind"] == "local":
         result = workspace_file_metadata(value)
         if result["size"] > WORKSPACE_FILE_DOWNLOAD_MAX_BYTES:
@@ -1958,8 +2008,15 @@ def workspace_file_metadata_for_source(source_id: str | None, value: str) -> dic
     return {**result, "source_id": source["id"], "source_label": source["label"]}
 
 
-def workspace_file_download_for_source(source_id: str | None, value: str) -> tuple[dict, bytes]:
-    source = agent_source(source_id)
+def workspace_file_download_for_source(
+    source_id: str | None,
+    value: str,
+    include_terminal_profiles: bool = False,
+) -> tuple[dict, bytes]:
+    source = workspace_source(
+        source_id,
+        include_terminal_profiles=include_terminal_profiles,
+    )
     if source["kind"] == "local":
         metadata, data = workspace_file_download(value)
     else:
@@ -1969,6 +2026,424 @@ def workspace_file_download_for_source(source_id: str | None, value: str) -> tup
         "source_id": source["id"],
         "source_label": source["label"],
     }, data
+
+
+def validated_workspace_upload_name(value) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Upload file name must be text")
+    name = value
+    if (
+        not name.strip()
+        or name in {".", ".."}
+        or name.startswith(".")
+        or "/" in name
+        or "\\" in name
+        or any(ord(character) < 32 or ord(character) == 127 for character in name)
+    ):
+        raise ValueError("Upload file name is not allowed")
+    if len(name.encode("utf-8")) > 255:
+        raise ValueError("Upload file name is too long")
+    return name
+
+
+def workspace_upload_candidate_name(name: str, index: int) -> str:
+    if index <= 0:
+        return name
+    suffix = Path(name).suffix
+    stem = name[:-len(suffix)] if suffix else name
+    return f"{stem} ({index}){suffix}"
+
+
+def commit_local_workspace_upload(
+    staging_path: Path,
+    directory: Path,
+    name: str,
+    size: int,
+    overwrite: bool,
+) -> dict:
+    if overwrite:
+        target = directory / name
+        try:
+            existing = target.lstat()
+        except FileNotFoundError:
+            existing = None
+        except OSError as error:
+            raise ValueError("Workspace upload target cannot be accessed") from error
+        if existing is not None and stat.S_ISDIR(existing.st_mode):
+            raise ValueError("A directory already uses the upload file name")
+        try:
+            os.replace(staging_path, target)
+        except OSError as error:
+            raise ValueError("Workspace upload could not replace the target file") from error
+    else:
+        target = None
+        for index in range(10_000):
+            candidate = directory / workspace_upload_candidate_name(name, index)
+            try:
+                os.link(staging_path, candidate)
+            except FileExistsError:
+                continue
+            except OSError as error:
+                raise ValueError("Workspace upload could not create the target file") from error
+            staging_path.unlink()
+            target = candidate
+            break
+        if target is None:
+            raise ValueError("Too many files use the same upload name")
+
+    return {
+        "path": str(target),
+        "display_path": display_workspace_path(target),
+        "name": target.name,
+        "size": size,
+    }
+
+
+REMOTE_WORKSPACE_UPLOAD_SCRIPT = r'''
+import json
+import os
+import stat
+import sys
+import tempfile
+
+def display(path):
+    home = os.path.realpath(os.path.expanduser("~"))
+    if path == home:
+        return "~"
+    prefix = home + os.sep
+    return "~/" + path[len(prefix):] if path.startswith(prefix) else path
+
+def within(path, roots):
+    for root in roots:
+        try:
+            if os.path.commonpath((path, root)) == root:
+                return True
+        except ValueError:
+            pass
+    return False
+
+def fail(message):
+    print(json.dumps({"error": message}))
+    raise SystemExit(2)
+
+try:
+    configured = json.loads(sys.argv[1])
+    requested = sys.argv[2]
+    name = sys.argv[3]
+    overwrite = sys.argv[4] == "1"
+    expected = int(sys.argv[5])
+except (IndexError, json.JSONDecodeError, TypeError, ValueError):
+    fail("Remote workspace upload request is invalid")
+
+if (
+    not name.strip()
+    or name in {".", ".."}
+    or name.startswith(".")
+    or "/" in name
+    or "\\" in name
+    or any(ord(character) < 32 or ord(character) == 127 for character in name)
+    or len(name.encode("utf-8")) > 255
+    or expected < 0
+):
+    fail("Remote workspace upload file name is not allowed")
+
+roots = []
+for value in configured:
+    root = os.path.realpath(os.path.expanduser(value))
+    if os.path.isdir(root) and root not in roots:
+        roots.append(root)
+if not roots:
+    fail("No remote workspace roots are available")
+
+candidate = os.path.expanduser(requested)
+if not os.path.isabs(candidate):
+    candidate = os.path.join(roots[0], candidate)
+lexical = os.path.abspath(candidate)
+root = next((item for item in roots if within(lexical, [item])), None)
+if root is None:
+    fail("Remote workspace upload directory is outside the configured roots")
+relative = os.path.relpath(lexical, root)
+current = root
+if relative != ".":
+    for component in relative.split(os.sep):
+        if component.startswith("."):
+            fail("Hidden remote workspace paths cannot be accessed")
+        current = os.path.join(current, component)
+        try:
+            mode = os.lstat(current).st_mode
+        except OSError:
+            fail("Remote workspace upload directory does not exist")
+        if stat.S_ISLNK(mode):
+            fail("Remote workspace symbolic links cannot be accessed")
+directory = os.path.realpath(lexical)
+if not os.path.isdir(directory) or not within(directory, roots):
+    fail("Remote workspace upload directory is unavailable")
+
+descriptor = -1
+temporary = ""
+try:
+    descriptor, temporary = tempfile.mkstemp(prefix=".herdr-upload-", dir=directory)
+    received = 0
+    with os.fdopen(descriptor, "wb") as handle:
+        descriptor = -1
+        while True:
+            chunk = sys.stdin.buffer.read(1024 * 1024)
+            if not chunk:
+                break
+            received += len(chunk)
+            if received > expected:
+                fail("Remote workspace upload exceeded its declared size")
+            handle.write(chunk)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if received != expected or os.stat(temporary).st_size != expected:
+        fail("Remote workspace upload is incomplete")
+
+    suffix = os.path.splitext(name)[1]
+    stem = name[:-len(suffix)] if suffix else name
+    target = ""
+    if overwrite:
+        target = os.path.join(directory, name)
+        try:
+            existing = os.lstat(target)
+        except FileNotFoundError:
+            existing = None
+        except OSError:
+            fail("Remote workspace upload target cannot be accessed")
+        if existing is not None and stat.S_ISDIR(existing.st_mode):
+            fail("A remote directory already uses the upload file name")
+        os.replace(temporary, target)
+        temporary = ""
+    else:
+        for index in range(10_000):
+            candidate_name = name if index == 0 else f"{stem} ({index}){suffix}"
+            candidate_path = os.path.join(directory, candidate_name)
+            try:
+                os.link(temporary, candidate_path)
+            except FileExistsError:
+                continue
+            target = candidate_path
+            os.unlink(temporary)
+            temporary = ""
+            break
+        if not target:
+            fail("Too many remote files use the same upload name")
+
+    print(json.dumps({
+        "path": target,
+        "display_path": display(target),
+        "name": os.path.basename(target),
+        "size": received,
+    }))
+except SystemExit:
+    raise
+except OSError:
+    fail("Remote workspace upload could not write the target file")
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+    if temporary:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+'''
+
+
+def remote_workspace_upload_file(
+    source: dict,
+    staging_path: Path,
+    directory: str,
+    name: str,
+    size: int,
+    overwrite: bool,
+) -> dict:
+    command = ssh_command_prefix(connect_timeout=10)
+    if source.get("port", 22) != 22:
+        command.extend(["-p", str(source["port"])])
+    command.extend([
+        source["target"],
+        shlex.join([
+            "python3",
+            "-c",
+            REMOTE_WORKSPACE_UPLOAD_SCRIPT,
+            json.dumps(
+                source.get("workspace_roots")
+                or [source.get("workspace_root", "~/Workspace")]
+            ),
+            directory,
+            name,
+            "1" if overwrite else "0",
+            str(size),
+        ]),
+    ])
+    timeout = max(60, min(7200, 60 + size // (512 * 1024)))
+    try:
+        with staging_path.open("rb") as stream:
+            result = subprocess.run(
+                command,
+                stdin=stream,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=False,
+            )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("Remote workspace upload could not be transferred") from error
+    raw_stdout = result.stdout or b""
+    if isinstance(raw_stdout, bytes):
+        raw_stdout = raw_stdout.decode("utf-8", errors="replace")
+    try:
+        response = json.loads(str(raw_stdout))
+    except (json.JSONDecodeError, TypeError) as error:
+        if result.returncode == 255:
+            raise ValueError(
+                "Remote Files source is offline or requires SSH key authentication"
+            ) from error
+        if result.returncode in {126, 127}:
+            raise ValueError("Remote Files source requires Python 3") from error
+        raise ValueError("Remote workspace upload returned an invalid response") from error
+    if not isinstance(response, dict):
+        raise ValueError("Remote workspace upload returned an invalid response")
+    if result.returncode != 0 or response.get("error"):
+        raise ValueError(str(response.get("error") or "Remote workspace upload failed"))
+    try:
+        response_size = int(response.get("size", -1))
+        response_name = validated_workspace_upload_name(response.get("name"))
+    except (TypeError, ValueError) as error:
+        raise ValueError("Remote workspace upload returned invalid metadata") from error
+    response_path = response.get("path")
+    response_display_path = response.get("display_path") or response_path
+    if (
+        response_size != size
+        or not isinstance(response_path, str)
+        or not response_path
+        or not isinstance(response_display_path, str)
+        or not response_display_path
+    ):
+        raise ValueError("Remote workspace upload returned invalid metadata")
+    return {
+        "path": response_path,
+        "display_path": response_display_path,
+        "name": response_name,
+        "size": response_size,
+    }
+
+
+class WorkspaceUpload:
+    """One bounded, sequential browser upload into a workspace directory."""
+
+    def __init__(
+        self,
+        source: dict,
+        directory: str,
+        name: str,
+        size: int,
+        overwrite: bool,
+    ):
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or not 0 <= size <= WORKSPACE_UPLOAD_MAX_BYTES
+        ):
+            raise ValueError("Workspace upload file size is invalid or exceeds the limit")
+        self.source = source
+        self.name = validated_workspace_upload_name(name)
+        self.size = size
+        self.overwrite = overwrite is True
+        self.received = 0
+        self.finished = False
+        self.directory: Path | str
+        if source.get("kind") == "local":
+            self.directory = resolve_workspace_file_path(directory, expected="directory")
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=".herdr-upload-",
+                dir=self.directory,
+            )
+        else:
+            if not isinstance(directory, str) or not directory.strip():
+                raise ValueError("A remote workspace upload directory is required")
+            listing = remote_workspace_file_request(
+                source,
+                "list",
+                directory,
+                timeout=20,
+            )
+            resolved_directory = str(listing.get("path") or "")
+            if not resolved_directory:
+                raise ValueError("A concrete remote workspace directory is required")
+            self.directory = resolved_directory
+            descriptor, temporary = tempfile.mkstemp(prefix="herdr-workspace-upload-")
+        self.staging_path = Path(temporary)
+        self.stream = os.fdopen(descriptor, "wb")
+
+    def write(self, offset: int, data: bytes) -> int:
+        if self.finished or self.stream.closed:
+            raise ValueError("Workspace upload is no longer active")
+        if offset != self.received:
+            raise ValueError("Workspace upload chunk offset does not match")
+        if not data or len(data) > WORKSPACE_UPLOAD_CHUNK_BYTES:
+            raise ValueError("Workspace upload chunk is invalid")
+        if self.received + len(data) > self.size:
+            raise ValueError("Workspace upload exceeds its declared size")
+        written = self.stream.write(data)
+        if written != len(data):
+            raise ValueError("Workspace upload chunk could not be written completely")
+        self.received += len(data)
+        return self.received
+
+    def finish(self) -> dict:
+        if self.finished:
+            raise ValueError("Workspace upload is no longer active")
+        self.finished = True
+        try:
+            if self.received != self.size:
+                raise ValueError("Workspace upload is incomplete")
+            self.stream.flush()
+            os.fsync(self.stream.fileno())
+            self.stream.close()
+            try:
+                staged_size = self.staging_path.stat().st_size
+            except OSError as error:
+                raise ValueError("Workspace upload staging file cannot be verified") from error
+            if staged_size != self.size:
+                raise ValueError("Workspace upload staging file size does not match")
+            if self.source.get("kind") == "local":
+                result = commit_local_workspace_upload(
+                    self.staging_path,
+                    self.directory,
+                    self.name,
+                    self.size,
+                    self.overwrite,
+                )
+            else:
+                result = remote_workspace_upload_file(
+                    self.source,
+                    self.staging_path,
+                    self.directory,
+                    self.name,
+                    self.size,
+                    self.overwrite,
+                )
+        finally:
+            if not self.stream.closed:
+                with contextlib.suppress(OSError):
+                    self.stream.close()
+            with contextlib.suppress(OSError):
+                self.staging_path.unlink()
+        return {
+            **result,
+            "source_id": self.source["id"],
+            "source_label": self.source["label"],
+        }
+
+    def cancel(self) -> None:
+        self.finished = True
+        if not self.stream.closed:
+            with contextlib.suppress(OSError):
+                self.stream.close()
+        with contextlib.suppress(OSError):
+            self.staging_path.unlink()
 
 
 def parse_herdr_result(result: subprocess.CompletedProcess) -> dict:
@@ -3206,6 +3681,7 @@ def create_workspace_download(metadata: dict, auth: dict, now: float | None = No
         "path": str(metadata["path"]),
         "name": str(metadata["name"]),
         "size": int(metadata["size"]),
+        "include_terminal_profiles": metadata.get("include_terminal_profiles") is True,
         "principal": authenticated_principal(auth),
         "expires": current + WORKSPACE_DOWNLOAD_TOKEN_TTL_SECONDS,
     }
@@ -3362,11 +3838,14 @@ async def process_request(connection, request):
                 b"download link is invalid or expired\n",
             )
         try:
-            metadata, data = await asyncio.to_thread(
+            download_arguments = [
                 workspace_file_download_for_source,
                 grant["source_id"],
                 grant["path"],
-            )
+            ]
+            if grant.get("include_terminal_profiles"):
+                download_arguments.append(True)
+            metadata, data = await asyncio.to_thread(*download_arguments)
         except ValueError as error:
             log.warning("Workspace download failed: %s", error)
             return Response(
@@ -3498,6 +3977,8 @@ async def handle_client(ws):
     auth = client_auth.get(id(ws), {})
     connected_at = time.monotonic()
     terminal_session = None
+    workspace_upload = None
+    workspace_upload_id = 0
 
     async def send_terminal_event(event: dict):
         if (
@@ -3522,6 +4003,22 @@ async def handle_client(ws):
         active_terminal_sessions.discard(terminal_session)
         await terminal_session.close()
         terminal_session = None
+
+    async def close_workspace_upload():
+        nonlocal workspace_upload, workspace_upload_id
+        if workspace_upload is None:
+            return
+        upload = workspace_upload
+        workspace_upload = None
+        workspace_upload_id = 0
+        await asyncio.to_thread(upload.cancel)
+
+    async def send_workspace_upload_error(message: str, upload_id: int = 0):
+        await ws.send(json.dumps({
+            "type": "workspace_upload_error",
+            "upload_id": upload_id,
+            "message": message,
+        }))
 
     def command_error(message: str, request_id=None) -> dict:
         response = {"type": "error", "message": message}
@@ -3549,7 +4046,12 @@ async def handle_client(ws):
                     "terminal": terminal_enabled,
                     "native_ssh": TAILSCALE_SSH_ENABLED,
                     "workspace_files": True,
+                    "workspace_upload": terminal_enabled,
                     "conversation_history": True,
+                },
+                "limits": {
+                    "workspace_upload_max_bytes": WORKSPACE_UPLOAD_MAX_BYTES,
+                    "workspace_upload_chunk_bytes": WORKSPACE_UPLOAD_CHUNK_BYTES,
                 },
                 "machine": machine_access_info(),
                 "terminal_profiles": configured_terminal_profiles() if terminal_enabled else [],
@@ -3880,6 +4382,138 @@ async def handle_client(ws):
                 await ws.send(json.dumps(command_result("respond", request_id)))
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)
+            elif msg_type == "workspace_upload_start":
+                upload_id = websocket_request_id(msg.get("upload_id"))
+                if not terminal_enabled:
+                    await send_workspace_upload_error(
+                        "Workspace upload requires authorized Remote Shell access",
+                        upload_id,
+                    )
+                    continue
+                if not upload_id:
+                    await send_workspace_upload_error("Workspace upload id is invalid")
+                    continue
+                if workspace_upload is not None:
+                    await send_workspace_upload_error(
+                        "Another workspace upload is already active",
+                        upload_id,
+                    )
+                    continue
+                raw_size = msg.get("size")
+                if (
+                    isinstance(raw_size, bool)
+                    or not isinstance(raw_size, int)
+                    or not 0 <= raw_size <= WORKSPACE_UPLOAD_MAX_BYTES
+                ):
+                    await send_workspace_upload_error(
+                        "Workspace upload file size is invalid or exceeds the limit",
+                        upload_id,
+                    )
+                    continue
+                try:
+                    source = workspace_source(
+                        msg.get("source_id"),
+                        include_terminal_profiles=True,
+                    )
+                    upload = await asyncio.to_thread(
+                        WorkspaceUpload,
+                        source,
+                        msg.get("directory", ""),
+                        msg.get("name", ""),
+                        raw_size,
+                        msg.get("overwrite") is True,
+                    )
+                except (OSError, ValueError) as error:
+                    await send_workspace_upload_error(str(error), upload_id)
+                    continue
+                workspace_upload = upload
+                workspace_upload_id = upload_id
+                await ws.send(json.dumps({
+                    "type": "workspace_upload_ready",
+                    "upload_id": upload_id,
+                    "size": raw_size,
+                    "chunk_bytes": WORKSPACE_UPLOAD_CHUNK_BYTES,
+                }))
+            elif msg_type == "workspace_upload_chunk":
+                upload_id = websocket_request_id(msg.get("upload_id"))
+                if workspace_upload is None or upload_id != workspace_upload_id:
+                    await send_workspace_upload_error(
+                        "Workspace upload session does not match",
+                        upload_id,
+                    )
+                    continue
+                encoded = msg.get("data")
+                maximum_encoded = ((WORKSPACE_UPLOAD_CHUNK_BYTES + 2) // 3) * 4 + 4
+                if not isinstance(encoded, str) or not encoded or len(encoded) > maximum_encoded:
+                    await close_workspace_upload()
+                    await send_workspace_upload_error(
+                        "Workspace upload chunk is invalid",
+                        upload_id,
+                    )
+                    continue
+                try:
+                    data = base64.b64decode(encoded, validate=True)
+                    offset = msg.get("offset")
+                    if isinstance(offset, bool) or not isinstance(offset, int):
+                        raise ValueError("Workspace upload chunk offset is invalid")
+                    received = await asyncio.to_thread(
+                        workspace_upload.write,
+                        offset,
+                        data,
+                    )
+                except (binascii.Error, OSError, ValueError) as error:
+                    await close_workspace_upload()
+                    await send_workspace_upload_error(str(error), upload_id)
+                    continue
+                await ws.send(json.dumps({
+                    "type": "workspace_upload_progress",
+                    "upload_id": upload_id,
+                    "received": received,
+                    "size": workspace_upload.size,
+                }))
+            elif msg_type == "workspace_upload_finish":
+                upload_id = websocket_request_id(msg.get("upload_id"))
+                if workspace_upload is None or upload_id != workspace_upload_id:
+                    await send_workspace_upload_error(
+                        "Workspace upload session does not match",
+                        upload_id,
+                    )
+                    continue
+                upload = workspace_upload
+                workspace_upload = None
+                workspace_upload_id = 0
+                await ws.send(json.dumps({
+                    "type": "workspace_upload_committing",
+                    "upload_id": upload_id,
+                    "remote": upload.source.get("kind") != "local",
+                }))
+                try:
+                    uploaded = await asyncio.to_thread(upload.finish)
+                except (OSError, ValueError) as error:
+                    upload.cancel()
+                    await send_workspace_upload_error(str(error), upload_id)
+                    continue
+                audit(
+                    "workspace_upload",
+                    ip,
+                    device,
+                    "",
+                    f"source={uploaded['source_id']} name={uploaded['name']!r} "
+                    f"bytes={uploaded['size']}",
+                )
+                await ws.send(json.dumps({
+                    "type": "workspace_upload_complete",
+                    "upload_id": upload_id,
+                    **uploaded,
+                }))
+            elif msg_type == "workspace_upload_cancel":
+                upload_id = websocket_request_id(msg.get("upload_id"))
+                if workspace_upload is not None and upload_id == workspace_upload_id:
+                    await close_workspace_upload()
+                await ws.send(json.dumps({
+                    "type": "workspace_upload_cancelled",
+                    "upload_id": upload_id,
+                }))
             elif msg_type == "list_workspace_files":
                 request_id = websocket_request_id(msg.get("request_id"))
                 try:
@@ -3887,6 +4521,7 @@ async def handle_client(ws):
                         workspace_file_listing_for_source,
                         msg.get("source_id"),
                         msg.get("path"),
+                        terminal_enabled,
                     )
                 except ValueError as error:
                     await ws.send(json.dumps({
@@ -3906,6 +4541,7 @@ async def handle_client(ws):
                         workspace_file_read_for_source,
                         msg.get("source_id"),
                         msg.get("path", ""),
+                        terminal_enabled,
                     )
                 except ValueError as error:
                     await ws.send(json.dumps({
@@ -3925,7 +4561,9 @@ async def handle_client(ws):
                         workspace_file_metadata_for_source,
                         msg.get("source_id"),
                         msg.get("path", ""),
+                        terminal_enabled,
                     )
+                    metadata["include_terminal_profiles"] = terminal_enabled
                     download = create_workspace_download(metadata, auth)
                 except ValueError as error:
                     await ws.send(json.dumps({
@@ -4293,6 +4931,7 @@ async def handle_client(ws):
     except (ConnectionClosedError, ConnectionClosedOK):
         pass
     finally:
+        await close_workspace_upload()
         await close_terminal()
         duration = int(time.monotonic() - connected_at)
         log.info("Client disconnected: ip=%s device=%s duration=%ds", ip, device, duration)

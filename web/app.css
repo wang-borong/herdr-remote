@@ -1606,7 +1606,8 @@ dialog {
 .modal-shell,
 .confirm-shell,
 .settings-shell,
-.terminal-copy-shell {
+.terminal-copy-shell,
+.file-upload-shell {
   background:
     linear-gradient(150deg, color-mix(in srgb, var(--surface-strong) 96%, var(--accent) 4%), var(--surface-strong));
   border: 1px solid var(--border-strong);
@@ -2100,6 +2101,258 @@ dialog {
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
   border-radius: 22px;
+}
+
+.file-upload-shell {
+  width: min(700px, calc(100vw - 32px));
+  max-height: min(820px, calc(100dvh - 32px));
+  display: grid;
+  grid-template-rows: auto auto auto minmax(74px, 1fr) auto auto auto;
+  overflow: hidden;
+  border-radius: 22px;
+}
+
+.file-upload-target {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 16px 22px 0;
+  padding: 11px 13px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 10px;
+}
+
+.file-upload-target > span {
+  font-size: 8px;
+  font-weight: 760;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.file-upload-target strong {
+  color: var(--text);
+}
+
+.file-upload-target code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--accent-strong);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-upload-dropzone {
+  display: grid;
+  place-items: center;
+  gap: 5px;
+  margin: 12px 22px 0;
+  padding: 17px;
+  color: var(--muted);
+  text-align: center;
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface));
+  border: 1px dashed color-mix(in srgb, var(--accent) 48%, var(--border));
+  border-radius: 14px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.file-upload-dropzone:hover,
+.file-upload-dropzone:focus-visible,
+.file-upload-dropzone.is-dragging {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.file-upload-dropzone.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.file-upload-dropzone.is-disabled:hover,
+.file-upload-dropzone.is-disabled:focus-visible {
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  transform: none;
+}
+
+.file-upload-dropzone strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.file-upload-dropzone > span:last-child {
+  font-size: 9px;
+}
+
+.file-upload-drop-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  color: var(--accent-strong);
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+}
+
+.file-upload-drop-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.file-upload-list {
+  min-height: 0;
+  margin: 12px 22px 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+}
+
+.file-upload-list:empty::before {
+  min-height: 64px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  content: "尚未选择文件";
+  font-size: 9px;
+}
+
+.file-upload-item {
+  min-height: 45px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 9px;
+}
+
+.file-upload-item + .file-upload-item {
+  border-top: 1px solid var(--border);
+}
+
+.file-upload-item-copy {
+  min-width: 0;
+}
+
+.file-upload-item-copy strong,
+.file-upload-item-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-upload-item-copy strong {
+  font-size: 10px;
+}
+
+.file-upload-item-copy span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.file-upload-item-status {
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 760;
+}
+
+.file-upload-item.is-complete .file-upload-item-status {
+  color: var(--green);
+}
+
+.file-upload-item.is-error .file-upload-item-status {
+  color: var(--red);
+}
+
+.file-upload-remove {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  font-size: 15px;
+}
+
+.file-upload-remove:hover {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.file-upload-overwrite {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 12px 22px 0;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+.file-upload-overwrite input {
+  margin-top: 2px;
+}
+
+.file-upload-overwrite strong,
+.file-upload-overwrite small {
+  display: block;
+}
+
+.file-upload-overwrite small {
+  margin-top: 3px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.file-upload-progress {
+  margin: 12px 22px 0;
+}
+
+.file-upload-progress > div {
+  height: 6px;
+  overflow: hidden;
+  background: var(--surface-soft);
+  border-radius: 999px;
+}
+
+.file-upload-progress > div > span {
+  width: 0;
+  height: 100%;
+  display: block;
+  background: linear-gradient(90deg, var(--accent), var(--cyan));
+  border-radius: inherit;
+  transition: width 120ms ease;
+}
+
+.file-upload-progress p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.file-upload-shell .modal-footer > p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#file-upload-submit-button {
+  min-width: 112px;
 }
 
 .terminal-copy-content {
@@ -3188,6 +3441,7 @@ dialog {
 }
 
 .file-panel {
+  position: relative;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -3203,6 +3457,30 @@ dialog {
 
 .file-panel-heading .toolbar-button {
   min-height: 34px;
+}
+
+.file-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.file-panel.is-upload-dragging::after {
+  position: absolute;
+  z-index: 20;
+  inset: 12px;
+  display: grid;
+  place-items: center;
+  color: var(--accent-strong);
+  content: "释放文件以上传到当前目录";
+  text-align: center;
+  background: color-mix(in srgb, var(--surface-strong) 92%, var(--accent) 8%);
+  border: 2px dashed var(--accent);
+  border-radius: 18px;
+  pointer-events: none;
+  font-size: 12px;
+  font-weight: 760;
+  backdrop-filter: blur(8px);
 }
 
 .file-source-field {
@@ -4184,6 +4462,14 @@ dialog {
     border-radius: 0;
   }
 
+  .file-upload-shell {
+    width: 100vw;
+    height: 100dvh;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+  }
+
   .terminal-copy-content {
     padding: 12px 14px 14px;
   }
@@ -4195,6 +4481,12 @@ dialog {
   }
 
   .terminal-copy-shell .modal-footer {
+    flex-wrap: wrap;
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .file-upload-shell .modal-footer {
     flex-wrap: wrap;
     padding-right: 14px;
     padding-left: 14px;
@@ -4490,6 +4782,38 @@ dialog {
 }
 
 @media (max-width: 560px) {
+  .file-upload-target {
+    grid-template-columns: auto minmax(0, 1fr);
+    margin-right: 14px;
+    margin-left: 14px;
+  }
+
+  .file-upload-target code {
+    grid-column: 1 / -1;
+    text-align: left;
+  }
+
+  .file-upload-dropzone,
+  .file-upload-list,
+  .file-upload-overwrite,
+  .file-upload-progress {
+    margin-right: 14px;
+    margin-left: 14px;
+  }
+
+  .file-upload-item {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .file-upload-item-status {
+    grid-column: 1 / 2;
+  }
+
+  .file-upload-remove {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+
   .topbar-new {
     width: 40px;
     padding: 0;

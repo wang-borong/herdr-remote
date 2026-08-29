@@ -394,17 +394,23 @@
         </section>
       </section>
 
-      <section class="file-workspace" id="file-workspace" aria-label="Workspace 文件阅读与下载" hidden>
+      <section class="file-workspace" id="file-workspace" aria-label="Workspace 文件浏览、上传、预览与下载" hidden>
         <aside class="file-panel" aria-labelledby="file-browser-title">
           <div class="panel-heading file-panel-heading">
             <div>
               <p class="eyebrow">WORKSPACE</p>
               <h1 id="file-browser-title">Files</h1>
             </div>
-            <button class="toolbar-button" id="file-refresh-button" type="button">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2m.5 5v-5h-5"/></svg>
-              刷新
-            </button>
+            <div class="file-panel-actions">
+              <button class="toolbar-button" id="file-upload-button" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 20h14"/></svg>
+                上传
+              </button>
+              <button class="toolbar-button" id="file-refresh-button" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2m.5 5v-5h-5"/></svg>
+                刷新
+              </button>
+            </div>
           </div>
 
           <label class="file-source-field" for="file-source-select">
@@ -437,7 +443,7 @@
           <p class="file-list-note" id="file-list-note" hidden>项目过多，仅显示前 400 项。</p>
           <p class="file-security-note">
             <span class="security-dot" aria-hidden="true"></span>
-            隐藏路径和符号链接不会显示；预览限 1 MB，下载限 25 MB。
+            隐藏路径和符号链接不会显示；预览限 1 MB，下载限 25 MB；上传需要 Remote Shell 权限。
           </p>
         </aside>
 
@@ -677,7 +683,7 @@
           <input id="ssh-host-agent-enabled" type="checkbox">
           <span>
             <strong>发现并控制这台主机上的 Herdr Agents</strong>
-            <small>启用后，Relay 会通过 SSH 轮询 Herdr，并允许安全浏览目录及启动 Codex。</small>
+            <small>启用后，Relay 会通过 SSH 轮询 Herdr，并允许在下方 Workspace 中启动 Codex；Files 浏览不依赖此选项。</small>
           </span>
         </label>
         <label class="field-stack field-wide" for="ssh-host-herdr-bin">
@@ -685,13 +691,13 @@
           <input id="ssh-host-herdr-bin" type="text" maxlength="255" value="herdr" placeholder="herdr 或 /home/user/.local/bin/herdr" spellcheck="false" autocomplete="off">
         </label>
         <label class="field-stack field-wide" for="ssh-host-workspace-root">
-          <span>远端 Workspace 根目录 <small>每行一个，最多 8 个</small></span>
-          <textarea id="ssh-host-workspace-root" maxlength="8192" rows="3" placeholder="~/Workspace&#10;~/workspace-ai" spellcheck="false" autocomplete="off">~/Workspace</textarea>
+          <span>远端 Workspace 根目录 <small>Files 与 Agent 共用；每行一个，最多 8 个</small></span>
+          <textarea id="ssh-host-workspace-root" maxlength="8192" rows="3" placeholder="~/Workspace&#10;~/workspace-ai" required spellcheck="false" autocomplete="off">~/Workspace</textarea>
         </label>
       </div>
       <div class="ssh-host-hint">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 5 3.4 8.4 8 9 4.6-.6 8-4 8-9V7l-8-4Z"/><path d="M12 8v5M12 16h.01"/></svg>
-        首次连接时，SSH 的主机指纹确认或密码提示会直接显示在终端中。推荐提前配置密钥认证。
+        终端首次连接时会显示主机指纹确认或密码提示；Files 浏览与上传使用 Batch Mode，需要提前配置 SSH Key 或 SSH Agent。
       </div>
       <footer class="modal-footer">
         <button class="danger-button" id="delete-ssh-host-button" type="button" hidden>删除服务器</button>
@@ -738,6 +744,59 @@
         <div>
           <button class="ghost-button" id="terminal-copy-select-all-button" type="button">全选</button>
           <button class="primary-button" id="terminal-copy-confirm-button" type="button">复制全部</button>
+        </div>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog class="modal file-upload-modal" id="file-upload-dialog" aria-labelledby="file-upload-title" aria-describedby="file-upload-description">
+    <div class="file-upload-shell">
+      <header class="modal-header">
+        <div>
+          <p class="eyebrow">UPLOAD TO WORKSPACE</p>
+          <h2 id="file-upload-title">上传文件</h2>
+          <p id="file-upload-description">文件会分块传输到当前 Files 目录；SSH 主机将在接收完成后安全写入远端。</p>
+        </div>
+        <button class="icon-button modal-close" id="file-upload-close-button" type="button" aria-label="关闭上传窗口">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </header>
+
+      <section class="file-upload-target" aria-label="上传目标">
+        <span>目标目录</span>
+        <strong id="file-upload-target-host">本机</strong>
+        <code id="file-upload-target-path">~/Workspace</code>
+      </section>
+
+      <div class="file-upload-dropzone" id="file-upload-dropzone" role="button" tabindex="0" aria-label="选择或拖放要上传的文件">
+        <input id="file-upload-input" type="file" multiple hidden>
+        <span class="file-upload-drop-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 20h14"/></svg>
+        </span>
+        <strong>选择文件或拖放到这里</strong>
+        <span>支持多选，文件会依次上传并显示进度</span>
+      </div>
+
+      <ul class="file-upload-list" id="file-upload-list" aria-live="polite"></ul>
+
+      <label class="file-upload-overwrite" for="file-upload-overwrite">
+        <input id="file-upload-overwrite" type="checkbox">
+        <span>
+          <strong>覆盖同名文件</strong>
+          <small>默认保留原文件，并为新文件自动添加编号。</small>
+        </span>
+      </label>
+
+      <div class="file-upload-progress" id="file-upload-progress" role="progressbar" aria-label="上传总进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+        <div><span id="file-upload-progress-bar"></span></div>
+        <p id="file-upload-progress-copy">等待上传</p>
+      </div>
+
+      <footer class="modal-footer">
+        <p id="file-upload-status">请选择至少一个文件。</p>
+        <div>
+          <button class="ghost-button" id="file-upload-cancel-button" type="button">取消</button>
+          <button class="primary-button" id="file-upload-submit-button" type="button">开始上传</button>
         </div>
       </footer>
     </div>

@@ -84,7 +84,7 @@ cd relay
 ./install-tailscale-web.sh
 ```
 
-The web console includes the Agent Dashboard, live pane output, semantic Prompt submission with pasted, dropped, or selected image attachments for Codex, Tab-to-queue for a working Codex agent, confirmed Interrupt, safe workspace-directory browsing, a responsive local/SSH file reader with sanitized Markdown, sandboxed HTML, and syntax highlighting, one-time file downloads, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
+The web console includes the Agent Dashboard, live pane output, semantic Prompt submission with pasted, dropped, or selected image attachments for Codex, Tab-to-queue for a working Codex agent, confirmed Interrupt, safe workspace-directory browsing, a responsive local/SSH file reader with sanitized Markdown, sandboxed HTML, and syntax highlighting, one-time file downloads, multi-file drag-and-drop uploads for Remote Shell-authorized users, and new Codex startup. Tailscale Serve supplies the authenticated user identity; the relay checks an explicit login allowlist and same-origin WebSocket requests. Funnel is never enabled by the installer. See [Tailscale web setup](TAILSCALE_WEB.md).
 
 For full workstation maintenance, enable official Tailscale SSH plus the responsive Web Terminal:
 
@@ -95,7 +95,7 @@ cd relay
 
 Remote Shell provides a real PTY with xterm.js, persistent tmux sessions, Git/system maintenance, mouse support, touch-friendly mobile controls, a dedicated Ctrl+B web tmux prefix that does not conflict with Herdr's Ctrl+X, and allowlisted SSH profiles for LAN servers. Native SSH, ProxyJump, and optional subnet-router workflows remain available even when the browser console is offline. See [Remote Shell and LAN access](REMOTE_SHELL.md).
 
-An SSH profile can also be enabled as a Herdr Agent Source. The dashboard then discovers and controls that host's agents with source-scoped Pane IDs, reports per-host health, browses allowlisted remote Workspace roots, and starts new Codex agents on the selected machine.
+Every authorized SSH profile can expose its allowlisted Workspace roots in Files, even when Agent discovery is disabled. Files can upload selected or dropped files into the current local or SSH directory; uploads are chunked, staged, and atomically committed, with automatic conflict numbering unless overwrite is selected. Enabling a profile as a Herdr Agent Source additionally discovers and controls that host's agents with source-scoped Pane IDs, reports per-host health, and starts new Codex agents on the selected machine.
 
 The Telegram bot consumes the same Relay snapshot, so remote agents automatically appear in `/start`, `/agents`, `/read`, `/reply`, `/send`, `/interrupt`, blocked/completion notifications, and `/digest`. `/status` also reports each local or SSH Agent Source's health and Agent count. Use `/hosts` to select an online local or SSH Agent Source; `/browse`, `/cd`, `/cwd`, and `/codex` then remain scoped to that host, including remote Workspace browsing and Codex startup.
 

@@ -157,9 +157,11 @@ const elements = {
   terminalCopyConfirmButton: byId("terminal-copy-confirm-button"),
   fileSourceSelect: byId("file-source-select"),
   fileSourceStatus: byId("file-source-status"),
+  filePanel: document.querySelector(".file-panel"),
   filePathJumpForm: byId("file-path-jump-form"),
   filePathJumpInput: byId("file-path-jump-input"),
   fileRefreshButton: byId("file-refresh-button"),
+  fileUploadButton: byId("file-upload-button"),
   fileUpButton: byId("file-up-button"),
   fileDirectoryPath: byId("file-directory-path"),
   fileSearchInput: byId("file-search-input"),
@@ -185,6 +187,20 @@ const elements = {
   fileDownloadOnly: byId("file-download-only"),
   fileDownloadOnlyCopy: byId("file-download-only-copy"),
   downloadFileEmptyButton: byId("download-file-empty-button"),
+  fileUploadDialog: byId("file-upload-dialog"),
+  fileUploadCloseButton: byId("file-upload-close-button"),
+  fileUploadTargetHost: byId("file-upload-target-host"),
+  fileUploadTargetPath: byId("file-upload-target-path"),
+  fileUploadDropzone: byId("file-upload-dropzone"),
+  fileUploadInput: byId("file-upload-input"),
+  fileUploadList: byId("file-upload-list"),
+  fileUploadOverwrite: byId("file-upload-overwrite"),
+  fileUploadProgress: byId("file-upload-progress"),
+  fileUploadProgressBar: byId("file-upload-progress-bar"),
+  fileUploadProgressCopy: byId("file-upload-progress-copy"),
+  fileUploadStatus: byId("file-upload-status"),
+  fileUploadCancelButton: byId("file-upload-cancel-button"),
+  fileUploadSubmitButton: byId("file-upload-submit-button"),
   remoteAccessStatus: byId("remote-access-status"),
   openRemoteShellButton: byId("open-remote-shell-button"),
   toastRegion: byId("toast-region"),
@@ -250,6 +266,9 @@ const FILE_HIGHLIGHT_MAX_CHARACTERS = 400_000;
 const MARKDOWN_CODE_HIGHLIGHT_MAX_CHARACTERS = 160_000;
 const WORKSPACE_FILE_REQUEST_TIMEOUT_MS = 30_000;
 const WORKSPACE_FILE_FEATURE_UNAVAILABLE = "Relay 后台尚未加载 Files 协议。请重启 Herdr Relay 服务；仅刷新网页不会更新后台进程。";
+const WORKSPACE_UPLOAD_DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const WORKSPACE_UPLOAD_DEFAULT_CHUNK_BYTES = 512 * 1024;
+const WORKSPACE_UPLOAD_MAX_FILES = 100;
 const HTML_PREVIEW_CSP = "default-src 'none'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'";
 const HTML_PREVIEW_COMMON_STYLE = `
   :root { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -334,6 +353,15 @@ const state = {
   fileReadRequestId: 0,
   fileDownloadPending: false,
   fileDownloadRequestId: 0,
+  fileUploadSupported: false,
+  fileUploadMaxBytes: WORKSPACE_UPLOAD_DEFAULT_MAX_BYTES,
+  fileUploadChunkBytes: WORKSPACE_UPLOAD_DEFAULT_CHUNK_BYTES,
+  fileUploadEntries: [],
+  fileUploadSequence: 0,
+  fileUploadActive: null,
+  fileUploadPending: false,
+  fileUploadTarget: null,
+  fileUploadDragDepth: 0,
   fileReaderRenderedMode: "",
   fileReaderRenderedSource: "",
   fileReaderRenderedPath: "",
@@ -575,6 +603,7 @@ function connect() {
       || state.fileListingPending
       || state.fileReadPending
       || state.fileDownloadPending
+      || state.fileUploadPending
       || state.sshProfilePending;
     state.ws = null;
     state.promptPending = false;
@@ -596,6 +625,12 @@ function connect() {
     state.fileListingPending = false;
     state.fileReadPending = false;
     state.fileDownloadPending = false;
+    if (state.fileUploadPending && state.fileUploadActive) {
+      state.fileUploadActive.entry.status = "error";
+      state.fileUploadActive.entry.error = "Relay 连接中断，请重试";
+    }
+    state.fileUploadPending = false;
+    state.fileUploadActive = null;
     state.fileListingRequestId += 1;
     state.fileReadRequestId += 1;
     state.fileDownloadRequestId += 1;
@@ -608,6 +643,7 @@ function connect() {
     renderDirectoryBrowser();
     renderWorkspaceFileBrowser();
     renderWorkspaceFileViewer();
+    renderWorkspaceUploadDialog();
     renderRemoteAccess();
     renderTerminalConnection();
     setConnection("offline");
@@ -665,6 +701,24 @@ function handleMessage(message) {
     case "workspace_download_ready":
       handleWorkspaceDownloadReady(message);
       break;
+    case "workspace_upload_ready":
+      handleWorkspaceUploadReady(message);
+      break;
+    case "workspace_upload_progress":
+      handleWorkspaceUploadProgress(message);
+      break;
+    case "workspace_upload_committing":
+      handleWorkspaceUploadCommitting(message);
+      break;
+    case "workspace_upload_complete":
+      handleWorkspaceUploadComplete(message);
+      break;
+    case "workspace_upload_cancelled":
+      handleWorkspaceUploadCancelled(message);
+      break;
+    case "workspace_upload_error":
+      handleWorkspaceUploadError(message);
+      break;
     case "workspace_error":
       handleWorkspaceError(message);
       break;
@@ -672,8 +726,7 @@ function handleMessage(message) {
       handleAgentStarted(message);
       break;
     case "terminal_profiles":
-      state.terminalProfiles = Array.isArray(message.profiles) ? message.profiles : [];
-      renderRemoteAccess();
+      handleTerminalProfiles(Array.isArray(message.profiles) ? message.profiles : []);
       break;
     case "terminal_opened":
       handleTerminalOpened(message);
@@ -904,10 +957,26 @@ function handleSession(message) {
   state.session = message;
   state.terminalAuthorized = message.features?.terminal === true;
   state.nativeSshEnabled = message.features?.native_ssh === true;
+  state.fileUploadSupported = message.features?.workspace_upload === true;
+  const uploadMaxBytes = Number(message.limits?.workspace_upload_max_bytes);
+  const uploadChunkBytes = Number(message.limits?.workspace_upload_chunk_bytes);
+  state.fileUploadMaxBytes = Number.isSafeInteger(uploadMaxBytes) && uploadMaxBytes > 0
+    ? uploadMaxBytes
+    : WORKSPACE_UPLOAD_DEFAULT_MAX_BYTES;
+  state.fileUploadChunkBytes = Number.isSafeInteger(uploadChunkBytes) && uploadChunkBytes > 0
+    ? uploadChunkBytes
+    : WORKSPACE_UPLOAD_DEFAULT_CHUNK_BYTES;
   state.machine = message.machine || {};
   state.terminalProfiles = Array.isArray(message.terminal_profiles)
     ? message.terminal_profiles
     : [];
+  if (!fileSourceById(state.fileSource)) {
+    const available = fileSources();
+    state.fileSource = fileSourceById("local")?.id
+      || available.find(fileSourceUsable)?.id
+      || available[0]?.id
+      || "local";
+  }
   if (!workspaceFilesSupported()) {
     state.fileListing = null;
     state.fileListingPending = false;
@@ -958,12 +1027,42 @@ function agentSourceById(sourceId) {
   return state.agentSources.find((source) => source.id === sourceId) || null;
 }
 
+function fileSources() {
+  const sources = new Map(state.agentSources.map((source) => [source.id, source]));
+  if (state.terminalAuthorized) {
+    for (const profile of state.terminalProfiles) {
+      const existing = sources.get(profile.id);
+      sources.set(profile.id, {
+        ...profile,
+        ...existing,
+        terminal_profile: true,
+        can_browse: true,
+        status: existing?.status || "configured",
+        error: existing?.error || "",
+      });
+    }
+  }
+  return [...sources.values()];
+}
+
+function fileSourceById(sourceId) {
+  return fileSources().find((source) => source.id === sourceId) || null;
+}
+
 function agentSourceUsable(source) {
   return source?.status === "online" && source.can_start_agent !== false;
 }
 
 function fileSourceUsable(source) {
-  return source?.status === "online" && source.can_browse !== false;
+  return Boolean(
+    source
+    && source.can_browse !== false
+    && (
+      source.status === "online"
+      || source.status === "configured"
+      || source.terminal_profile === true
+    )
+  );
 }
 
 function workspaceFilesSupported() {
@@ -984,10 +1083,11 @@ function handleAgentSources(sources) {
       || sources[0]?.id
       || "local";
   }
-  if (!agentSourceById(state.fileSource)) {
-    state.fileSource = agentSourceById("local")?.id
-      || sources.find(fileSourceUsable)?.id
-      || sources[0]?.id
+  if (!fileSourceById(state.fileSource)) {
+    const availableFileSources = fileSources();
+    state.fileSource = fileSourceById("local")?.id
+      || availableFileSources.find(fileSourceUsable)?.id
+      || availableFileSources[0]?.id
       || "local";
   }
   renderAgentSourcePicker();
@@ -1003,6 +1103,25 @@ function handleAgentSources(sources) {
   }
   if (state.activeView === "files") ensureWorkspaceFileBrowser();
   refreshActionAvailability();
+}
+
+function handleTerminalProfiles(profiles) {
+  const previousFileSource = state.fileSource;
+  state.terminalProfiles = profiles;
+  const available = fileSources();
+  if (!fileSourceById(state.fileSource)) {
+    state.fileSource = fileSourceById("local")?.id
+      || available.find(fileSourceUsable)?.id
+      || available[0]?.id
+      || "local";
+  }
+  if (previousFileSource !== state.fileSource) {
+    state.fileListing = null;
+    clearWorkspaceFileSelection(false);
+  }
+  renderRemoteAccess();
+  renderFileSourcePicker();
+  if (state.activeView === "files") ensureWorkspaceFileBrowser();
 }
 
 function renderAgentSourcePicker() {
@@ -1031,28 +1150,36 @@ function renderAgentSourcePicker() {
 }
 
 function renderFileSourcePicker() {
+  const sources = fileSources();
   elements.fileSourceSelect.replaceChildren();
-  for (const source of state.agentSources) {
+  for (const source of sources) {
     const option = document.createElement("option");
     option.value = source.id;
     const stateLabel = source.status === "online"
       ? `在线 · ${source.kind === "local" ? "本机" : "SSH"}`
-      : (source.status === "offline" ? "离线" : "检查中");
+      : (source.terminal_profile
+        ? `按需连接 · ${source.kind === "local" ? "本机" : "SSH"}`
+        : (source.status === "offline" ? "离线" : "检查中"));
     option.textContent = `${source.label} · ${stateLabel}`;
-    option.disabled = source.status === "offline";
+    option.disabled = !fileSourceUsable(source);
     elements.fileSourceSelect.append(option);
   }
-  if (agentSourceById(state.fileSource)) elements.fileSourceSelect.value = state.fileSource;
-  const selected = agentSourceById(state.fileSource);
+  if (fileSourceById(state.fileSource)) elements.fileSourceSelect.value = state.fileSource;
+  const selected = fileSourceById(state.fileSource);
   const featureUnavailable = workspaceFilesUnavailable();
-  elements.fileSourceSelect.disabled = !state.agentSources.length
+  elements.fileSourceSelect.disabled = !sources.length
     || state.fileListingPending
     || featureUnavailable;
-  elements.fileSourceStatus.classList.toggle("is-offline", selected?.status === "offline");
+  elements.fileSourceStatus.classList.toggle(
+    "is-offline",
+    selected?.status === "offline" && !selected?.terminal_profile,
+  );
   elements.fileSourceStatus.textContent = featureUnavailable
     ? "Relay 后台需要重启后才能使用 Files"
-    : (selected?.status === "online"
-      ? `${selected.kind === "local" ? "本机" : "SSH"} Workspace 已就绪`
+    : (fileSourceUsable(selected)
+      ? `${selected.kind === "local" ? "本机" : "SSH"} Workspace ${
+        state.fileUploadSupported ? "可浏览与上传" : "可浏览"
+      }`
       : (selected?.error || "正在等待主机健康检查…"));
 }
 
@@ -2861,9 +2988,9 @@ function renderSshProfileForm() {
   elements.deleteSshHostButton.disabled = state.sshProfilePending || !socketReady();
   elements.sshHostAgentEnabled.disabled = state.sshProfilePending;
   elements.sshHostHerdrBin.disabled = state.sshProfilePending || !agentEnabled;
-  elements.sshHostWorkspaceRoot.disabled = state.sshProfilePending || !agentEnabled;
+  elements.sshHostWorkspaceRoot.disabled = state.sshProfilePending;
   elements.sshHostHerdrBin.required = agentEnabled;
-  elements.sshHostWorkspaceRoot.required = agentEnabled;
+  elements.sshHostWorkspaceRoot.required = true;
   elements.saveSshHostButton.textContent = state.sshProfilePending ? "正在保存…" : "保存并连接";
 }
 
@@ -4127,7 +4254,7 @@ function ensureWorkspaceFileBrowser() {
     return;
   }
   if (!workspaceFilesSupported()) return;
-  const source = agentSourceById(state.fileSource);
+  const source = fileSourceById(state.fileSource);
   if (socketReady() && fileSourceUsable(source)) browseWorkspaceFiles(null);
 }
 
@@ -4140,7 +4267,7 @@ function browseWorkspaceFiles(path) {
     }
     return;
   }
-  const source = agentSourceById(state.fileSource);
+  const source = fileSourceById(state.fileSource);
   if (!socketReady() || !fileSourceUsable(source)) return;
   const nextPath = typeof path === "string" ? path : "";
   const navigating = !state.fileListing || nextPath !== state.fileListing.path;
@@ -4170,7 +4297,7 @@ function browseWorkspaceFiles(path) {
 function renderWorkspaceFileBrowser() {
   renderFileSourcePicker();
   const listing = state.fileListing;
-  const sourceUsable = fileSourceUsable(agentSourceById(state.fileSource));
+  const sourceUsable = fileSourceUsable(fileSourceById(state.fileSource));
   const featureUnavailable = workspaceFilesUnavailable();
   elements.fileDirectoryPath.textContent = listing?.display_path || "配置的 Workspace 根目录";
   elements.fileUpButton.disabled = featureUnavailable
@@ -4182,6 +4309,16 @@ function renderWorkspaceFileBrowser() {
     || state.fileListingPending
     || !socketReady()
     || !sourceUsable;
+  elements.fileUploadButton.disabled = featureUnavailable
+    || !state.fileUploadSupported
+    || state.fileListingPending
+    || state.fileUploadPending
+    || !socketReady()
+    || !sourceUsable
+    || !listing?.path;
+  elements.fileUploadButton.title = !state.fileUploadSupported
+    ? "上传需要 Remote Shell 授权"
+    : (!listing?.path ? "先进入一个具体 Workspace 目录" : "上传到当前目录");
   elements.filePathJumpInput.disabled = featureUnavailable || state.fileListingPending;
   elements.filePathJumpForm.querySelector("button").disabled = featureUnavailable
     || state.fileListingPending
@@ -4294,7 +4431,7 @@ function selectWorkspaceFile(entry) {
   state.activeFile = {
     ...entry,
     source_id: state.fileSource,
-    source_label: state.fileListing?.source_label || agentSourceById(state.fileSource)?.label || "本机",
+    source_label: state.fileListing?.source_label || fileSourceById(state.fileSource)?.label || "本机",
     content: null,
     readError: "",
   };
@@ -4322,7 +4459,7 @@ function openWorkspaceFilePath(path) {
     language: html ? "xml" : "",
     downloadable: true,
     source_id: state.fileSource,
-    source_label: agentSourceById(state.fileSource)?.label || "本机",
+    source_label: fileSourceById(state.fileSource)?.label || "本机",
     content: null,
     readError: "",
   };
@@ -4372,6 +4509,474 @@ function formatFileSize(value) {
     unit = units[index];
   }
   return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${unit}`;
+}
+
+function workspaceUploadTargetAvailable() {
+  return Boolean(
+    state.fileUploadSupported
+    && socketReady()
+    && fileSourceUsable(fileSourceById(state.fileSource))
+    && state.fileListing?.path
+  );
+}
+
+function captureWorkspaceUploadTarget() {
+  if (!workspaceUploadTargetAvailable()) return null;
+  const source = fileSourceById(state.fileSource);
+  return {
+    sourceId: state.fileSource,
+    sourceLabel: state.fileListing?.source_label || source?.label || "本机",
+    path: state.fileListing.path,
+    displayPath: state.fileListing.display_path || state.fileListing.path,
+  };
+}
+
+function requestWorkspaceUploadFiles() {
+  if (!state.fileUploadSupported) {
+    showToast("上传未授权", "Files 上传需要 Remote Shell 明确用户权限。", "error");
+    return;
+  }
+  const target = elements.fileUploadDialog.open
+    ? state.fileUploadTarget
+    : captureWorkspaceUploadTarget();
+  if (!target) {
+    showToast("请选择上传目录", "先在 Files 中进入一个具体 Workspace 目录。", "error");
+    return;
+  }
+  if (state.fileUploadPending) return;
+  state.fileUploadTarget = target;
+  elements.fileUploadInput.click();
+}
+
+function workspaceUploadFileAllowed(file) {
+  if (!(file instanceof File)) return "不是可上传的文件";
+  if (!file.name || file.name.startsWith(".") || /[\\/\x00-\x1f\x7f]/u.test(file.name)) {
+    return "隐藏文件或文件名不受支持";
+  }
+  if (!Number.isSafeInteger(file.size) || file.size < 0) return "文件大小无效";
+  if (file.size > state.fileUploadMaxBytes) {
+    return `超过单文件 ${formatFileSize(state.fileUploadMaxBytes)} 限制`;
+  }
+  return "";
+}
+
+function addWorkspaceUploadFiles(files) {
+  const selected = [...(files || [])];
+  if (!selected.length || state.fileUploadPending) return;
+  if (!state.fileUploadSupported || !socketReady()) {
+    showToast("上传暂不可用", "请等待 Relay 重新连接，并确认当前用户拥有 Remote Shell 权限。", "error");
+    return;
+  }
+  if (!state.fileUploadTarget) state.fileUploadTarget = captureWorkspaceUploadTarget();
+  if (!state.fileUploadTarget) {
+    showToast("请选择上传目录", "先在 Files 中进入一个具体 Workspace 目录。", "error");
+    return;
+  }
+
+  let rejected = 0;
+  let firstError = "";
+  const remaining = Math.max(0, WORKSPACE_UPLOAD_MAX_FILES - state.fileUploadEntries.length);
+  for (const file of selected.slice(0, remaining)) {
+    const error = workspaceUploadFileAllowed(file);
+    if (error) {
+      rejected += 1;
+      firstError ||= `${file.name || "未命名文件"}：${error}`;
+      continue;
+    }
+    state.fileUploadSequence += 1;
+    state.fileUploadEntries.push({
+      id: state.fileUploadSequence,
+      file,
+      status: "queued",
+      received: 0,
+      result: null,
+      error: "",
+    });
+  }
+  if (selected.length > remaining) {
+    rejected += selected.length - remaining;
+    firstError ||= `每批最多选择 ${WORKSPACE_UPLOAD_MAX_FILES} 个文件`;
+  }
+  elements.fileUploadInput.value = "";
+  renderWorkspaceUploadDialog();
+  if (!elements.fileUploadDialog.open && state.fileUploadEntries.length) {
+    elements.fileUploadDialog.showModal();
+  }
+  if (rejected) {
+    showToast(
+      `${rejected} 个文件未加入`,
+      firstError || "请检查文件名称和大小。",
+      "error",
+    );
+  }
+}
+
+function workspaceUploadStatusLabel(entry) {
+  if (entry.status === "preparing") return "准备中";
+  if (entry.status === "uploading") return `${Math.round((entry.received / Math.max(1, entry.file.size)) * 100)}%`;
+  if (entry.status === "committing") return "写入中";
+  if (entry.status === "complete") return "已完成";
+  if (entry.status === "error") return "失败";
+  return "等待";
+}
+
+function workspaceUploadProgress() {
+  const total = state.fileUploadEntries.reduce((sum, entry) => sum + entry.file.size, 0);
+  const completed = state.fileUploadEntries.reduce((sum, entry) => {
+    if (entry.status === "complete") return sum + entry.file.size;
+    if (["uploading", "committing"].includes(entry.status)) {
+      return sum + Math.min(entry.received, entry.file.size);
+    }
+    return sum;
+  }, 0);
+  return {total, completed};
+}
+
+function renderWorkspaceUploadDialog() {
+  if (!elements.fileUploadDialog) return;
+  const target = state.fileUploadTarget;
+  elements.fileUploadTargetHost.textContent = target?.sourceLabel || "尚未选择主机";
+  elements.fileUploadTargetPath.textContent = target?.displayPath || "先进入一个具体目录";
+  elements.fileUploadList.replaceChildren(...state.fileUploadEntries.map((entry) => {
+    const item = document.createElement("li");
+    item.className = `file-upload-item is-${entry.status}`;
+    const copy = document.createElement("div");
+    copy.className = "file-upload-item-copy";
+    const name = document.createElement("strong");
+    name.textContent = entry.result?.name || entry.file.name;
+    const detail = document.createElement("span");
+    detail.textContent = entry.error
+      || entry.result?.display_path
+      || formatFileSize(entry.file.size);
+    copy.append(name, detail);
+    const status = document.createElement("span");
+    status.className = "file-upload-item-status";
+    status.textContent = workspaceUploadStatusLabel(entry);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "file-upload-remove";
+    remove.setAttribute("aria-label", `移除 ${entry.file.name}`);
+    remove.textContent = "×";
+    remove.disabled = state.fileUploadPending || entry.status === "complete";
+    remove.addEventListener("click", () => {
+      state.fileUploadEntries = state.fileUploadEntries.filter((itemEntry) => itemEntry.id !== entry.id);
+      renderWorkspaceUploadDialog();
+    });
+    item.append(copy, status, remove);
+    return item;
+  }));
+
+  const {total, completed} = workspaceUploadProgress();
+  const percent = total ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+  const completeCount = state.fileUploadEntries.filter((entry) => entry.status === "complete").length;
+  const errorCount = state.fileUploadEntries.filter((entry) => entry.status === "error").length;
+  const pendingCount = state.fileUploadEntries.length - completeCount;
+  elements.fileUploadProgress.hidden = !total && !state.fileUploadPending;
+  elements.fileUploadProgress.setAttribute("aria-valuenow", String(percent));
+  elements.fileUploadProgressBar.style.width = `${percent}%`;
+  elements.fileUploadProgressCopy.textContent = total
+    ? `${formatFileSize(completed)} / ${formatFileSize(total)} · ${percent}%`
+    : "等待上传";
+  if (state.fileUploadPending && state.fileUploadActive) {
+    const entry = state.fileUploadActive.entry;
+    elements.fileUploadStatus.textContent = entry.status === "committing"
+      ? `正在写入 ${entry.file.name}…`
+      : `正在上传 ${entry.file.name}…`;
+  } else if (completeCount && pendingCount === 0) {
+    elements.fileUploadStatus.textContent = `${completeCount} 个文件已上传到当前目录。`;
+  } else if (errorCount) {
+    elements.fileUploadStatus.textContent = `${errorCount} 个文件失败，可点击重试未完成文件。`;
+  } else if (state.fileUploadEntries.length) {
+    elements.fileUploadStatus.textContent = `${state.fileUploadEntries.length} 个文件，共 ${formatFileSize(total)}。`;
+  } else {
+    elements.fileUploadStatus.textContent = "请选择至少一个文件。";
+  }
+
+  const committing = state.fileUploadActive?.entry.status === "committing";
+  const selectionDisabled = state.fileUploadPending
+    || !state.fileUploadSupported
+    || !socketReady();
+  elements.fileUploadDropzone.classList.toggle("is-disabled", selectionDisabled);
+  elements.fileUploadDropzone.setAttribute("aria-disabled", String(selectionDisabled));
+  elements.fileUploadInput.disabled = selectionDisabled;
+  elements.fileUploadOverwrite.disabled = state.fileUploadPending;
+  elements.fileUploadCloseButton.disabled = committing;
+  elements.fileUploadCancelButton.disabled = committing;
+  elements.fileUploadCancelButton.textContent = state.fileUploadPending ? "取消上传" : "关闭";
+  elements.fileUploadSubmitButton.disabled = state.fileUploadPending
+    || !state.fileUploadSupported
+    || !socketReady()
+    || !target
+    || !state.fileUploadEntries.some((entry) => entry.status !== "complete");
+  const hasIncomplete = state.fileUploadEntries.some((entry) => entry.status !== "complete");
+  elements.fileUploadSubmitButton.textContent = completeCount && !hasIncomplete
+    ? "上传完成"
+    : (errorCount || completeCount ? "上传未完成文件" : "开始上传");
+}
+
+function bytesToBase64(bytes) {
+  const segments = [];
+  const segmentSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += segmentSize) {
+    segments.push(String.fromCharCode(...bytes.subarray(offset, offset + segmentSize)));
+  }
+  return window.btoa(segments.join(""));
+}
+
+function sendWorkspaceUploadStart(entry) {
+  const target = state.fileUploadTarget;
+  if (!target || !socketReady()) return false;
+  state.fileUploadSequence += 1;
+  const uploadId = state.fileUploadSequence;
+  entry.status = "preparing";
+  entry.received = 0;
+  entry.error = "";
+  state.fileUploadActive = {
+    uploadId,
+    entry,
+    offset: 0,
+    sentEnd: 0,
+    chunkBytes: state.fileUploadChunkBytes,
+  };
+  renderWorkspaceUploadDialog();
+  return send({
+    type: "workspace_upload_start",
+    upload_id: uploadId,
+    source_id: target.sourceId,
+    directory: target.path,
+    name: entry.file.name,
+    size: entry.file.size,
+    overwrite: elements.fileUploadOverwrite.checked,
+  });
+}
+
+function startNextWorkspaceUpload() {
+  if (!state.fileUploadPending || state.fileUploadActive) return;
+  const entry = state.fileUploadEntries.find((candidate) => candidate.status === "queued");
+  if (!entry) {
+    state.fileUploadPending = false;
+    renderWorkspaceUploadDialog();
+    renderWorkspaceFileBrowser();
+    const completed = state.fileUploadEntries.filter((candidate) => candidate.status === "complete");
+    if (completed.length) {
+      browseWorkspaceFiles(state.fileUploadTarget?.path || state.fileListing?.path || "");
+      showToast(
+        "文件上传完成",
+        `${completed.length} 个文件已写入 ${state.fileUploadTarget?.displayPath || "当前目录"}。`,
+        "success",
+      );
+    }
+    return;
+  }
+  if (!sendWorkspaceUploadStart(entry)) {
+    entry.status = "error";
+    entry.error = "Relay 连接不可用";
+    state.fileUploadActive = null;
+    state.fileUploadPending = false;
+    renderWorkspaceUploadDialog();
+  }
+}
+
+function startWorkspaceUpload() {
+  if (state.fileUploadPending) return;
+  if (
+    !state.fileUploadSupported
+    || !socketReady()
+    || !state.fileUploadTarget
+    || !fileSourceUsable(fileSourceById(state.fileUploadTarget.sourceId))
+  ) {
+    showToast("上传目标不可用", "请确认 Relay 已连接，并重新选择 Files 主机和目录。", "error");
+    return;
+  }
+  for (const entry of state.fileUploadEntries) {
+    if (entry.status === "error") {
+      entry.status = "queued";
+      entry.received = 0;
+      entry.error = "";
+    }
+  }
+  if (!state.fileUploadEntries.some((entry) => entry.status === "queued")) return;
+  state.fileUploadPending = true;
+  state.fileUploadActive = null;
+  renderWorkspaceUploadDialog();
+  renderWorkspaceFileBrowser();
+  startNextWorkspaceUpload();
+}
+
+async function sendNextWorkspaceUploadChunk() {
+  const active = state.fileUploadActive;
+  if (!state.fileUploadPending || !active) return;
+  const {entry, uploadId} = active;
+  if (active.offset >= entry.file.size) {
+    send({type: "workspace_upload_finish", upload_id: uploadId});
+    return;
+  }
+  const end = Math.min(entry.file.size, active.offset + active.chunkBytes);
+  let bytes;
+  try {
+    bytes = new Uint8Array(await entry.file.slice(active.offset, end).arrayBuffer());
+  } catch (_) {
+    abortActiveWorkspaceUpload({upload_id: uploadId, message: "浏览器无法读取所选文件"});
+    return;
+  }
+  if (!state.fileUploadPending || state.fileUploadActive?.uploadId !== uploadId) return;
+  entry.status = "uploading";
+  active.sentEnd = end;
+  renderWorkspaceUploadDialog();
+  if (!send({
+    type: "workspace_upload_chunk",
+    upload_id: uploadId,
+    offset: active.offset,
+    data: bytesToBase64(bytes),
+  })) {
+    abortActiveWorkspaceUpload({upload_id: uploadId, message: "文件分块发送失败"});
+  }
+}
+
+function handleWorkspaceUploadReady(message) {
+  const active = state.fileUploadActive;
+  if (!active || Number(message.upload_id) !== active.uploadId) return;
+  const serverChunkBytes = Number(message.chunk_bytes);
+  if (Number.isSafeInteger(serverChunkBytes) && serverChunkBytes > 0) {
+    active.chunkBytes = Math.min(serverChunkBytes, state.fileUploadChunkBytes);
+  }
+  if (active.entry.file.size === 0) {
+    send({type: "workspace_upload_finish", upload_id: active.uploadId});
+    return;
+  }
+  sendNextWorkspaceUploadChunk();
+}
+
+function handleWorkspaceUploadProgress(message) {
+  const active = state.fileUploadActive;
+  if (!active || Number(message.upload_id) !== active.uploadId) return;
+  const received = Number(message.received);
+  if (
+    !Number.isSafeInteger(received)
+    || received <= active.offset
+    || received !== active.sentEnd
+    || received > active.entry.file.size
+  ) {
+    abortActiveWorkspaceUpload({
+      upload_id: active.uploadId,
+      message: "Relay 返回了无效的上传进度",
+    });
+    return;
+  }
+  active.offset = received;
+  active.entry.received = received;
+  renderWorkspaceUploadDialog();
+  sendNextWorkspaceUploadChunk();
+}
+
+function handleWorkspaceUploadCommitting(message) {
+  const active = state.fileUploadActive;
+  if (!active || Number(message.upload_id) !== active.uploadId) return;
+  active.entry.status = "committing";
+  active.entry.received = active.entry.file.size;
+  renderWorkspaceUploadDialog();
+}
+
+function handleWorkspaceUploadComplete(message) {
+  const active = state.fileUploadActive;
+  if (!active || Number(message.upload_id) !== active.uploadId) return;
+  active.entry.status = "complete";
+  active.entry.received = active.entry.file.size;
+  active.entry.result = {
+    name: String(message.name || active.entry.file.name),
+    path: String(message.path || ""),
+    display_path: String(message.display_path || message.path || ""),
+  };
+  state.fileUploadActive = null;
+  renderWorkspaceUploadDialog();
+  startNextWorkspaceUpload();
+}
+
+function handleWorkspaceUploadError(message) {
+  const active = state.fileUploadActive;
+  const uploadId = Number(message.upload_id);
+  if (active && uploadId && uploadId !== active.uploadId) return;
+  if (active) {
+    active.entry.status = "error";
+    active.entry.error = message.message || "上传失败";
+  }
+  state.fileUploadActive = null;
+  state.fileUploadPending = false;
+  renderWorkspaceUploadDialog();
+  renderWorkspaceFileBrowser();
+  showToast("文件上传失败", message.message || "请检查目标目录和主机连接后重试。", "error");
+}
+
+function abortActiveWorkspaceUpload(message) {
+  const active = state.fileUploadActive;
+  if (active && socketReady()) {
+    send({type: "workspace_upload_cancel", upload_id: active.uploadId});
+  }
+  handleWorkspaceUploadError(message);
+}
+
+function handleWorkspaceUploadCancelled(message) {
+  const active = state.fileUploadActive;
+  if (active && Number(message.upload_id) !== active.uploadId) return;
+  if (active) {
+    active.entry.status = "error";
+    active.entry.error = "已取消";
+  }
+  state.fileUploadActive = null;
+  state.fileUploadPending = false;
+  renderWorkspaceUploadDialog();
+  renderWorkspaceFileBrowser();
+}
+
+function cancelWorkspaceUpload() {
+  const active = state.fileUploadActive;
+  if (!state.fileUploadPending || !active) {
+    elements.fileUploadDialog.close();
+    return;
+  }
+  if (active.entry.status === "committing") {
+    showToast("正在写入目标主机", "远端原子写入完成前不能中断，请稍候。", "error");
+    return;
+  }
+  send({type: "workspace_upload_cancel", upload_id: active.uploadId});
+  active.entry.status = "error";
+  active.entry.error = "已取消";
+  state.fileUploadActive = null;
+  state.fileUploadPending = false;
+  renderWorkspaceUploadDialog();
+  renderWorkspaceFileBrowser();
+}
+
+function closeWorkspaceUploadDialog() {
+  if (state.fileUploadPending) {
+    cancelWorkspaceUpload();
+    return;
+  }
+  elements.fileUploadDialog.close();
+}
+
+function resetWorkspaceUploadDialog() {
+  if (state.fileUploadPending) return;
+  state.fileUploadEntries = [];
+  state.fileUploadActive = null;
+  state.fileUploadTarget = null;
+  elements.fileUploadInput.value = "";
+  elements.fileUploadOverwrite.checked = false;
+  renderWorkspaceUploadDialog();
+}
+
+function workspaceDragContainsFiles(event) {
+  return [...(event.dataTransfer?.types || [])].includes("Files");
+}
+
+function handleWorkspaceUploadDrop(event) {
+  if (!workspaceDragContainsFiles(event)) return;
+  event.preventDefault();
+  state.fileUploadDragDepth = 0;
+  document.querySelector(".file-panel")?.classList.remove("is-upload-dragging");
+  elements.fileUploadDropzone.classList.remove("is-dragging");
+  if (!state.fileUploadTarget) state.fileUploadTarget = captureWorkspaceUploadTarget();
+  addWorkspaceUploadFiles(event.dataTransfer?.files || []);
 }
 
 function setWorkspaceReaderStatus(title, detail, spinning = true) {
@@ -4778,7 +5383,7 @@ function startAgent() {
 function refreshActionAvailability() {
   const connected = socketReady();
   const selectedSource = agentSourceById(state.selectedSource);
-  const selectedFileSource = agentSourceById(state.fileSource);
+  const selectedFileSource = fileSourceById(state.fileSource);
   elements.newAgentButton.disabled = !connected;
   elements.emptyNewAgent.disabled = !connected;
   elements.refreshOutputButton.disabled = !connected || !state.activePane;
@@ -5082,6 +5687,78 @@ function bindEvents() {
   elements.copyFileButton.addEventListener("click", copyWorkspaceFile);
   elements.downloadFileButton.addEventListener("click", downloadWorkspaceFile);
   elements.downloadFileEmptyButton.addEventListener("click", downloadWorkspaceFile);
+  elements.fileUploadButton.addEventListener("click", requestWorkspaceUploadFiles);
+  elements.fileUploadInput.addEventListener("change", () => {
+    addWorkspaceUploadFiles(elements.fileUploadInput.files);
+  });
+  elements.fileUploadDropzone.addEventListener("click", () => {
+    if (!state.fileUploadPending) requestWorkspaceUploadFiles();
+  });
+  elements.fileUploadDropzone.addEventListener("keydown", (event) => {
+    if (!["Enter", " "].includes(event.key) || state.fileUploadPending) return;
+    event.preventDefault();
+    requestWorkspaceUploadFiles();
+  });
+  elements.fileUploadDropzone.addEventListener("dragenter", (event) => {
+    if (!workspaceDragContainsFiles(event) || state.fileUploadPending) return;
+    event.preventDefault();
+    event.stopPropagation();
+    elements.fileUploadDropzone.classList.add("is-dragging");
+  });
+  elements.fileUploadDropzone.addEventListener("dragover", (event) => {
+    if (!workspaceDragContainsFiles(event) || state.fileUploadPending) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  });
+  elements.fileUploadDropzone.addEventListener("dragleave", (event) => {
+    if (!elements.fileUploadDropzone.contains(event.relatedTarget)) {
+      elements.fileUploadDropzone.classList.remove("is-dragging");
+    }
+  });
+  elements.fileUploadDropzone.addEventListener("drop", (event) => {
+    event.stopPropagation();
+    handleWorkspaceUploadDrop(event);
+  });
+  elements.filePanel.addEventListener("dragenter", (event) => {
+    if (!workspaceDragContainsFiles(event)) return;
+    event.preventDefault();
+    state.fileUploadDragDepth += 1;
+    if (workspaceUploadTargetAvailable() && !state.fileUploadPending) {
+      elements.filePanel.classList.add("is-upload-dragging");
+    }
+  });
+  elements.filePanel.addEventListener("dragover", (event) => {
+    if (!workspaceDragContainsFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = workspaceUploadTargetAvailable() && !state.fileUploadPending
+        ? "copy"
+        : "none";
+    }
+  });
+  elements.filePanel.addEventListener("dragleave", (event) => {
+    if (!state.fileUploadDragDepth) return;
+    state.fileUploadDragDepth = Math.max(0, state.fileUploadDragDepth - 1);
+    if (!state.fileUploadDragDepth || !elements.filePanel.contains(event.relatedTarget)) {
+      state.fileUploadDragDepth = 0;
+      elements.filePanel.classList.remove("is-upload-dragging");
+    }
+  });
+  elements.filePanel.addEventListener("drop", (event) => {
+    if (!workspaceDragContainsFiles(event)) return;
+    state.fileUploadTarget = captureWorkspaceUploadTarget();
+    handleWorkspaceUploadDrop(event);
+  });
+  elements.fileUploadOverwrite.addEventListener("change", renderWorkspaceUploadDialog);
+  elements.fileUploadSubmitButton.addEventListener("click", startWorkspaceUpload);
+  elements.fileUploadCancelButton.addEventListener("click", cancelWorkspaceUpload);
+  elements.fileUploadCloseButton.addEventListener("click", closeWorkspaceUploadDialog);
+  elements.fileUploadDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeWorkspaceUploadDialog();
+  });
+  elements.fileUploadDialog.addEventListener("close", resetWorkspaceUploadDialog);
 
   elements.themeSelect.addEventListener("change", () => applyTheme(elements.themeSelect.value));
   if (typeof systemDarkThemeQuery.addEventListener === "function") {
@@ -5168,7 +5845,9 @@ function bindEvents() {
   });
   document.querySelectorAll("dialog").forEach((dialog) => {
     dialog.addEventListener("click", (event) => {
-      if (event.target === dialog) dialog.close();
+      if (event.target !== dialog) return;
+      if (dialog === elements.fileUploadDialog) closeWorkspaceUploadDialog();
+      else dialog.close();
     });
   });
 
